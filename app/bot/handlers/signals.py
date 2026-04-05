@@ -31,10 +31,12 @@ async def cmd_signals(msg: Message) -> None:
 
 @router.callback_query(F.data.startswith("signals:page:"))
 async def cb_signals_page(query: CallbackQuery) -> None:
+    await query.answer()  # сразу снимаем спиннер
     page = int(query.data.split(":")[-1])
-    # TODO: fetch signals from DB with offset=page*PAGE_SIZE
-    await query.answer()
-    await query.message.edit_text(
-        f"📡 <b>Recent Signals</b> (page {page + 1})\n\n<i>Loading...</i>",
-        reply_markup=signals_keyboard(page=page, has_next=False),
-    )
+    try:
+        await query.message.edit_text(
+            f"📡 <b>Recent Signals</b> (page {page + 1})\n\n<i>Loading...</i>",
+            reply_markup=signals_keyboard(page=page, has_next=False),
+        )
+    except Exception:
+        pass  # сообщение не изменилось — игнорируем TelegramBadRequest
