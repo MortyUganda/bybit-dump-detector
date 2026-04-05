@@ -5,6 +5,7 @@ Registers all routers (handlers) and middleware.
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.client.default import DefaultBotProperties
 
 from app.bot.handlers import (
     commands_router,
@@ -21,7 +22,10 @@ settings = get_settings()
 
 
 def create_bot() -> Bot:
-    return Bot(token=settings.telegram_bot_token, parse_mode=ParseMode.HTML)
+    return Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
 
 
 def create_dispatcher(redis_url: str) -> Dispatcher:
