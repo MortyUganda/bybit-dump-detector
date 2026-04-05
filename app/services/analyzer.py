@@ -1,0 +1,250 @@
+"""
+Analyzer Service — scoring loop and overvalued ranking.
+
+Runs on a fixed interval (default: 30s).
+For each active symbol:
+  1. Pull latest CoinFeatures from ingestion service
+  2. Compute RiskScore via ScoringEngine
+  3. If score >= threshold AND new signal: persist to DB + trigger alert
+  4. Maintain ranked overvalued list in Redis
+
+Cooldown enforcement:
+  - Redis key: cooldown:{symbol}:{signal_type}
+  - TTL = alert_cooldown_minutes * 60
+  - If key exists: skip alert (but still score)
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from datetime import datetime, timezone
+
+import redis.asyncio as aioredis
+
+from app.config import get_settings
+from app.scoring.engine import RiskScore, ScoringEngine, SignalType
+from app.services.ingestion import IngestionService
+from app.utils.logging import get_logger
+from app.utils.time_utils import utcnow
+
+logger = get_logger(__name__)
+settings = get_settings()
+
+REDIS_SCORE_KEY = "score:{symbol}"
+REDIS_SCORE_TTL = 300
+REDIS_COOLDOWN_KEY = "cooldown:{symbol}:{signal_type}"
+REDIS_OVERVALUED_KEY = "overvalued:latest"
+REDIS_OVERVALUED_TTL = 600  # 10 min
+
+
+class AnalyzerService:
+    """
+    Periodic scoring loop.
+    """
+
+    def __init__(
+        self,
+        ingestion: IngestionService,
+        redis: aioredis.Redis,
+        db_session_factory=None,
+        alert_callback=None,  # async (symbol, risk_score) -> None
+    ) -> None:
+        self._ingestion = ingestion
+        self._redis = redis
+        self._db = db_session_factory
+        self._alert_callback = alert_callback
+        self._scoring = ScoringEngine()
+        self._running = False
+        self._cycle_count = 0
+
+    async def start(self) -> None:
+        self._running = True
+        logger.info("Analyzer service started")
+        asyncio.create_task(self._scoring_loop())
+        asyncio.create_task(self._overvalued_loop())
+
+    async def stop(self) -> None:
+        self._running = False
+
+    # ── Main scoring loop ─────────────────────────────────────────
+
+    async def _scoring_loop(self) -> None:
+        """Score all symbols every 30 seconds."""
+        while self._running:
+            try:
+                await self._run_scoring_cycle()
+            except Exception as e:
+                logger.error("Scoring cycle error", error=str(e))
+            await asyncio.sleep(30)
+
+    async def _run_scoring_cycle(self) -> None:
+        self._cycle_count += 1
+        features_list = await self._ingestion.get_all_features()
+
+        if not features_list:
+            logger.debug("No features available yet")
+            return
+
+        scored = []
+        for features in features_list:
+            try:
+                risk_score = self._scoring.score(features)
+                scored.append(risk_score)
+
+                # Persist score to Redis
+                key = REDIS_SCORE_KEY.format(symbol=features.symbol)
+                await self._redis.setex(key, REDIS_SCORE_TTL, json.dumps(risk_score.to_dict()))
+
+                # Check if alert should fire
+                if risk_score.is_actionable and risk_score.signal_type:
+                    await self._maybe_alert(risk_score)
+
+            except Exception as e:
+                logger.debug("Scoring error", symbol=features.symbol, error=str(e))
+
+        logger.info(
+            "Scoring cycle complete",
+            cycle=self._cycle_count,
+            scored=len(scored),
+            high_risk=sum(1 for s in scored if s.score >= settings.score_alert_threshold),
+        )
+
+    # ── Alert dispatch with cooldown ──────────────────────────────
+
+    async def _maybe_alert(self, risk_score: RiskScore) -> None:
+        symbol = risk_score.symbol
+        signal_type = risk_score.signal_type.value
+
+        cooldown_key = REDIS_COOLDOWN_KEY.format(symbol=symbol, signal_type=signal_type)
+
+        # Check cooldown
+        existing = await self._redis.get(cooldown_key)
+        if existing:
+            logger.debug("Alert suppressed by cooldown", symbol=symbol, signal=signal_type)
+            return
+
+        # Set cooldown
+        ttl = settings.alert_cooldown_minutes * 60
+        await self._redis.setex(cooldown_key, ttl, "1")
+
+        # Persist signal to DB
+        if self._db:
+            await self._persist_signal(risk_score)
+
+        # Fire alert callback (bot sends message)
+        if self._alert_callback:
+            try:
+                await self._alert_callback(symbol, risk_score)
+            except Exception as e:
+                logger.error("Alert callback failed", symbol=symbol, error=str(e))
+
+        logger.info(
+            "Alert fired",
+            symbol=symbol,
+            score=risk_score.score,
+            signal=signal_type,
+            level=risk_score.level.value,
+        )
+
+    async def _persist_signal(self, risk_score: RiskScore) -> None:
+        """Save signal to PostgreSQL."""
+        try:
+            from app.db.models.signal import Signal
+            from app.db.session import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as session:
+                signal = Signal(
+                    symbol=risk_score.symbol,
+                    signal_type=risk_score.signal_type.value if risk_score.signal_type else "none",
+                    risk_level=risk_score.level.value,
+                    score=risk_score.score,
+                    triggered_count=risk_score.triggered_count,
+                    top_reasons=",".join(risk_score.top_reasons),
+                    factors_json=risk_score.to_dict()["factors"],
+                    price_at_signal=risk_score.features_snapshot.last_price if risk_score.features_snapshot else 0.0,
+                    alert_sent=True,
+                    ts=utcnow(),
+                )
+                session.add(signal)
+                await session.commit()
+        except Exception as e:
+            logger.error("DB signal persist failed", error=str(e))
+
+    # ── Overvalued ranking ────────────────────────────────────────
+
+    async def _overvalued_loop(self) -> None:
+        """Rebuild overvalued ranking every 5 minutes."""
+        while self._running:
+            try:
+                await self._rebuild_overvalued()
+            except Exception as e:
+                logger.error("Overvalued rebuild error", error=str(e))
+            await asyncio.sleep(300)
+
+    async def _rebuild_overvalued(self) -> None:
+        """
+        Fetch all current scores from Redis, rank, and write top N to Redis.
+        Exclude coins with score < 25 (LOW risk).
+        """
+        features_list = await self._ingestion.get_all_features()
+        scored = []
+
+        for features in features_list:
+            try:
+                risk_score = self._scoring.score(features)
+                if risk_score.score >= 25:  # Only include MODERATE+
+                    scored.append({
+                        "symbol": features.symbol,
+                        "score": risk_score.score,
+                        "risk_level": risk_score.level.value,
+                        "price": features.last_price,
+                        "price_change_24h_pct": 0.0,  # TODO: fill from universe meta
+                        "volume_24h_usdt": features.volume_24h_usdt,
+                        "rsi": features.rsi_14_1m,
+                        "vwap_extension_pct": features.vwap_extension_pct,
+                        "top_reasons": risk_score.top_reasons,
+                        "signal_type": risk_score.signal_type.value if risk_score.signal_type else None,
+                    })
+            except Exception:
+                pass
+
+        # Sort by score descending, take top N
+        scored.sort(key=lambda x: -x["score"])
+        top_n = scored[: settings.overvalued_top_n]
+
+        await self._redis.setex(
+            REDIS_OVERVALUED_KEY, REDIS_OVERVALUED_TTL, json.dumps(top_n)
+        )
+
+        # Persist snapshot to DB
+        if top_n and self._db:
+            await self._persist_overvalued_snapshot(top_n)
+
+        logger.info("Overvalued ranking rebuilt", total_scored=len(scored), top_n=len(top_n))
+
+    async def _persist_overvalued_snapshot(self, items: list[dict]) -> None:
+        """Save ranked snapshot to PostgreSQL."""
+        try:
+            from app.db.models.overvalued import OvervaluedSnapshot
+            from app.db.session import AsyncSessionLocal
+
+            batch_id = str(uuid.uuid4())
+            async with AsyncSessionLocal() as session:
+                for rank, item in enumerate(items, 1):
+                    row = OvervaluedSnapshot(
+                        batch_id=batch_id,
+                        rank=rank,
+                        symbol=item["symbol"],
+                        score=item["score"],
+                        risk_level=item["risk_level"],
+                        price=item["price"],
+                        volume_24h_usdt=item["volume_24h_usdt"],
+                        rsi=item["rsi"],
+                        vwap_extension_pct=item["vwap_extension_pct"],
+                        top_reasons=",".join(item.get("top_reasons", [])),
+                    )
+                    session.add(row)
+                await session.commit()
+        except Exception as e:
+            logger.error("DB overvalued persist failed", error=str(e))
