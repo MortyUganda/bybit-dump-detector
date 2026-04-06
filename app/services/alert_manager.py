@@ -11,9 +11,9 @@ Flow:
 from __future__ import annotations
 
 from aiogram import Bot
-
+from app.bot.handlers.signals import add_signal
 from app.bot.formatters import format_risk_alert
-from app.bot.keyboards import coin_detail_keyboard
+from app.bot.keyboards.paper_trading import alert_action_keyboard
 from app.config import get_settings
 from app.scoring.engine import RiskScore
 from app.utils.logging import get_logger
@@ -37,21 +37,27 @@ class AlertManager:
     def __init__(self, bot: Bot) -> None:
         self._bot = bot
 
-    async def send_alert(self, symbol: str, risk_score: RiskScore) -> None:
-        """
-        Broadcast alert to all eligible users.
-        In MVP: sends to all allowed_user_ids from settings.
-        Week 3: extend to per-user DB settings.
-        """
-        text = format_risk_alert(risk_score)
-        keyboard = coin_detail_keyboard(symbol)
 
-        # MVP: broadcast to all configured admin users
+    async def send_alert(self, symbol: str, risk_score: RiskScore) -> None:
+        text = format_risk_alert(risk_score)
+        keyboard = alert_action_keyboard(symbol)
+
         user_ids = settings.allowed_user_ids
 
         if not user_ids:
             logger.warning("No user IDs configured — alert not sent", symbol=symbol)
             return
+
+        # Сохраняем в историю сигналов
+        price = None
+        if risk_score.features_snapshot:
+            price = risk_score.features_snapshot.last_price
+        add_signal(
+            symbol=symbol,
+            signal_type=risk_score.signal_type.value if risk_score.signal_type else "unknown",
+            score=risk_score.score,
+            price=price,
+        )
 
         for user_id in user_ids:
             try:
@@ -69,6 +75,10 @@ class AlertManager:
         """Send a plain text broadcast to all admin users."""
         for user_id in settings.allowed_user_ids:
             try:
-                await self._bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                await self._bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode="HTML",
+                )
             except Exception as e:
                 logger.warning("Broadcast failed", user_id=user_id, error=str(e))

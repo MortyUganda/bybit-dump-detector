@@ -1,6 +1,7 @@
 """Inline and reply keyboards for the bot."""
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton  # noqa: I001
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -56,6 +57,25 @@ def coin_detail_keyboard(symbol: str) -> InlineKeyboardMarkup:
         ],
     ])
 
+def main_reply_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📡 Сигналы"),
+                KeyboardButton(text="📊 Переоценённые"),
+            ],
+            [
+                KeyboardButton(text="⭐ Watchlist"),
+                KeyboardButton(text="📋 Сделки"),
+            ],
+            [
+                KeyboardButton(text="⚙️ Статус"),
+                KeyboardButton(text="❓ Помощь"),
+            ],
+        ],
+        resize_keyboard=True,
+        persistent=True,  # не скрывается
+    )
 
 def risk_level_emoji(level: str) -> str:
     return {

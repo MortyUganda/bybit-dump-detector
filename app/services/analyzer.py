@@ -13,17 +13,17 @@ Cooldown enforcement:
   - TTL = alert_cooldown_minutes * 60
   - If key exists: skip alert (but still score)
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 
 from app.config import get_settings
-from app.scoring.engine import RiskScore, ScoringEngine, SignalType
+from app.scoring.engine import RiskScore, ScoringEngine
 from app.services.ingestion import IngestionService
 from app.utils.logging import get_logger
 from app.utils.time_utils import utcnow
@@ -162,7 +162,9 @@ class AnalyzerService:
                     triggered_count=risk_score.triggered_count,
                     top_reasons=",".join(risk_score.top_reasons),
                     factors_json=risk_score.to_dict()["factors"],
-                    price_at_signal=risk_score.features_snapshot.last_price if risk_score.features_snapshot else 0.0,
+                    price_at_signal=risk_score.features_snapshot.last_price
+                    if risk_score.features_snapshot
+                    else 0.0,
                     alert_sent=True,
                     ts=utcnow(),
                 )
@@ -183,29 +185,43 @@ class AnalyzerService:
             await asyncio.sleep(300)
 
     async def _rebuild_overvalued(self) -> None:
-        """
-        Fetch all current scores from Redis, rank, and write top N to Redis.
-        Exclude coins with score < 25 (LOW risk).
-        """
         features_list = await self._ingestion.get_all_features()
         scored = []
+
+        # Получаем 24h тикеры одним запросом для всех монет
+        try:
+            tickers_list = await self._ingestion._rest.get_tickers(category="spot")
+            tickers = {t["symbol"]: t for t in tickers_list}
+        except Exception as e:
+            logger.warning("Failed to fetch tickers for 24h change", error=str(e))
+            tickers = {}
 
         for features in features_list:
             try:
                 risk_score = self._scoring.score(features)
-                if risk_score.score >= 25:  # Only include MODERATE+
-                    scored.append({
-                        "symbol": features.symbol,
-                        "score": risk_score.score,
-                        "risk_level": risk_score.level.value,
-                        "price": features.last_price,
-                        "price_change_24h_pct": 0.0,  # TODO: fill from universe meta
-                        "volume_24h_usdt": features.volume_24h_usdt,
-                        "rsi": features.rsi_14_1m,
-                        "vwap_extension_pct": features.vwap_extension_pct,
-                        "top_reasons": risk_score.top_reasons,
-                        "signal_type": risk_score.signal_type.value if risk_score.signal_type else None,
-                    })
+                if risk_score.score >= 25:
+                    ticker = tickers.get(features.symbol, {})
+                    try:
+                        price_change_24h = float(ticker.get("price24hPcnt", 0.0)) * 100
+                    except (ValueError, TypeError):
+                        price_change_24h = 0.0
+
+                    scored.append(
+                        {
+                            "symbol": features.symbol,
+                            "score": risk_score.score,
+                            "risk_level": risk_score.level.value,
+                            "price": features.last_price,
+                            "price_change_24h_pct": price_change_24h,  # ← реальное значение
+                            "volume_24h_usdt": features.volume_24h_usdt,
+                            "rsi": features.rsi_14_1m,
+                            "vwap_extension_pct": features.vwap_extension_pct,
+                            "top_reasons": risk_score.top_reasons,
+                            "signal_type": risk_score.signal_type.value
+                            if risk_score.signal_type
+                            else None,
+                        }
+                    )
             except Exception:
                 pass
 
@@ -213,15 +229,99 @@ class AnalyzerService:
         scored.sort(key=lambda x: -x["score"])
         top_n = scored[: settings.overvalued_top_n]
 
-        await self._redis.setex(
-            REDIS_OVERVALUED_KEY, REDIS_OVERVALUED_TTL, json.dumps(top_n)
-        )
+        # Сравниваем с предыдущим списком
+        prev_raw = await self._redis.get(REDIS_OVERVALUED_KEY)
+        prev_symbols: set[str] = set()
+        if prev_raw:
+            try:
+                prev_symbols = {item["symbol"] for item in json.loads(prev_raw)}
+            except Exception:
+                pass
+
+        new_symbols = {item["symbol"] for item in top_n}
+
+        # Сохраняем новый список
+        await self._redis.setex(REDIS_OVERVALUED_KEY, REDIS_OVERVALUED_TTL, json.dumps(top_n))
+
+        # Если появились новые монеты — уведомляем
+        added_symbols = new_symbols - prev_symbols
+        if added_symbols and top_n:
+            await self._broadcast_overvalued(top_n, added_symbols)
 
         # Persist snapshot to DB
         if top_n and self._db:
             await self._persist_overvalued_snapshot(top_n)
 
-        logger.info("Overvalued ranking rebuilt", total_scored=len(scored), top_n=len(top_n))
+        logger.info(
+            "Overvalued ranking rebuilt",
+            total_scored=len(scored),
+            top_n=len(top_n),
+            new_entries=len(added_symbols),
+        )
+
+    async def _broadcast_overvalued(
+        self,
+        items: list[dict],
+        new_symbols: set[str],
+    ) -> None:
+        """
+        Отправить обновлённый список переоценённых монет всем пользователям из Redis.
+        """
+        if not self._alert_callback:
+            return
+
+        try:
+            from app.bot.formatters import format_overvalued_list
+            from app.bot.handlers.overvalued import overvalued_keyboard
+            from app.bot.user_store import get_active_users
+
+            # Получаем пользователей из Redis
+            user_ids = await get_active_users(self._redis)
+
+            if not user_ids:
+                logger.warning("No active users for overvalued broadcast")
+                return
+
+            new_list = ", ".join(f"<b>{s}</b>" for s in sorted(new_symbols))
+            text = (
+                f"📊 <b>Список переоценённых монет обновился</b>\n"
+                f"🆕 Новые монеты: {new_list}\n\n" + format_overvalued_list(items)
+            )
+            keyboard = overvalued_keyboard()
+
+            # Получаем бот через alert_callback
+            if not hasattr(self._alert_callback, "__self__"):
+                return
+
+            alert_manager = self._alert_callback.__self__
+            if not hasattr(alert_manager, "_bot"):
+                return
+
+            bot = alert_manager._bot
+
+            for user_id in user_ids:
+                try:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Overvalued broadcast failed",
+                        user_id=user_id,
+                        error=str(e),
+                    )
+
+            logger.info(
+                "Overvalued broadcast sent",
+                users=len(user_ids),
+                new_symbols=list(new_symbols),
+            )
+
+        except Exception as e:
+            logger.error("Overvalued broadcast error", error=str(e))
 
     async def _persist_overvalued_snapshot(self, items: list[dict]) -> None:
         """Save ranked snapshot to PostgreSQL."""

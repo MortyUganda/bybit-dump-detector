@@ -1,33 +1,33 @@
 """
 Message formatters — convert domain objects to Telegram HTML strings.
 """
+
 from __future__ import annotations
 
-from app.scoring.engine import RiskScore, SignalType
 from app.analytics.features import CoinFeatures
 from app.bot.keyboards import risk_level_emoji, signal_type_emoji
-
+from app.scoring.engine import RiskScore, SignalType
 
 SIGNAL_TYPE_LABEL = {
     SignalType.EARLY_WARNING: "⚠️ Early Warning",
-    SignalType.OVERHEATED:    "🔥 Overheated",
+    SignalType.OVERHEATED: "🔥 Overheated",
     SignalType.REVERSAL_RISK: "⬇️ Reversal Risk",
-    SignalType.DUMP_STARTED:  "💥 Dump Started",
+    SignalType.DUMP_STARTED: "💥 Dump Started",
 }
 
 FACTOR_LABELS = {
-    "rsi":                "RSI overbought",
-    "vwap_extension":     "Price above VWAP",
-    "volume_zscore":      "Volume spike",
-    "trade_imbalance":    "Buy dominance",
-    "large_buy_cluster":  "Large buy cluster",
+    "rsi": "RSI overbought",
+    "vwap_extension": "Price above VWAP",
+    "volume_zscore": "Volume spike",
+    "trade_imbalance": "Buy dominance",
+    "large_buy_cluster": "Large buy cluster",
     "price_acceleration": "Price acceleration",
     "consecutive_greens": "Consecutive green candles",
-    "ob_bid_thinning":    "Bid depth thinning",
-    "spread_expansion":   "Spread expansion",
-    "momentum_loss":      "Momentum loss",
-    "upper_wick":         "Upper wick rejection",
-    "funding_rate":       "High funding rate",
+    "ob_bid_thinning": "Bid depth thinning",
+    "spread_expansion": "Spread expansion",
+    "momentum_loss": "Momentum loss",
+    "upper_wick": "Upper wick rejection",
+    "funding_rate": "High funding rate",
 }
 
 
@@ -62,9 +62,10 @@ def format_risk_alert(score: RiskScore) -> str:
 
 def format_overvalued_list(items: list[dict], page: int = 0, total: int = 0) -> str:
     if not items:
-        return "📊 <b>Переоценённые монеты</b>\n\n<i>Сейчас нет монет, отмеченных как высокорисковые.</i>"
+        return "📊 <b>Переоценённые монеты</b>\n\n<i>Сейчас нет монет с повышенным риском.</i>"
 
     lines = ["📊 <b>Переоценённые монеты</b> — рейтинг по уровню риска\n"]
+
     for i, item in enumerate(items, start=1 + page * 10):
         em = risk_level_emoji(item.get("risk_level", "low"))
         sym = item.get("symbol", "?")
@@ -72,12 +73,21 @@ def format_overvalued_list(items: list[dict], page: int = 0, total: int = 0) -> 
         rsi = item.get("rsi", 0)
         vwap = item.get("vwap_extension_pct", 0)
         change = item.get("price_change_24h_pct", 0)
+
+        # Убираем USDT из символа для ссылки
+        base = sym.replace("USDT", "")
+
+        # Ссылка на Bybit фьючерсы
+        bybit_url = f"https://www.bybit.com/trade/usdt/{base}USDT"
+
+        change_em = "🟢" if change >= 0 else "🔴"
+
         lines.append(
-            f"{i}. <code>{sym}</code> {em} <b>{score:.0f}</b> "
-            f"| RSI:{rsi:.0f} | VWAP+{vwap:.1f}% | 24ч:{change:+.1f}%"
+            f'{i}. <a href="{bybit_url}">{sym}</a> {em} <b>{score:.0f}</b> '
+            f"| RSI:{rsi:.0f} | VWAP+{vwap:.1f}% | {change_em}{change:+.1f}%"
         )
 
-    lines.append(f"\n<i>Обновляется каждые 5 минут. Используй /coin SYMBOL для деталей.</i>")
+    lines.append("\n<i>Обновляется каждые 5 мин. Используй /coin SYMBOL для деталей.</i>")
     return "\n".join(lines)
 
 

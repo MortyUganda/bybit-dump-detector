@@ -23,6 +23,13 @@ class AccessMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         user = event.from_user
+
+        # Временный лог для диагностики
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Access check: user_id={user.id if user else None}, allowed={self.allowed_ids}"
+        )
+
         if user and user.id in self.allowed_ids:
             return await handler(event, data)
 

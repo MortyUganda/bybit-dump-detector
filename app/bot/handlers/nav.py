@@ -4,61 +4,48 @@
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
-from app.bot.keyboards import watchlist_keyboard
 from app.bot.handlers.watchlist_store import WATCHLISTS, normalize_symbol
+from app.bot.keyboards import watchlist_keyboard
 
 router = Router()
 
 
 @router.callback_query(F.data == "nav:signals")
 async def cb_nav_signals(query: CallbackQuery) -> None:
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    from app.bot.handlers.signals import _format_signals_page, signals_history_keyboard
+    text, has_next = _format_signals_page(page=0)
     await query.message.answer(
-        "📡 <b>Последние сигналы</b>\n\n"
-        "<i>Пока сигналов нет — анализ только разогревается.</i>\n\n"
-        "Сигналы появляются здесь, когда риск ≥ 50 и срабатывает ≥ 3 фактора.",
+        text,
+        reply_markup=signals_history_keyboard(page=0, has_next=has_next),
     )
 
 
 @router.callback_query(F.data == "nav:overvalued")
 async def cb_nav_overvalued(query: CallbackQuery) -> None:
-    await query.answer()
-
     try:
-        from app.config import get_settings
-        import json
-        import redis.asyncio as aioredis
-
-        settings = get_settings()
-        redis = aioredis.from_url(
-            settings.redis_url,
-            encoding="utf-8",
-            decode_responses=True,
-        )
-        raw = await redis.get("overvalued:latest")
-        await redis.aclose()
+        await query.answer()
     except Exception:
-        await query.message.answer(
-            "📊 <b>Переоценённые монеты</b>\n\n"
-            "<i>Ошибка чтения данных. Попробуйте позже.</i>"
-        )
-        return
+        pass
 
-    if not raw:
-        await query.message.answer(
-            "📊 <b>Переоценённые монеты</b>\n\n"
-            "<i>Данные ещё не готовы — попробуйте через минуту.</i>"
-        )
-        return
+    from app.bot.handlers.overvalued import _fetch_and_format, overvalued_keyboard
 
-    from app.bot.formatters import format_overvalued_list
-    items = json.loads(raw)
-    await query.message.answer(format_overvalued_list(items))
+    text, success = await _fetch_and_format()
+    await query.message.answer(
+        text,
+        reply_markup=overvalued_keyboard() if success else None,
+    )
 
 
 @router.callback_query(F.data == "nav:watchlist")
 async def cb_nav_watchlist(query: CallbackQuery) -> None:
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     if not query.from_user:
         await query.message.answer("Не удалось определить пользователя.")
@@ -86,7 +73,10 @@ async def cb_nav_watchlist(query: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "nav:settings")
 async def cb_nav_settings(query: CallbackQuery) -> None:
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     await query.message.answer(
         "⚙️ <b>Ваши настройки</b>\n\n"
         "🔔 Уведомления: <b>ВКЛ</b>\n"
@@ -97,7 +87,10 @@ async def cb_nav_settings(query: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "nav:status")
 async def cb_nav_status(query: CallbackQuery) -> None:
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     await query.message.answer(
         "⚙️ <b>Статус бота</b>\n\n"
         "✅ Сбор данных: работает\n"
