@@ -87,7 +87,7 @@ class RiskScore:
 
     @property
     def is_actionable(self) -> bool:
-        return self.score >= 50 and self.triggered_count >= 3
+        return self.score >= 45 and self.triggered_count >= 2
 
     def to_dict(self) -> dict:
         return {
@@ -146,12 +146,12 @@ class ScoringEngine:
     # ── Threshold calibration defaults ────────────────────────────
     # RSI thresholds for normalization: below low_thresh → 0, above high_thresh → 1
     RSI_LOW = 60.0   # TODO: recalibrate after live data
-    RSI_HIGH = 80.0
+    RSI_HIGH = 75.0
 
-    VWAP_EXT_LOW = 2.0   # % — moderate overextension
-    VWAP_EXT_HIGH = 5.0  # % — extreme overextension
+    VWAP_EXT_LOW = 1.5   # % — moderate overextension
+    VWAP_EXT_HIGH = 2.5 # % — extreme overextension
 
-    VOLUME_ZSCORE_LOW = 1.5
+    VOLUME_ZSCORE_LOW = 1.2
     VOLUME_ZSCORE_HIGH = 3.0
 
     # Imbalance: +1 = all buys, –1 = all sells. High buy imbalance = risk
@@ -331,7 +331,8 @@ class ScoringEngine:
 
         # ── Anti-noise: suppress weak signals ────────────────────
         # Only report if >= 3 factors triggered
-        if triggered_count < 3:
+        # Эксперимент: достаточно 2 триггеров, чтобы позволить score расти
+        if triggered_count < 2:
             total_score = min(total_score, 30.0)
 
         level = _level_from_score(total_score)
@@ -403,7 +404,7 @@ class ScoringEngine:
             return SignalType.OVERHEATED
 
         # EARLY_WARNING: score 30–49 with some factors triggering
-        if 30 <= score < 50 and sum(1 for fr in factors if fr.triggered) >= 2:
+        if 30 <= score < 50 and sum(1 for fr in factors if fr.triggered) >= 1:
             return SignalType.EARLY_WARNING
 
         return None

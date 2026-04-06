@@ -11,43 +11,44 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 router = Router()
 
+
 HELP_TEXT = """
 <b>🔍 Bybit Dump Detector</b>
 
-Monitors speculative coins on Bybit for overheating and dump risk.
+Отслеживает спекулятивные монеты на Bybit и помогает находить перегретые активы с риском скорого слива.
 
-<b>Commands:</b>
-/signals — recent risk alerts
-/overvalued — top overvalued coins right now
-/coin SYMBOL — full diagnostics for one coin
-/watchlist — your personal watchlist
-/add SYMBOL — add coin to watchlist
-/remove SYMBOL — remove from watchlist
-/settings — configure your alert preferences
-/status — bot health and universe size
-/help — this message
+<b>Команды:</b>
+/signals — последние сигналы риска
+/overvalued — самые переоценённые монеты сейчас
+/coin SYMBOL — подробный разбор конкретной монеты
+/watchlist — ваш личный список отслеживания
+/add SYMBOL — добавить монету в список
+/remove SYMBOL — удалить монету из списка
+/settings — настроить уведомления
+/status — статус бота и отслеживаемых монет
+/help — показать эту справку
 
-<b>Risk Levels:</b>
-🟢 LOW (0–24) — no concern
-🟡 MODERATE (25–49) — keep an eye
-🟠 HIGH (50–74) — elevated dump risk
-🔴 CRITICAL (75–100) — strong reversal signal
+<b>Уровни риска:</b>
+🟢 НИЗКИЙ (0–24) — серьёзных признаков нет
+🟡 УМЕРЕННЫЙ (25–49) — стоит наблюдать
+🟠 ВЫСОКИЙ (50–74) — повышенный риск слива
+🔴 КРИТИЧЕСКИЙ (75–100) — сильный сигнал на разворот/обвал
 
-<b>Signal Types:</b>
-⚠️ Early Warning — early signs of overheating
-🔥 Overheated — RSI + volume + VWAP all elevated
-⬇️ Reversal Risk — momentum stalling, wick rejection
-💥 Dump Started — price dropping + OB collapsing
+<b>Типы сигналов:</b>
+⚠️ Раннее предупреждение — первые признаки перегрева
+🔥 Перегрев — повышены RSI, объём и отклонение от VWAP
+⬇️ Риск разворота — импульс слабеет, есть признаки отката
+💥 Слив начался — цена уже падает, ликвидность ухудшается
 
-<i>Signals are informational only. Not financial advice.</i>
+<i>Сигналы бота носят информационный характер и не являются финансовой рекомендацией.</i>
 """
 
 
 @router.message(Command("start"))
 async def cmd_start(msg: Message) -> None:
-    name = msg.from_user.first_name if msg.from_user else "Trader"
+    name = msg.from_user.first_name if msg.from_user else "Трейдер"
     await msg.answer(
-        f"👋 Welcome, <b>{name}</b>!\n\n{HELP_TEXT}",
+        f"👋 Добро пожаловать, <b>{name}</b>!\n\n{HELP_TEXT}",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -61,9 +62,9 @@ async def cmd_help(msg: Message) -> None:
 async def cmd_status(msg: Message) -> None:
     # TODO: inject universe manager and show live stats
     await msg.answer(
-        "⚙️ <b>Bot Status</b>\n\n"
-        "✅ Ingestion: running\n"
-        "✅ Analyzer: running\n"
-        "📊 Universe: <i>refreshing...</i>\n"
-        "🕐 Uptime: <i>available after deployment</i>"
+        "⚙️ <b>Статус бота</b>\n\n"
+        "✅ Сбор данных: работает\n"
+        "✅ Анализ: работает\n"
+        "📊 Список монет: <i>обновляется...</i>\n"
+        "🕐 Время работы: <i>будет доступно после деплоя</i>"
     )

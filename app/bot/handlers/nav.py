@@ -13,9 +13,9 @@ router = Router()
 async def cb_nav_signals(query: CallbackQuery) -> None:
     await query.answer()
     await query.message.answer(
-        "📡 <b>Recent Signals</b>\n\n"
-        "<i>No signals yet — analysis is warming up.</i>\n\n"
-        "Signals appear here when risk score ≥ 50 with ≥ 3 factors triggered.",
+        "📡 <b>Последние сигналы</b>\n\n"
+        "<i>Пока сигналов нет — анализ только разогревается.</i>\n\n"
+        "Сигналы появляются здесь, когда риск ≥ 50 и срабатывает ≥ 3 фактора.",
     )
 
 
@@ -23,9 +23,9 @@ async def cb_nav_signals(query: CallbackQuery) -> None:
 async def cb_nav_overvalued(query: CallbackQuery) -> None:
     await query.answer()
     await query.message.answer(
-        "📊 <b>Overvalued Coins</b>\n\n"
-        "<i>Ranking is computed every 5 minutes.\n"
-        "First results appear after the analyzer warms up (~2 min).</i>",
+        "📊 <b>Переоценённые монеты</b>\n\n"
+        "<i>Рейтинг пересчитывается каждые 5 минут.\n"
+        "Первые результаты появятся после разогрева анализатора (~2 минуты).</i>",
     )
 
 
@@ -33,8 +33,8 @@ async def cb_nav_overvalued(query: CallbackQuery) -> None:
 async def cb_nav_watchlist(query: CallbackQuery) -> None:
     await query.answer()
     await query.message.answer(
-        "⭐ <b>Your Watchlist</b>\n\n"
-        "<i>Empty. Add coins with /add SYMBOL</i>",
+        "⭐ <b>Ваш список отслеживания</b>\n\n"
+        "<i>Пусто. Добавьте монеты командой /add SYMBOL</i>",
     )
 
 
@@ -42,10 +42,10 @@ async def cb_nav_watchlist(query: CallbackQuery) -> None:
 async def cb_nav_settings(query: CallbackQuery) -> None:
     await query.answer()
     await query.message.answer(
-        "⚙️ <b>Your Settings</b>\n\n"
-        "🔔 Alerts: <b>ON</b>\n"
-        "📊 Min score: <b>50</b>\n"
-        "⏱ Cooldown: <b>60 min</b>",
+        "⚙️ <b>Ваши настройки</b>\n\n"
+        "🔔 Уведомления: <b>ВКЛ</b>\n"
+        "📊 Минимальный риск для сигнала: <b>50</b>\n"
+        "⏱ Интервал между алертами: <b>60 минут</b>",
     )
 
 
@@ -53,21 +53,23 @@ async def cb_nav_settings(query: CallbackQuery) -> None:
 async def cb_nav_status(query: CallbackQuery) -> None:
     await query.answer()
     await query.message.answer(
-        "⚙️ <b>Bot Status</b>\n\n"
-        "✅ Ingestion: running\n"
-        "✅ Analyzer: running\n"
-        "📊 Universe: refreshing...",
+        "⚙️ <b>Статус бота</b>\n\n"
+        "✅ Сбор данных: работает\n"
+        "✅ Анализ: работает\n"
+        "📊 Список монет: обновляется...",
     )
 
 
 @router.callback_query(F.data.startswith("watch:add:"))
 async def cb_watch_add(query: CallbackQuery) -> None:
     symbol = query.data.split(":")[-1]
-    await query.answer(f"✅ {symbol} added to watchlist")
+    await query.answer(f"✅ {symbol} добавлена в список отслеживания")
 
 
 @router.callback_query(F.data.startswith("coin:refresh:"))
 async def cb_coin_refresh(query: CallbackQuery) -> None:
     symbol = query.data.split(":")[-1]
-    await query.answer("🔄 Refreshing...")
-    await query.message.answer(f"🔍 <b>{symbol}</b> — data refreshed (analyzer warming up)")
+    await query.answer("🔄 Обновляю данные...")
+    await query.message.answer(
+        f"🔍 <b>{symbol}</b> — данные обновлены (анализатор разогревается)"
+    )
