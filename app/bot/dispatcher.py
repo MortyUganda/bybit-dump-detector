@@ -6,7 +6,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.client.default import DefaultBotProperties
-
+from app.bot.handlers.watchlist import router as watchlist_router
+from app.bot.handlers.nav import router as nav_router
 
 from app.bot.handlers import (
     commands_router,

@@ -1,6 +1,6 @@
 """Inline and reply keyboards for the bot."""
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -17,6 +17,17 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
     ])
 
+def watchlist_keyboard(symbols: list[str]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+
+    for symbol in symbols:
+        builder.button(
+            text=f"🗑 Удалить {symbol}",
+            callback_data=f"watch:remove:{symbol}",
+        )
+
+    builder.adjust(1)
+    return builder.as_markup()
 
 def signals_keyboard(page: int, has_next: bool) -> InlineKeyboardMarkup:
     buttons = []
