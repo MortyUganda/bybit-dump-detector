@@ -87,7 +87,7 @@ class RiskScore:
 
     @property
     def is_actionable(self) -> bool:
-        return self.score >= 45 and self.triggered_count >= 2  # HIGH-SENSITIVITY (was 50/3)
+        return self.score >= 45 and self.triggered_count >= 2
 
     def to_dict(self) -> dict:
         return {
@@ -145,38 +145,38 @@ class ScoringEngine:
 
     # ── Threshold calibration defaults ────────────────────────────
     # RSI thresholds for normalization: below low_thresh → 0, above high_thresh → 1
-    RSI_LOW = 55.0   # HIGH-SENSITIVITY MODE (was 60/80)
-    RSI_HIGH = 72.0
+    RSI_LOW = 60.0   # TODO: recalibrate after live data
+    RSI_HIGH = 75.0
 
-    VWAP_EXT_LOW = 1.5   # % — HIGH-SENSITIVITY (was 2.0/5.0)
-    VWAP_EXT_HIGH = 3.5
+    VWAP_EXT_LOW = 1.5   # % — moderate overextension
+    VWAP_EXT_HIGH = 2.5 # % — extreme overextension
 
-    VOLUME_ZSCORE_LOW = 1.0   # HIGH-SENSITIVITY (was 1.5/3.0)
-    VOLUME_ZSCORE_HIGH = 2.2
+    VOLUME_ZSCORE_LOW = 1.2
+    VOLUME_ZSCORE_HIGH = 3.0
 
     # Imbalance: +1 = all buys, –1 = all sells. High buy imbalance = risk
-    IMBALANCE_LOW = 0.2   # HIGH-SENSITIVITY (was 0.3/0.7)
-    IMBALANCE_HIGH = 0.55
+    IMBALANCE_LOW = 0.3
+    IMBALANCE_HIGH = 0.7
 
     # Large buy cluster (count 5m)
-    LARGE_BUY_LOW = 2   # HIGH-SENSITIVITY (was 3/8)
-    LARGE_BUY_HIGH = 5
+    LARGE_BUY_LOW = 3
+    LARGE_BUY_HIGH = 8
 
     # Price acceleration (% vs prior baseline)
-    ACCEL_LOW = 0.3   # HIGH-SENSITIVITY (was 0.5/2.0)
-    ACCEL_HIGH = 1.5
+    ACCEL_LOW = 0.5
+    ACCEL_HIGH = 2.0
 
     # Consecutive green candles
-    GREEN_LOW = 3   # HIGH-SENSITIVITY (was 4/8)
-    GREEN_HIGH = 6
+    GREEN_LOW = 4
+    GREEN_HIGH = 8
 
     # OB bid depth change (negative = thinning = risk)
     BID_THIN_LOW = -20.0  # %
     BID_THIN_HIGH = -50.0
 
     # Spread expansion
-    SPREAD_LOW = 0.15   # % — HIGH-SENSITIVITY (was 0.2/0.8)
-    SPREAD_HIGH = 0.5
+    SPREAD_LOW = 0.2   # % — normal spread for shitcoin
+    SPREAD_HIGH = 0.8
 
     # Upper wick (ratio to body)
     WICK_LOW = 1.0
@@ -191,8 +191,6 @@ class ScoringEngine:
         Compute RiskScore from CoinFeatures.
         Returns LOW score with no signal if features are insufficient.
         """
-
- 
         factors: list[FactorResult] = []
 
         # ── 1. RSI overbought ─────────────────────────────────────
@@ -332,7 +330,8 @@ class ScoringEngine:
         triggered_count = sum(1 for f in factors if f.triggered)
 
         # ── Anti-noise: suppress weak signals ────────────────────
-        # HIGH-SENSITIVITY: require >= 2 factors (was 3)
+        # Only report if >= 3 factors triggered
+        # Эксперимент: достаточно 2 триггеров, чтобы позволить score расти
         if triggered_count < 2:
             total_score = min(total_score, 30.0)
 
@@ -392,23 +391,24 @@ class ScoringEngine:
         ):
             return SignalType.REVERSAL_RISK
 
-        # OVERHEATED: RSI + VWAP + volume spike — need 2 of 3
-        # HIGH-SENSITIVITY: score >= 45, 2 of 3 core factors (was all 3 + score 50)
+        # OVERHEATED: RSI + VWAP + volume spike all elevated
         rsi_f = factor_map.get("rsi")
         vwap_f = factor_map.get("vwap_extension")
         vol_f = factor_map.get("volume_zscore")
-        core_triggered = sum(1 for x in [rsi_f, vwap_f, vol_f] if x and x.triggered)
-        if score >= 45 and core_triggered >= 2:
+        if (
+            score >= 50
+            and rsi_f and rsi_f.triggered
+            and vwap_f and vwap_f.triggered
+            and vol_f and vol_f.triggered
+        ):
             return SignalType.OVERHEATED
 
-        # EARLY_WARNING: score 25–49 with some factors triggering
-        # HIGH-SENSITIVITY: lowered from 30 to 25
-        if 25 <= score < 50 and sum(1 for fr in factors if fr.triggered) >= 2:
+        # EARLY_WARNING: score 30–49 with some factors triggering
+        if 30 <= score < 50 and sum(1 for fr in factors if fr.triggered) >= 1:
             return SignalType.EARLY_WARNING
 
         return None
 
-        
     def _factor(
         self,
         name: str,
