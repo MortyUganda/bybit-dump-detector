@@ -23,11 +23,37 @@ async def cb_nav_signals(query: CallbackQuery) -> None:
 @router.callback_query(F.data == "nav:overvalued")
 async def cb_nav_overvalued(query: CallbackQuery) -> None:
     await query.answer()
-    await query.message.answer(
-        "📊 <b>Переоценённые монеты</b>\n\n"
-        "<i>Рейтинг пересчитывается каждые 5 минут.\n"
-        "Первые результаты появятся после разогрева анализатора (~2 минуты).</i>",
-    )
+
+    try:
+        from app.config import get_settings
+        import json
+        import redis.asyncio as aioredis
+
+        settings = get_settings()
+        redis = aioredis.from_url(
+            settings.redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+        )
+        raw = await redis.get("overvalued:latest")
+        await redis.aclose()
+    except Exception:
+        await query.message.answer(
+            "📊 <b>Переоценённые монеты</b>\n\n"
+            "<i>Ошибка чтения данных. Попробуйте позже.</i>"
+        )
+        return
+
+    if not raw:
+        await query.message.answer(
+            "📊 <b>Переоценённые монеты</b>\n\n"
+            "<i>Данные ещё не готовы — попробуйте через минуту.</i>"
+        )
+        return
+
+    from app.bot.formatters import format_overvalued_list
+    items = json.loads(raw)
+    await query.message.answer(format_overvalued_list(items))
 
 
 @router.callback_query(F.data == "nav:watchlist")

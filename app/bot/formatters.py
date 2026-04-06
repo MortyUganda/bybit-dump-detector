@@ -62,9 +62,9 @@ def format_risk_alert(score: RiskScore) -> str:
 
 def format_overvalued_list(items: list[dict], page: int = 0, total: int = 0) -> str:
     if not items:
-        return "📊 <b>Overvalued Coins</b>\n\n<i>No coins currently flagged as high risk.</i>"
+        return "📊 <b>Переоценённые монеты</b>\n\n<i>Сейчас нет монет, отмеченных как высокорисковые.</i>"
 
-    lines = ["📊 <b>Overvalued Coins</b> — Ranked by Risk Score\n"]
+    lines = ["📊 <b>Переоценённые монеты</b> — рейтинг по уровню риска\n"]
     for i, item in enumerate(items, start=1 + page * 10):
         em = risk_level_emoji(item.get("risk_level", "low"))
         sym = item.get("symbol", "?")
@@ -74,10 +74,10 @@ def format_overvalued_list(items: list[dict], page: int = 0, total: int = 0) -> 
         change = item.get("price_change_24h_pct", 0)
         lines.append(
             f"{i}. <code>{sym}</code> {em} <b>{score:.0f}</b> "
-            f"| RSI:{rsi:.0f} | VWAP+{vwap:.1f}% | 24h:{change:+.1f}%"
+            f"| RSI:{rsi:.0f} | VWAP+{vwap:.1f}% | 24ч:{change:+.1f}%"
         )
 
-    lines.append(f"\n<i>Updated every 5 min. Use /coin SYMBOL for details.</i>")
+    lines.append(f"\n<i>Обновляется каждые 5 минут. Используй /coin SYMBOL для деталей.</i>")
     return "\n".join(lines)
 
 

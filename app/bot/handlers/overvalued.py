@@ -1,29 +1,65 @@
 """
-/overvalued — показывает список переоценённых монет.
-Обновляется каждые 5 минут сервисом анализа.
+/overvalued — показывает список переоценённых монет из Redis.
+Данные обновляются каждые 5 минут сервисом анализа.
 """
+from __future__ import annotations
+
+import json
+
+import redis.asyncio as aioredis
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from app.bot.formatters import format_overvalued_list
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 router = Router()
 
+REDIS_OVERVALUED_KEY = "overvalued:latest"
+
+
+async def get_redis() -> aioredis.Redis:
+    from app.config import get_settings
+    settings = get_settings()
+    return aioredis.from_url(
+        settings.redis_url,
+        encoding="utf-8",
+        decode_responses=True,
+    )
+
 
 @router.message(Command("overvalued"))
 async def cmd_overvalued(msg: Message) -> None:
-    # TODO: получить свежий снимок переоценённых монет из БД или Redis
-    await msg.answer(
-        "📊 <b>Переоценённые монеты</b>\n\n"
-        "<i>Рейтинг пересчитывается каждые 5 минут.\n"
-        "Первые результаты появятся после разогрева анализатора (~2 минуты).</i>\n\n"
-        "Вверху списка — монеты с наибольшим совокупным риском.\n"
-        "Чем выше score, тем сильнее перегрев и выше вероятность резкого слива.\n\n"
-        "<b>Пример формата в онлайне:</b>\n"
-        "1. COIN1USDT 🔴 Score: 82 | RSI: 87 | +18.3% к VWAP\n"
-        "2. COIN2USDT 🟠 Score: 67 | RSI: 74 | +9.1% к VWAP\n"
-        "...\n\n"
-        "Для подробного разбора используйте /coin SYMBOL.",
-    )
+    try:
+        redis = await get_redis()
+        raw = await redis.get(REDIS_OVERVALUED_KEY)
+        await redis.aclose()
+    except Exception as e:
+        logger.error("Redis read failed", error=str(e))
+        await msg.answer(
+            "📊 <b>Переоценённые монеты</b>\n\n"
+            "<i>Ошибка чтения данных. Попробуйте позже.</i>"
+        )
+        return
+
+    if not raw:
+        await msg.answer(
+            "📊 <b>Переоценённые монеты</b>\n\n"
+            "<i>Данные ещё не готовы — анализатор разогревается (~2 минуты).\n"
+            "Попробуйте ещё раз через минуту.</i>"
+        )
+        return
+
+    try:
+        items = json.loads(raw)
+    except Exception:
+        await msg.answer(
+            "📊 <b>Переоценённые монеты</b>\n\n"
+            "<i>Ошибка обработки данных. Попробуйте позже.</i>"
+        )
+        return
+
+    text = format_overvalued_list(items)
+    await msg.answer(text)

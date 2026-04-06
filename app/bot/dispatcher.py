@@ -46,5 +46,5 @@ def create_dispatcher(redis_url: str) -> Dispatcher:
     dp.include_router(coin_router)
     dp.include_router(settings_router)
     dp.include_router(watchlist_router)
-
+    
     return dp
