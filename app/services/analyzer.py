@@ -196,34 +196,44 @@ class AnalyzerService:
             logger.warning("Failed to fetch tickers for 24h change", error=str(e))
             tickers = {}
 
+        all_scores = []  # для дебага
+
         for features in features_list:
             try:
                 risk_score = self._scoring.score(features)
-                if risk_score.score >= 35:
+                all_scores.append((features.symbol, risk_score.score))
+
+                if risk_score.score >= 30:  # повысили до 30
                     ticker = tickers.get(features.symbol, {})
                     try:
                         price_change_24h = float(ticker.get("price24hPcnt", 0.0)) * 100
                     except (ValueError, TypeError):
                         price_change_24h = 0.0
 
-                    scored.append(
-                        {
-                            "symbol": features.symbol,
-                            "score": risk_score.score,
-                            "risk_level": risk_score.level.value,
-                            "price": features.last_price,
-                            "price_change_24h_pct": price_change_24h,  # ← реальное значение
-                            "volume_24h_usdt": features.volume_24h_usdt,
-                            "rsi": features.rsi_14_1m,
-                            "vwap_extension_pct": features.vwap_extension_pct,
-                            "top_reasons": risk_score.top_reasons,
-                            "signal_type": risk_score.signal_type.value
-                            if risk_score.signal_type
-                            else None,
-                        }
-                    )
+                    scored.append({
+                        "symbol": features.symbol,
+                        "score": risk_score.score,
+                        "risk_level": risk_score.level.value,
+                        "price": features.last_price,
+                        "price_change_24h_pct": price_change_24h,
+                        "volume_24h_usdt": features.volume_24h_usdt,
+                        "rsi": features.rsi_14_1m,
+                        "vwap_extension_pct": features.vwap_extension_pct,
+                        "top_reasons": risk_score.top_reasons,
+                        "signal_type": risk_score.signal_type.value
+                        if risk_score.signal_type
+                        else None,
+                    })
             except Exception:
                 pass
+
+        # Лог топ-5 монет по score для диагностики
+        if all_scores:
+            top5 = sorted(all_scores, key=lambda x: -x[1])[:5]
+            for sym, sc in top5:
+                logger.info("Top coin score", symbol=sym, score=round(sc, 1))
+        else:
+            logger.warning("No scores computed — features list may be empty")
 
         # Sort by score descending, take top N
         scored.sort(key=lambda x: -x["score"])
@@ -241,12 +251,23 @@ class AnalyzerService:
         new_symbols = {item["symbol"] for item in top_n}
 
         # Сохраняем новый список
-        await self._redis.setex(REDIS_OVERVALUED_KEY, REDIS_OVERVALUED_TTL, json.dumps(top_n))
+        await self._redis.setex(
+            REDIS_OVERVALUED_KEY, REDIS_OVERVALUED_TTL, json.dumps(top_n)
+        )
 
-        # Если появились новые монеты — уведомляем
+        # Уведомляем если появились новые монеты
+        # или каждые 3 пересчёта (15 минут) если список не пустой
         added_symbols = new_symbols - prev_symbols
-        if added_symbols and top_n:
-            await self._broadcast_overvalued(top_n, added_symbols)
+        self._overvalued_broadcast_count = (
+            getattr(self, "_overvalued_broadcast_count", 0) + 1
+        )
+
+        should_broadcast = (added_symbols and top_n) or (
+            top_n and self._overvalued_broadcast_count % 3 == 0
+        )
+
+        if should_broadcast:
+            await self._broadcast_overvalued(top_n, added_symbols or new_symbols)
 
         # Persist snapshot to DB
         if top_n and self._db:
@@ -257,6 +278,7 @@ class AnalyzerService:
             total_scored=len(scored),
             top_n=len(top_n),
             new_entries=len(added_symbols),
+            threshold=25,
         )
 
     async def _broadcast_overvalued(

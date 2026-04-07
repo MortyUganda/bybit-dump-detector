@@ -456,32 +456,40 @@ class AutoShortService:
         pnl: float,
         reason: str,
     ) -> None:
-        """Уведомить пользователей о закрытой сделке."""
         if not self._bot:
+            logger.warning("Bot not set — cannot send close notification", trade_id=trade_id)
             return
-
+    
         try:
             from app.bot.user_store import get_active_users
             user_ids = await get_active_users(self._redis)
-
+    
+            if not user_ids:
+                logger.warning("No active users for close notification")
+                return
+    
             reason_text = {
                 "tp_hit": "🎯 Тейк профит достигнут",
                 "sl_hit": "🛑 Стоп лосс сработал",
-                "expired": "⏰ Время сделки истекло",
+                "expired": "⏰ Время сделки истекло (4 часа)",
                 "closed_manual": "✋ Закрыта вручную",
             }.get(reason, reason)
-
+    
             pnl_em = "🟢" if pnl > 0 else "🔴"
-
+            result_em = "✅" if pnl > 0 else "❌"
+    
+            base = symbol.replace("USDT", "")
+            bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
+    
             text = (
-                f"{'✅' if pnl > 0 else '❌'} <b>Авто-шорт закрыт</b>\n\n"
-                f"📌 <b>{symbol}</b>\n"
+                f"{result_em} <b>Авто-шорт закрыт</b>\n\n"
+                f"📌 <a href=\"{bybit_url}\">{symbol}</a>\n"
                 f"{reason_text}\n\n"
                 f"💰 Выход: <b>${exit_price:.6g}</b>\n"
                 f"P&L: {pnl_em} <b>{pnl:+.2f}%</b>\n\n"
-                f"<i>Сделка #{trade_id}</i>"
+                f"<i>Сделка #{trade_id} | /stats для статистики</i>"
             )
-
+    
             for user_id in user_ids:
                 try:
                     await self._bot.send_message(
@@ -489,8 +497,18 @@ class AutoShortService:
                         text=text,
                         parse_mode="HTML",
                     )
+                    logger.info(
+                        "Close notification sent",
+                        trade_id=trade_id,
+                        user_id=user_id,
+                        pnl=f"{pnl:+.2f}%",
+                    )
                 except Exception as e:
-                    logger.warning("Notify failed", user_id=user_id, error=str(e))
-
+                    logger.warning(
+                        "Close notification failed",
+                        user_id=user_id,
+                        error=str(e),
+                    )
+    
         except Exception as e:
-            logger.error("Close notification failed", error=str(e))
+            logger.error("Close notification error", error=str(e))

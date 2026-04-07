@@ -70,6 +70,19 @@ def coin_detail_keyboard(symbol: str) -> InlineKeyboardMarkup:
         ],
     ])
 
+def alert_detail_keyboard(symbol: str, signal_type: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🔍 Подробнее",
+        callback_data=f"alert:detail:{symbol}",
+    )
+    builder.button(
+        text="📈 Bybit",
+        url=f"https://www.bybit.com/trade/usdt/{symbol}",
+    )
+    builder.adjust(2)
+    return builder.as_markup()
+
 def main_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -79,7 +92,11 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(text="⭐ Watchlist"),
-                KeyboardButton(text="📋 Сделки"),
+                KeyboardButton(text="🤖 Авто-шорты"),
+            ],
+            [
+                KeyboardButton(text="📊 Статистика"),
+                KeyboardButton(text="📋 История"),
             ],
             [
                 KeyboardButton(text="⚙️ Статус"),
@@ -87,7 +104,7 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
             ],
         ],
         resize_keyboard=True,
-        persistent=True,  # не скрывается
+        persistent=True,
     )
 
 def risk_level_emoji(level: str) -> str:

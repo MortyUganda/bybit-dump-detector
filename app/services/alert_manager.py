@@ -47,9 +47,8 @@ class AlertManager:
         MVP: sends to all allowed_user_ids from settings.
         Автоматически открывает paper шорт при is_actionable.
         """
-        text = format_risk_alert(risk_score)
-        keyboard = alert_action_keyboard(symbol)
-
+        from app.bot.keyboards import alert_action_keyboard, alert_detail_keyboard
+        keyboard = alert_detail_keyboard(symbol, risk_score.signal_type.value if risk_score.signal_type else "unknown")
         user_ids = settings.allowed_user_ids
 
         if not user_ids:
