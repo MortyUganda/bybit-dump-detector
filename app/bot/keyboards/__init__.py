@@ -18,6 +18,19 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
     ])
 
+def alert_action_keyboard(symbol: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🔔 Сигнал получен",
+        callback_data=f"pt:skip:{symbol}",
+    )
+    builder.button(
+        text="📈 Открыть на Bybit",
+        url=f"https://www.bybit.com/trade/usdt/{symbol}",
+    )
+    builder.adjust(2)
+    return builder.as_markup()
+
 def watchlist_keyboard(symbols: list[str]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 

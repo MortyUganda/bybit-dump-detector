@@ -5,6 +5,9 @@ from app.db.models.overvalued import OvervaluedSnapshot
 from app.db.models.candle import CandleFeatureRow
 from app.db.models.user import UserSettings, Watchlist
 from app.db.models.alert import AlertHistory
+from app.db.models.paper_trade import PaperTrade
+from app.db.models.auto_short import AutoShort  # ← новая таблица
+
 
 __all__ = [
     "Base",
@@ -15,4 +18,6 @@ __all__ = [
     "UserSettings",
     "Watchlist",
     "AlertHistory",
+    "PaperTrade",
+    "AutoShort",
 ]

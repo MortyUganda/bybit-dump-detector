@@ -21,9 +21,7 @@ logger = get_logger(__name__)
 
 async def run_bot() -> None:
     """Start the Telegram bot (polling mode)."""
-    from aiogram import Bot
     from app.bot.dispatcher import create_bot, create_dispatcher
-    from app.services.alert_manager import AlertManager
 
     bot = create_bot()
     dp = create_dispatcher(settings.redis_url)
@@ -50,7 +48,6 @@ async def run_ingestion() -> None:
     logger.info("Ingestion service running — Ctrl+C to stop")
 
     try:
-        # Run universe refresh loop
         await universe.run_forever()
     except asyncio.CancelledError:
         pass
@@ -64,11 +61,15 @@ async def run_analyzer() -> None:
     """Start the analyzer + scoring + alert service."""
     import redis.asyncio as aioredis
     from aiogram import Bot
+    from aiogram.client.default import DefaultBotProperties
+    from aiogram.enums import ParseMode
+
     from app.bybit.rest_client import BybitRestClient
     from app.bybit.universe import UniverseManager
-    from app.services.ingestion import IngestionService
-    from app.services.analyzer import AnalyzerService
     from app.services.alert_manager import AlertManager
+    from app.services.analyzer import AnalyzerService
+    from app.services.auto_short_service import AutoShortService
+    from app.services.ingestion import IngestionService
 
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
     rest = BybitRestClient()
@@ -78,8 +79,21 @@ async def run_analyzer() -> None:
     ingestion = IngestionService(rest, universe, redis_client)
     await ingestion.start()
 
-    bot = Bot(token=settings.telegram_bot_token)
-    alert_mgr = AlertManager(bot)
+    # Создаём бот для отправки уведомлений из analyzer
+    bot = Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+
+    # Создаём AutoShortService
+    auto_short = AutoShortService(redis=redis_client, bot=bot)
+
+    # Восстанавливаем активные сделки из БД после перезапуска
+    await auto_short.restore_active_trades()  # ← добавить
+
+    # Создаём AlertManager с AutoShortService
+    alert_mgr = AlertManager(bot=bot, auto_short_service=auto_short)
+
 
     analyzer = AnalyzerService(
         ingestion=ingestion,

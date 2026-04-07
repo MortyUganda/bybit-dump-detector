@@ -10,10 +10,13 @@ Flow:
 """
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import Bot
-from app.bot.handlers.signals import add_signal
+
 from app.bot.formatters import format_risk_alert
-from app.bot.keyboards.paper_trading import alert_action_keyboard
+from app.bot.keyboards import alert_action_keyboard
+from app.bot.handlers.signals import add_signal
 from app.config import get_settings
 from app.scoring.engine import RiskScore
 from app.utils.logging import get_logger
@@ -34,11 +37,16 @@ class AlertManager:
     Sends alerts to Telegram users based on their settings.
     """
 
-    def __init__(self, bot: Bot) -> None:
+    def __init__(self, bot: Bot, auto_short_service=None) -> None:
         self._bot = bot
-
+        self._auto_short = auto_short_service
 
     async def send_alert(self, symbol: str, risk_score: RiskScore) -> None:
+        """
+        Broadcast alert to all eligible users.
+        MVP: sends to all allowed_user_ids from settings.
+        Автоматически открывает paper шорт при is_actionable.
+        """
         text = format_risk_alert(risk_score)
         keyboard = alert_action_keyboard(symbol)
 
@@ -52,6 +60,7 @@ class AlertManager:
         price = None
         if risk_score.features_snapshot:
             price = risk_score.features_snapshot.last_price
+
         add_signal(
             symbol=symbol,
             signal_type=risk_score.signal_type.value if risk_score.signal_type else "unknown",
@@ -59,6 +68,16 @@ class AlertManager:
             price=price,
         )
 
+        # Автоматически открываем paper шорт
+        if self._auto_short and risk_score.is_actionable:
+            asyncio.create_task(self._auto_short.open_short(risk_score))
+            logger.info(
+                "Auto short triggered",
+                symbol=symbol,
+                score=risk_score.score,
+            )
+
+        # Отправляем уведомление пользователям
         for user_id in user_ids:
             try:
                 await self._bot.send_message(
@@ -67,7 +86,12 @@ class AlertManager:
                     reply_markup=keyboard,
                     parse_mode="HTML",
                 )
-                logger.info("Alert sent", symbol=symbol, user_id=user_id, score=risk_score.score)
+                logger.info(
+                    "Alert sent",
+                    symbol=symbol,
+                    user_id=user_id,
+                    score=risk_score.score,
+                )
             except Exception as e:
                 logger.warning("Alert send failed", user_id=user_id, error=str(e))
 

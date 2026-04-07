@@ -199,7 +199,7 @@ class AnalyzerService:
         for features in features_list:
             try:
                 risk_score = self._scoring.score(features)
-                if risk_score.score >= 25:
+                if risk_score.score >= 35:
                     ticker = tickers.get(features.symbol, {})
                     try:
                         price_change_24h = float(ticker.get("price24hPcnt", 0.0)) * 100

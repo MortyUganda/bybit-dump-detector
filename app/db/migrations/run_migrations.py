@@ -6,7 +6,7 @@ import asyncio
 from alembic.config import Config
 from alembic import command
 import os
-
+from app.db.models.auto_short import AutoShort
 
 def run_sync_migrations() -> None:
     alembic_cfg = Config(os.path.join(os.path.dirname(__file__), "alembic.ini"))

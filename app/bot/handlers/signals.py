@@ -4,23 +4,25 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
+import redis.asyncio as aioredis
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.bot.keyboards import signals_keyboard
+from app.config import get_settings
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 router = Router()
 
 PAGE_SIZE = 5
+SCORE_MIN_THRESHOLD = 35  # ниже этого — удалять из истории
 
 # MVP: хранение сигналов в памяти
-# list of dict: symbol, signal_type, score, price, ts
 SIGNALS_HISTORY: list[dict] = []
 
 
@@ -34,6 +36,14 @@ def add_signal(
     Вызывается из AlertManager при каждом новом сигнале.
     Добавляет запись в историю.
     """
+    # Не добавляем дубликаты — если сигнал по этой монете уже есть, обновляем
+    for existing in SIGNALS_HISTORY:
+        if existing["symbol"] == symbol and existing["signal_type"] == signal_type:
+            existing["score"] = score
+            existing["price"] = price
+            existing["ts"] = datetime.now(timezone.utc).isoformat()
+            return
+
     SIGNALS_HISTORY.append({
         "symbol": symbol,
         "signal_type": signal_type,
@@ -41,6 +51,48 @@ def add_signal(
         "price": price,
         "ts": datetime.now(timezone.utc).isoformat(),
     })
+
+
+async def _refresh_scores() -> None:
+    """
+    Обновить score для всех сигналов из Redis.
+    Удалить те у которых score упал ниже SCORE_MIN_THRESHOLD.
+    """
+    try:
+        settings = get_settings()
+        redis = aioredis.from_url(
+            settings.redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+        )
+
+        to_remove = []
+        for signal in SIGNALS_HISTORY:
+            raw = await redis.get(f"score:{signal['symbol']}")
+            if raw:
+                data = json.loads(raw)
+                current_score = data.get("score", 0)
+                signal["current_score"] = current_score
+
+                # Если score упал ниже порога — помечаем на удаление
+                if current_score < SCORE_MIN_THRESHOLD:
+                    to_remove.append(signal)
+            else:
+                signal["current_score"] = signal["score"]
+
+        # Удаляем просевшие сигналы
+        for s in to_remove:
+            SIGNALS_HISTORY.remove(s)
+            logger.info(
+                "Signal removed — score below threshold",
+                symbol=s["symbol"],
+                score=s.get("current_score", 0),
+            )
+
+        await redis.aclose()
+
+    except Exception as e:
+        logger.warning("Score refresh failed", error=str(e))
 
 
 def _signal_type_emoji(signal_type: str) -> str:
@@ -65,7 +117,6 @@ def _format_signals_page(page: int) -> tuple[str, bool]:
             False,
         )
 
-    # От новых к старым
     reversed_signals = list(reversed(SIGNALS_HISTORY))
     total = len(reversed_signals)
     start = page * PAGE_SIZE
@@ -86,12 +137,26 @@ def _format_signals_page(page: int) -> tuple[str, bool]:
         except Exception:
             time_str = "—"
 
-        # Цена
+        # Цена при сигнале
         price_str = f"${s['price']:.6g}" if s.get("price") else "N/A"
 
+        # Текущий score (если обновлялся)
+        current_score = s.get("current_score", s["score"])
+        score_change = current_score - s["score"]
+        if score_change > 0:
+            score_str = f"<b>{current_score:.0f}</b> 🔺{score_change:+.0f}"
+        elif score_change < 0:
+            score_str = f"<b>{current_score:.0f}</b> 🔻{score_change:+.0f}"
+        else:
+            score_str = f"<b>{s['score']:.0f}</b>"
+
+        # Ссылка на Bybit
+        base = s["symbol"].replace("USDT", "")
+        bybit_url = f"https://www.bybit.com/trade/usdt/{s['symbol']}"
+
         lines.append(
-            f"{em} de>{s['symbol']}</code> — {signal_label}\n"
-            f"   📊 Score: <b>{s['score']:.0f}</b> | 💰 {price_str} | 🕐 {time_str}"
+            f"{em} <a href=\"{bybit_url}\">{s['symbol']}</a> — {signal_label}\n"
+            f"   📊 Score: {score_str} | 💰 {price_str} | 🕐 {time_str}"
         )
 
     text = "\n\n".join(lines)
@@ -101,8 +166,6 @@ def _format_signals_page(page: int) -> tuple[str, bool]:
 def signals_history_keyboard(page: int, has_next: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
-    # Навигация
-    nav = []
     if page > 0:
         builder.button(
             text="◀ Назад",
@@ -115,8 +178,8 @@ def signals_history_keyboard(page: int, has_next: bool) -> InlineKeyboardMarkup:
         )
 
     builder.button(
-        text="🔄 Обновить",
-        callback_data=f"signals:page:{page}",
+        text="🔄 Обновить score",
+        callback_data=f"signals:refresh:{page}",
     )
     builder.button(
         text="🗑 Очистить историю",
@@ -138,8 +201,33 @@ async def cmd_signals(msg: Message) -> None:
 
 @router.callback_query(F.data.startswith("signals:page:"))
 async def cb_signals_page(query: CallbackQuery) -> None:
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     page = int(query.data.split(":")[-1])
+    text, has_next = _format_signals_page(page=page)
+    try:
+        await query.message.edit_text(
+            text,
+            reply_markup=signals_history_keyboard(page=page, has_next=has_next),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("signals:refresh:"))
+async def cb_signals_refresh(query: CallbackQuery) -> None:
+    try:
+        await query.answer("🔄 Обновляю score...")
+    except Exception:
+        pass
+
+    page = int(query.data.split(":")[-1])
+
+    # Обновляем score из Redis и удаляем просевшие
+    await _refresh_scores()
+
     text, has_next = _format_signals_page(page=page)
     try:
         await query.message.edit_text(
@@ -152,7 +240,10 @@ async def cb_signals_page(query: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "signals:clear")
 async def cb_signals_clear(query: CallbackQuery) -> None:
-    await query.answer("🗑 История очищена")
+    try:
+        await query.answer("🗑 История очищена")
+    except Exception:
+        pass
     SIGNALS_HISTORY.clear()
     try:
         await query.message.edit_text(

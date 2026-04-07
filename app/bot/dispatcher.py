@@ -16,7 +16,7 @@ from app.bot.handlers import (
     watchlist_router,
     nav_router,
 )
-from app.bot.handlers.paper_trading import router as paper_trading_router
+
 from app.bot.middleware import AccessMiddleware
 from app.config import get_settings
 
@@ -46,6 +46,8 @@ def create_dispatcher(redis_url: str) -> Dispatcher:
     dp.include_router(coin_router)
     dp.include_router(settings_router)
     dp.include_router(watchlist_router)
-    dp.include_router(paper_trading_router)  # ← добавлено
 
+    from app.bot.handlers.auto_shorts import router as auto_shorts_router
+
+    dp.include_router(auto_shorts_router)
     return dp
