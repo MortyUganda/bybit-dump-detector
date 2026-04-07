@@ -54,6 +54,12 @@ services:
       - ../logs:/app/logs
     environment:
       SERVICE_NAME: ingestion
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis as r, os; c = r.from_url(os.environ.get('REDIS_URL','redis://redis:6379')); c.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   analyzer:
     build:
@@ -72,6 +78,12 @@ services:
       - ../logs:/app/logs
     environment:
       SERVICE_NAME: analyzer
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis as r, os; c = r.from_url(os.environ.get('REDIS_URL','redis://redis:6379')); c.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   bot:
     build:
@@ -90,6 +102,12 @@ services:
       - ../logs:/app/logs
     environment:
       SERVICE_NAME: bot
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis as r, os; c = r.from_url(os.environ.get('REDIS_URL','redis://redis:6379')); c.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ─── Migration runner (runs once then exits) ─────────────────
   migrate:

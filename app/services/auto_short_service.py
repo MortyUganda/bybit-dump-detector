@@ -2,6 +2,11 @@
 AutoShortService — автоматически открывает paper шорт при сигнале.
 Мониторит цену и закрывает при TP/SL.
 Сохраняет все метрики в БД для обучения ИИ.
+
+Плечо: 10x
+TP: -1.5% движения цены = +15% P&L
+SL: +0.75% движения цены = -7.5% P&L
+Risk/Reward: 1:2
 """
 from __future__ import annotations
 
@@ -19,8 +24,15 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-TP_PCT = 20.0
-SL_PCT = 10.0
+# ── Параметры шорта ───────────────────────────────────────────────
+LEVERAGE = 10           # плечо
+TARGET_PNL_PCT = 15.0   # желаемый P&L % с плечом
+TARGET_SL_PCT = 7.5     # максимальный убыток % с плечом
+
+# Реальное движение цены
+TP_PRICE_MOVE = TARGET_PNL_PCT / LEVERAGE  # 1.5%
+SL_PRICE_MOVE = TARGET_SL_PCT / LEVERAGE   # 0.75%
+
 MONITOR_INTERVAL = 30
 MAX_TRADE_DURATION = 60 * 60 * 4  # 4 часа
 
@@ -33,15 +45,12 @@ class AutoShortService:
         self._redis = redis
         self._bot = bot
 
-        
+    def set_bot(self, bot) -> None:
+        self._bot = bot
+
     async def restore_active_trades(self) -> None:
-        """
-        При старте сервиса восстановить активные сделки из БД.
-        Перезапускает мониторинг для каждой открытой сделки.
-        """
         try:
             from sqlalchemy import select
-
             from app.db.models.auto_short import AutoShort
             from app.db.session import AsyncSessionLocal
 
@@ -61,11 +70,11 @@ class AutoShortService:
                 now = datetime.now(timezone.utc)
                 elapsed = (now - trade.entry_ts).total_seconds()
 
-                # Если сделка уже старше MAX_TRADE_DURATION — закрываем
                 if elapsed >= MAX_TRADE_DURATION:
                     current_price = await self._get_price(trade.symbol)
                     if current_price:
-                        pnl = (trade.entry_price - current_price) / trade.entry_price * 100
+                        price_move = (trade.entry_price - current_price) / trade.entry_price * 100
+                        pnl = price_move * LEVERAGE
                         await self._update_db(
                             trade_id=trade.id,
                             exit_price=current_price,
@@ -82,7 +91,6 @@ class AutoShortService:
                         )
                     continue
 
-                # Восстанавливаем в памяти
                 ACTIVE_SHORTS[trade.id] = {
                     "id": trade.id,
                     "symbol": trade.symbol,
@@ -104,7 +112,6 @@ class AutoShortService:
                     elapsed_min=int(elapsed / 60),
                 )
 
-                # Перезапускаем мониторинг
                 asyncio.create_task(self._monitor_trade(trade.id))
 
             logger.info(
@@ -116,24 +123,17 @@ class AutoShortService:
         except Exception as e:
             logger.error("Failed to restore trades", error=str(e))
 
-
-    def set_bot(self, bot) -> None:
-        self._bot = bot
-
     async def open_short(self, risk_score: RiskScore) -> None:
-        """
-        Автоматически открыть paper шорт при сигнале.
-        Вызывается из AlertManager.
-        """
         symbol = risk_score.symbol
         entry_price = await self._get_price(symbol)
         if not entry_price:
             logger.warning("Cannot open short — no price", symbol=symbol)
             return
 
-        # Шорт: TP ниже входа, SL выше входа
-        tp_price = entry_price * (1 - TP_PCT / 100)
-        sl_price = entry_price * (1 + SL_PCT / 100)
+        # TP: цена падает на 1.5% → P&L +15%
+        # SL: цена растёт на 0.75% → P&L -7.5%
+        tp_price = entry_price * (1 - TP_PRICE_MOVE / 100)
+        sl_price = entry_price * (1 + SL_PRICE_MOVE / 100)
 
         trade_id = await self._save_to_db(
             risk_score=risk_score,
@@ -166,6 +166,7 @@ class AutoShortService:
             entry=entry_price,
             tp=tp_price,
             sl=sl_price,
+            leverage=LEVERAGE,
             score=risk_score.score,
         )
 
@@ -176,7 +177,6 @@ class AutoShortService:
         asyncio.create_task(self._monitor_trade(trade_id))
 
     async def _monitor_trade(self, trade_id: int) -> None:
-        """Мониторить цену каждые 30 секунд."""
         trade = ACTIVE_SHORTS.get(trade_id)
         if not trade:
             return
@@ -195,23 +195,20 @@ class AutoShortService:
             now = datetime.now(timezone.utc)
             elapsed = (now - entry_ts).total_seconds()
 
-            # Сохраняем снимки цены через 15/30/60 минут
             await self._save_price_snapshot(trade_id, trade, current_price, elapsed, now)
 
-            # P&L для шорта: положительный = цена упала = прибыль
-            pnl = (entry_price - current_price) / entry_price * 100
+            # P&L с плечом 10x
+            price_move = (entry_price - current_price) / entry_price * 100
+            pnl = price_move * LEVERAGE
 
-            # TP: цена упала до уровня
             if current_price <= trade["tp_price"]:
                 await self._close_trade(trade_id, current_price, "tp_hit", pnl)
                 return
 
-            # SL: цена выросла до уровня
             if current_price >= trade["sl_price"]:
                 await self._close_trade(trade_id, current_price, "sl_hit", pnl)
                 return
 
-            # Истечение времени
             if elapsed >= MAX_TRADE_DURATION:
                 await self._close_trade(trade_id, current_price, "expired", pnl)
                 return
@@ -223,7 +220,6 @@ class AutoShortService:
         reason: str,
         pnl: float,
     ) -> None:
-        """Закрыть сделку и обновить БД."""
         trade = ACTIVE_SHORTS.get(trade_id)
         if not trade:
             return
@@ -240,6 +236,7 @@ class AutoShortService:
             symbol=trade["symbol"],
             reason=reason,
             pnl=f"{pnl:+.2f}%",
+            leverage=LEVERAGE,
             ml_label=ml_label,
         )
 
@@ -254,7 +251,6 @@ class AutoShortService:
         elapsed: float,
         now: datetime,
     ) -> None:
-        """Сохранить цену через 15/30/60 минут после входа."""
         try:
             from app.db.session import AsyncSessionLocal
             from app.db.models.auto_short import AutoShort
@@ -296,7 +292,6 @@ class AutoShortService:
         tp_price: float,
         sl_price: float,
     ) -> int | None:
-        """Сохранить новую сделку в БД со всеми метриками."""
         try:
             from app.db.session import AsyncSessionLocal
             from app.db.models.auto_short import AutoShort
@@ -308,14 +303,13 @@ class AutoShortService:
                 symbol=risk_score.symbol,
                 signal_type=risk_score.signal_type.value if risk_score.signal_type else "unknown",
                 entry_price=entry_price,
-                tp_pct=TP_PCT,
-                sl_pct=SL_PCT,
+                tp_pct=TARGET_PNL_PCT,
+                sl_pct=TARGET_SL_PCT,
                 tp_price=tp_price,
                 sl_price=sl_price,
                 status="open",
                 score=risk_score.score,
                 triggered_count=risk_score.triggered_count,
-                # Факторы движка
                 f_rsi=factor_map.get("rsi"),
                 f_vwap_extension=factor_map.get("vwap_extension"),
                 f_volume_zscore=factor_map.get("volume_zscore"),
@@ -328,7 +322,6 @@ class AutoShortService:
                 f_momentum_loss=factor_map.get("momentum_loss"),
                 f_upper_wick=factor_map.get("upper_wick"),
                 f_funding_rate=factor_map.get("funding_rate"),
-                # Рыночный контекст
                 volume_24h_usdt=features.volume_24h_usdt if features else None,
                 price_change_5m=features.price_change_5m if features else None,
                 spread_pct=features.spread_pct if features else None,
@@ -354,7 +347,6 @@ class AutoShortService:
         pnl: float,
         ml_label: int,
     ) -> None:
-        """Обновить запись в БД при закрытии."""
         try:
             from app.db.session import AsyncSessionLocal
             from app.db.models.auto_short import AutoShort
@@ -378,7 +370,6 @@ class AutoShortService:
             logger.error("Auto short DB update failed", error=str(e))
 
     async def _get_price(self, symbol: str) -> float | None:
-        """Получить текущую цену из Redis или Bybit REST."""
         try:
             raw = await self._redis.get(f"score:{symbol}")
             if raw:
@@ -414,7 +405,6 @@ class AutoShortService:
         sl_price: float,
         score: float,
     ) -> None:
-        """Уведомить пользователей об открытой сделке."""
         if not self._bot:
             return
 
@@ -422,7 +412,6 @@ class AutoShortService:
             from app.bot.user_store import get_active_users
             user_ids = await get_active_users(self._redis)
 
-            base = symbol.replace("USDT", "")
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
 
             text = (
@@ -430,8 +419,9 @@ class AutoShortService:
                 f"📌 <a href=\"{bybit_url}\">{symbol}</a>\n"
                 f"📊 Score: <b>{score:.0f}</b>\n"
                 f"💰 Вход: <b>${entry_price:.6g}</b>\n\n"
-                f"🎯 TP: ${tp_price:.6g} (-{TP_PCT:.0f}%)\n"
-                f"🛑 SL: ${sl_price:.6g} (+{SL_PCT:.0f}%)\n\n"
+                f"🎯 TP: ${tp_price:.6g} (-{TP_PRICE_MOVE:.1f}% = +{TARGET_PNL_PCT:.0f}% P&L)\n"
+                f"🛑 SL: ${sl_price:.6g} (+{SL_PRICE_MOVE:.2f}% = -{TARGET_SL_PCT:.1f}% P&L)\n"
+                f"⚡ Плечо: {LEVERAGE}x\n\n"
                 f"<i>Сделка #{trade_id} | Бот следит автоматически</i>"
             )
 
@@ -459,37 +449,37 @@ class AutoShortService:
         if not self._bot:
             logger.warning("Bot not set — cannot send close notification", trade_id=trade_id)
             return
-    
+
         try:
             from app.bot.user_store import get_active_users
             user_ids = await get_active_users(self._redis)
-    
+
             if not user_ids:
                 logger.warning("No active users for close notification")
                 return
-    
+
             reason_text = {
                 "tp_hit": "🎯 Тейк профит достигнут",
                 "sl_hit": "🛑 Стоп лосс сработал",
                 "expired": "⏰ Время сделки истекло (4 часа)",
                 "closed_manual": "✋ Закрыта вручную",
             }.get(reason, reason)
-    
+
             pnl_em = "🟢" if pnl > 0 else "🔴"
             result_em = "✅" if pnl > 0 else "❌"
-    
-            base = symbol.replace("USDT", "")
+
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
-    
+
             text = (
                 f"{result_em} <b>Авто-шорт закрыт</b>\n\n"
                 f"📌 <a href=\"{bybit_url}\">{symbol}</a>\n"
                 f"{reason_text}\n\n"
                 f"💰 Выход: <b>${exit_price:.6g}</b>\n"
-                f"P&L: {pnl_em} <b>{pnl:+.2f}%</b>\n\n"
+                f"P&L: {pnl_em} <b>{pnl:+.2f}%</b>\n"
+                f"⚡ Плечо: {LEVERAGE}x\n\n"
                 f"<i>Сделка #{trade_id} | /stats для статистики</i>"
             )
-    
+
             for user_id in user_ids:
                 try:
                     await self._bot.send_message(
@@ -509,6 +499,6 @@ class AutoShortService:
                         user_id=user_id,
                         error=str(e),
                     )
-    
+
         except Exception as e:
             logger.error("Close notification error", error=str(e))

@@ -1,16 +1,10 @@
 """
 Alert Manager — broadcasts risk signals to subscribed Telegram users.
-
-Flow:
-  1. AnalyzerService calls alert_manager.send_alert(symbol, risk_score)
-  2. AlertManager queries DB for all users with alerts_enabled
-  3. Checks per-user settings (min_score, signal_type preferences, watchlist priority)
-  4. Sends Telegram message to each eligible user
-  5. Logs to alert_history
 """
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from aiogram import Bot
 
@@ -33,22 +27,15 @@ SIGNAL_TYPE_PREFS = {
 
 
 class AlertManager:
-    """
-    Sends alerts to Telegram users based on their settings.
-    """
 
     def __init__(self, bot: Bot, auto_short_service=None) -> None:
         self._bot = bot
         self._auto_short = auto_short_service
 
     async def send_alert(self, symbol: str, risk_score: RiskScore) -> None:
-        """
-        Broadcast alert to all eligible users.
-        MVP: sends to all allowed_user_ids from settings.
-        Автоматически открывает paper шорт при is_actionable.
-        """
-        from app.bot.keyboards import alert_action_keyboard, alert_detail_keyboard
-        keyboard = alert_detail_keyboard(symbol, risk_score.signal_type.value if risk_score.signal_type else "unknown")
+        text = format_risk_alert(risk_score)
+        keyboard = alert_action_keyboard(symbol)
+
         user_ids = settings.allowed_user_ids
 
         if not user_ids:
@@ -67,6 +54,19 @@ class AlertManager:
             price=price,
         )
 
+        # Записываем время последнего сигнала в Redis для мониторинга
+        try:
+            import redis.asyncio as aioredis
+            _redis = aioredis.from_url(
+                settings.redis_url,
+                encoding="utf-8",
+                decode_responses=True,
+            )
+            await _redis.set("last_signal_ts", datetime.now(timezone.utc).isoformat())
+            await _redis.aclose()
+        except Exception:
+            pass
+
         # Автоматически открываем paper шорт
         if self._auto_short and risk_score.is_actionable:
             asyncio.create_task(self._auto_short.open_short(risk_score))
@@ -76,9 +76,37 @@ class AlertManager:
                 score=risk_score.score,
             )
 
-        # Отправляем уведомление пользователям
+        # Отправляем уведомление пользователям с учётом их настроек
         for user_id in user_ids:
             try:
+                # Проверяем настройки пользователя
+                from app.bot.handlers.settings import get_user_settings
+                s = get_user_settings(user_id)
+
+                # Тихий режим
+                if s.get("quiet_mode"):
+                    continue
+
+                # Уведомления выключены
+                if not s.get("alerts_enabled", True):
+                    continue
+
+                # Минимальный score
+                if risk_score.score < s.get("min_score", 45):
+                    continue
+
+                # Тип сигнала
+                signal_type = risk_score.signal_type.value if risk_score.signal_type else ""
+                signal_pref_map = {
+                    "early_warning":  "notify_early_warning",
+                    "overheated":     "notify_overheated",
+                    "reversal_risk":  "notify_reversal_risk",
+                    "dump_started":   "notify_dump_started",
+                }
+                pref_key = signal_pref_map.get(signal_type)
+                if pref_key and not s.get(pref_key, True):
+                    continue
+
                 await self._bot.send_message(
                     chat_id=user_id,
                     text=text,
@@ -91,6 +119,7 @@ class AlertManager:
                     user_id=user_id,
                     score=risk_score.score,
                 )
+
             except Exception as e:
                 logger.warning("Alert send failed", user_id=user_id, error=str(e))
 

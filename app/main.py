@@ -43,8 +43,8 @@ async def run_ingestion() -> None:
 
     universe = UniverseManager(rest)
     ingestion = IngestionService(rest, universe, redis_client)
-
     await ingestion.start()
+
     logger.info("Ingestion service running — Ctrl+C to stop")
 
     try:
@@ -58,7 +58,7 @@ async def run_ingestion() -> None:
 
 
 async def run_analyzer() -> None:
-    """Start the analyzer + scoring + alert service."""
+    """Start the analyzer + scoring + alert + monitor service."""
     import redis.asyncio as aioredis
     from aiogram import Bot
     from aiogram.client.default import DefaultBotProperties
@@ -66,10 +66,11 @@ async def run_analyzer() -> None:
 
     from app.bybit.rest_client import BybitRestClient
     from app.bybit.universe import UniverseManager
-    from app.services.alert_manager import AlertManager
-    from app.services.analyzer import AnalyzerService
-    from app.services.auto_short_service import AutoShortService
     from app.services.ingestion import IngestionService
+    from app.services.analyzer import AnalyzerService
+    from app.services.alert_manager import AlertManager
+    from app.services.auto_short_service import AutoShortService
+    from app.services.monitor_service import MonitorService
 
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
     rest = BybitRestClient()
@@ -79,22 +80,23 @@ async def run_analyzer() -> None:
     ingestion = IngestionService(rest, universe, redis_client)
     await ingestion.start()
 
-    # Создаём бот для отправки уведомлений из analyzer
     bot = Bot(
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # Создаём AutoShortService
+    # Создаём AutoShortService и восстанавливаем активные сделки
     auto_short = AutoShortService(redis=redis_client, bot=bot)
+    await auto_short.restore_active_trades()
 
-    # Восстанавливаем активные сделки из БД после перезапуска
-    await auto_short.restore_active_trades()  # ← добавить
+    # Создаём MonitorService
+    monitor = MonitorService(redis=redis_client, bot=bot)
+    await monitor.start()
 
-    # Создаём AlertManager с AutoShortService
+    # Создаём AlertManager
     alert_mgr = AlertManager(bot=bot, auto_short_service=auto_short)
 
-
+    # Создаём AnalyzerService
     analyzer = AnalyzerService(
         ingestion=ingestion,
         redis=redis_client,
@@ -110,6 +112,7 @@ async def run_analyzer() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        await monitor.stop()
         await analyzer.stop()
         await ingestion.stop()
         await rest.stop()
