@@ -17,7 +17,7 @@ class AutoShort(Base):
     __tablename__ = "auto_shorts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-
+    close_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # ── Идентификация ─────────────────────────────────────────────
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     signal_type: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -40,6 +40,7 @@ class AutoShort(Base):
     tp_price: Mapped[float] = mapped_column(Float, nullable=False)
     sl_price: Mapped[float] = mapped_column(Float, nullable=False)
 
+
     # ── Результат ─────────────────────────────────────────────────
     status: Mapped[str] = mapped_column(String(16), default="open")
     exit_price: Mapped[float] = mapped_column(Float, nullable=True)
@@ -61,6 +62,8 @@ class AutoShort(Base):
     score: Mapped[float] = mapped_column(Float, nullable=False)
     triggered_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    f_rsi_5m: Mapped[float] = mapped_column(Float, nullable=True)        # новый
+    f_large_sell_cluster: Mapped[float] = mapped_column(Float, nullable=True)  # новый
     f_rsi: Mapped[float] = mapped_column(Float, nullable=True)
     f_vwap_extension: Mapped[float] = mapped_column(Float, nullable=True)
     f_volume_zscore: Mapped[float] = mapped_column(Float, nullable=True)

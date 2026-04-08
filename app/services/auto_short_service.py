@@ -3,10 +3,10 @@ AutoShortService — автоматически открывает paper шор�
 Мониторит цену и закрывает при TP/SL.
 Сохраняет все метрики в БД для обучения ИИ.
 
-Плечо: 10x
-TP: -1.5% движения цены = +15% P&L
-SL: +0.75% движения цены = -7.5% P&L
-Risk/Reward: 1:2
+Плечо: 20x
+TP: 45% P&L → движение цены -2.25%
+SL: 25% P&L → движение цены +1.25%
+Risk/Reward: 1:1.8
 """
 from __future__ import annotations
 
@@ -25,14 +25,13 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 # ── Параметры шорта ───────────────────────────────────────────────
-LEVERAGE = 10
-TARGET_PNL_PCT = 15.0
-TARGET_SL_PCT = 15.0
+LEVERAGE = 20       #Плечо
+TARGET_PNL_PCT = 45.0       #Процент тейк-профита
+TARGET_SL_PCT = 25.0        #Процент стоп-лосса
 
-TP_PRICE_MOVE = TARGET_PNL_PCT / LEVERAGE  # 1.5%
-SL_PRICE_MOVE = TARGET_SL_PCT / LEVERAGE   # 1.5%
-
-ENTRY_DELAY_SEC = 90        # ждём перед входом
+TP_PRICE_MOVE = TARGET_PNL_PCT / LEVERAGE  # → движение цены -2.25%
+SL_PRICE_MOVE = TARGET_SL_PCT / LEVERAGE   # → движение цены +1.25%
+ENTRY_DELAY_SEC = 60        # ждём перед входом
 MAX_PRICE_RISE_PCT = 0.3    # если цена выросла больше — пропускаем
 MONITOR_INTERVAL = 30
 MAX_TRADE_DURATION = 60 * 60 * 4
@@ -177,7 +176,6 @@ class AutoShortService:
     async def open_short(self, risk_score: RiskScore) -> None:
         symbol = risk_score.symbol
 
-        # Запоминаем цену в момент сигнала
         signal_price = await self._get_price(symbol)
         if not signal_price:
             logger.warning("Cannot open short — no price at signal", symbol=symbol)
@@ -190,26 +188,23 @@ class AutoShortService:
             delay_sec=ENTRY_DELAY_SEC,
         )
 
-        # Ждём перед входом
         await asyncio.sleep(ENTRY_DELAY_SEC)
 
-        # Проверяем цену после задержки
         entry_price = await self._get_price(symbol)
+        if not entry_price:
+            logger.warning("Cannot open short — no price after delay", symbol=symbol)
+            return
+
+        price_change_pct = (entry_price - signal_price) / signal_price * 100
 
         logger.info(
             "Price check after delay",
             symbol=symbol,
             signal_price=signal_price,
             entry_price=entry_price,
-            change_pct=round((entry_price - signal_price) / signal_price * 100, 3) if entry_price else None,
+            change_pct=round(price_change_pct, 3),
         )
 
-        if not entry_price:
-            logger.warning("Cannot open short — no price after delay", symbol=symbol)
-            return
-
-        # Если цена всё ещё растёт — пропускаем
-        price_change_pct = (entry_price - signal_price) / signal_price * 100
         if price_change_pct > MAX_PRICE_RISE_PCT:
             logger.info(
                 "Skipping short — price still rising",
@@ -219,6 +214,7 @@ class AutoShortService:
                 change_pct=round(price_change_pct, 3),
                 threshold=MAX_PRICE_RISE_PCT,
             )
+
             await self._notify_skipped(
                 symbol=symbol,
                 signal_price=signal_price,
@@ -228,9 +224,24 @@ class AutoShortService:
             )
             return
 
-        # Входим по текущей цене
         tp_price = entry_price * (1 - TP_PRICE_MOVE / 100)
         sl_price = entry_price * (1 + SL_PRICE_MOVE / 100)
+
+        trade_payload = {
+            "symbol": symbol,
+            "status": "open",
+            "close_reason": None,
+            "signal_price": signal_price,
+            "entry_price": entry_price,
+            "price_change_at_entry": price_change_pct,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+            "score": risk_score.score,
+            "entry_ts": datetime.now(timezone.utc),  # ← добавить
+            "price_15m_saved": False,               # ← добавить
+            "price_30m_saved": False,               # ← добавить
+            "price_60m_saved": False,               # ← добавить
+        }
 
         trade_id = await self._save_to_db(
             risk_score=risk_score,
@@ -242,43 +253,40 @@ class AutoShortService:
         )
 
         if not trade_id:
+            logger.warning(
+                "Failed to persist short trade",
+                symbol=symbol,
+                entry_price=entry_price,
+            )
             return
 
-        now = datetime.now(timezone.utc)
-        ACTIVE_SHORTS[trade_id] = {
-            "id": trade_id,
-            "symbol": symbol,
-            "entry_price": entry_price,
-            "tp_price": tp_price,
-            "sl_price": sl_price,
-            "entry_ts": now,
-            "status": "open",
-            "price_15m_saved": False,
-            "price_30m_saved": False,
-            "price_60m_saved": False,
-            "signal_price": signal_price,
-            "price_change_at_entry": round(price_change_pct, 3),
-        }
+        trade_payload["id"] = trade_id
+        ACTIVE_SHORTS[trade_id] = trade_payload
 
         logger.info(
             "Auto short opened",
             trade_id=trade_id,
             symbol=symbol,
             signal_price=signal_price,
-            entry=entry_price,
+            entry_price=entry_price,
             change_pct=round(price_change_pct, 3),
-            tp=tp_price,
-            sl=sl_price,
-            leverage=LEVERAGE,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            tp_pct=TP_PRICE_MOVE,
+            sl_pct=SL_PRICE_MOVE,
             score=risk_score.score,
         )
 
         await self._notify_opened(
-            trade_id, symbol, signal_price, entry_price,
-            tp_price, sl_price, risk_score.score, price_change_pct,
+            trade_id=trade_id,
+            symbol=symbol,
+            signal_price=signal_price,
+            entry_price=entry_price,
+            price_change_pct=price_change_pct,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            score=risk_score.score,
         )
-
-        asyncio.create_task(self._monitor_trade(trade_id))
 
 
     async def _monitor_trade(self, trade_id: int) -> None:
@@ -329,17 +337,37 @@ class AutoShortService:
         if not trade:
             return
 
-        trade["status"] = reason
+        allowed_reasons = {"tp_hit", "sl_hit", "manual", "expired", "closed_manual"}
+        if reason not in allowed_reasons:
+            logger.warning(
+                "Unknown close reason, fallback applied",
+                trade_id=trade_id,
+                reason=reason,
+            )
+            reason = "manual"
+
         now = datetime.now(timezone.utc)
         ml_label = 1 if pnl > 0 else 0
 
-        await self._update_db(trade_id, exit_price, now, reason, pnl, ml_label)
+        trade["status"] = "closed"
+        trade["close_reason"] = reason
+
+        await self._update_db(
+            trade_id=trade_id,
+            exit_price=exit_price,
+            exit_ts=now,
+            status="closed",
+            close_reason=reason,
+            pnl=pnl,
+            ml_label=ml_label,
+        )
 
         logger.info(
             "Auto short closed",
             trade_id=trade_id,
             symbol=trade["symbol"],
-            reason=reason,
+            status="closed",
+            close_reason=reason,
             pnl=f"{pnl:+.2f}%",
             leverage=LEVERAGE,
             ml_label=ml_label,
@@ -409,15 +437,23 @@ class AutoShortService:
             trade = AutoShort(
                 symbol=risk_score.symbol,
                 signal_type=risk_score.signal_type.value if risk_score.signal_type else "unknown",
+                # Вход
+                signal_price=signal_price,
                 entry_price=entry_price,
+                price_change_at_entry=price_change_at_entry,
+                entry_delay_sec=ENTRY_DELAY_SEC,
+                # Параметры шорта
+                leverage=LEVERAGE,
                 tp_pct=TARGET_PNL_PCT,
                 sl_pct=TARGET_SL_PCT,
                 tp_price=tp_price,
                 sl_price=sl_price,
                 status="open",
+                # Скоринг
                 score=risk_score.score,
                 triggered_count=risk_score.triggered_count,
-                f_rsi=factor_map.get("rsi"),
+                # Факторы — старые
+                f_rsi=factor_map.get("rsi_1m") or factor_map.get("rsi"),
                 f_vwap_extension=factor_map.get("vwap_extension"),
                 f_volume_zscore=factor_map.get("volume_zscore"),
                 f_trade_imbalance=factor_map.get("trade_imbalance"),
@@ -429,6 +465,10 @@ class AutoShortService:
                 f_momentum_loss=factor_map.get("momentum_loss"),
                 f_upper_wick=factor_map.get("upper_wick"),
                 f_funding_rate=factor_map.get("funding_rate"),
+                # Факторы — новые
+                f_rsi_5m=factor_map.get("rsi_5m"),
+                f_large_sell_cluster=factor_map.get("large_sell_cluster"),
+                # Рыночный контекст
                 volume_24h_usdt=features.volume_24h_usdt if features else None,
                 price_change_5m=features.price_change_5m if features else None,
                 spread_pct=features.spread_pct if features else None,
@@ -451,6 +491,7 @@ class AutoShortService:
         exit_price: float,
         exit_ts: datetime,
         status: str,
+        close_reason: str,
         pnl: float,
         ml_label: int,
     ) -> None:
@@ -460,7 +501,7 @@ class AutoShortService:
             from sqlalchemy import update
 
             async with AsyncSessionLocal() as session:
-                await session.execute(
+                result = await session.execute(
                     update(AutoShort)
                     .where(AutoShort.id == trade_id)
                     .values(
@@ -469,12 +510,30 @@ class AutoShortService:
                         exit_ts=exit_ts,
                         pnl_pct=pnl,
                         ml_label=ml_label,
+                        close_reason=close_reason,
                     )
                 )
+
                 await session.commit()
 
+                if result.rowcount == 0:
+                    logger.warning(
+                        "Trade update affected 0 rows",
+                        trade_id=trade_id,
+                        status=status,
+                        close_reason=close_reason,
+                    )
+
         except Exception as e:
-            logger.error("Auto short DB update failed", error=str(e))
+            logger.exception(
+                "Failed to update closed trade in DB",
+                trade_id=trade_id,
+                status=status,
+                close_reason=close_reason,
+                error=str(e),
+            )
+            raise
+
 
     async def _get_price(self, symbol: str) -> float | None:
         try:
@@ -576,6 +635,7 @@ class AutoShortService:
                 "sl_hit": "🛑 Стоп лосс сработал",
                 "expired": "⏰ Время сделки истекло (4 часа)",
                 "closed_manual": "✋ Закрыта вручную",
+                "manual": "✋ Закрыта вручную",
             }.get(reason, reason)
 
             pnl_em = "🟢" if pnl > 0 else "🔴"
