@@ -142,17 +142,22 @@ class IngestionService:
         while self._running:
             try:
                 symbols = list(self._universe.symbols)
-                # Stagger requests to avoid rate limiting
                 for i, symbol in enumerate(symbols):
                     if not self._running:
                         break
                     await self._refresh_candles(symbol)
-                    # Small delay between symbols — ~0.1s → 100 symbols = 10s
+
+                    # Сохраняем свечи в Redis после обновления
+                    calc = self._calculators.get(symbol)
+                    if calc:
+                        await calc.save_to_redis(self._redis)
+
                     if i % 10 == 9:
                         await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error("Candle refresh loop error", error=str(e))
             await asyncio.sleep(60)
+
 
     async def _refresh_candles(self, symbol: str) -> None:
         calc = self._get_or_create_calculator(symbol)
@@ -221,11 +226,21 @@ class IngestionService:
         """Pre-load candle history on startup."""
         symbols = list(self._universe.symbols)
         logger.info("Bootstrapping calculators", count=len(symbols))
+
+        # Сначала пробуем восстановить из Redis
+        restored = 0
+        for symbol in symbols:
+            calc = self._get_or_create_calculator(symbol)
+            if await calc.restore_from_redis(self._redis):
+                restored += 1
+
+        logger.info("Restored from Redis", count=restored, total=len(symbols))
+
+        # Для оставшихся — загружаем с REST
         tasks = [self._refresh_candles(sym) for sym in symbols]
-        # Process in batches to avoid API rate limits
         batch_size = 20
         for i in range(0, len(tasks), batch_size):
-            await asyncio.gather(*tasks[i : i + batch_size], return_exceptions=True)
+            await asyncio.gather(*tasks[i: i + batch_size], return_exceptions=True)
             await asyncio.sleep(1.0)
 
     def _get_or_create_calculator(self, symbol: str) -> FeatureCalculator:

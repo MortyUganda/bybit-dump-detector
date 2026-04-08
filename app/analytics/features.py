@@ -173,6 +173,69 @@ class FeatureCalculator:
 
         return features
 
+    async def save_to_redis(self, redis) -> None:
+        """Сохранить свечи в Redis для восстановления при перезапуске."""
+        try:
+            import json
+            key = f"candles:{self.symbol}"
+            data = {
+                "candles_1m": [
+                    {"ts": c.ts, "open": c.open, "high": c.high,
+                    "low": c.low, "close": c.close,
+                    "volume": c.volume, "turnover": c.turnover}
+                    for c in self._candles_1m
+                ],
+                "candles_5m": [
+                    {"ts": c.ts, "open": c.open, "high": c.high,
+                    "low": c.low, "close": c.close,
+                    "volume": c.volume, "turnover": c.turnover}
+                    for c in self._candles_5m
+                ],
+                "volume_24h": self._volume_24h,
+                "last_price": self._last_price,
+            }
+            await redis.setex(key, 3600, json.dumps(data))  # TTL 1 час
+        except Exception as e:
+            logger.debug("Candle save failed", symbol=self.symbol, error=str(e))
+
+
+    async def restore_from_redis(self, redis) -> bool:
+        """Восстановить свечи из Redis. Возвращает True если данные найдены."""
+        try:
+            import json
+            key = f"candles:{self.symbol}"
+            raw = await redis.get(key)
+            if not raw:
+                return False
+
+            data = json.loads(raw)
+
+            candles_1m = [CandleData(**c) for c in data.get("candles_1m", [])]
+            candles_5m = [CandleData(**c) for c in data.get("candles_5m", [])]
+
+            if candles_1m:
+                self._candles_1m.clear()
+                self._candles_1m.extend(candles_1m)
+
+            if candles_5m:
+                self._candles_5m.clear()
+                self._candles_5m.extend(candles_5m)
+
+            self._volume_24h = data.get("volume_24h", 0.0)
+            self._last_price = data.get("last_price", 0.0)
+
+            logger.debug(
+                "Candles restored from Redis",
+                symbol=self.symbol,
+                candles_1m=len(candles_1m),
+                candles_5m=len(candles_5m),
+            )
+            return True
+
+        except Exception as e:
+            logger.debug("Candle restore failed", symbol=self.symbol, error=str(e))
+            return False
+
     # ── Trade features ────────────────────────────────────────────
 
     def _compute_trade_features(self, f: CoinFeatures, now: float) -> None:
@@ -190,7 +253,6 @@ class FeatureCalculator:
         if len(all_values) >= 20:
             f.large_trade_threshold = float(np.percentile(all_values, 95))
         else:
-            # Fallback: use mean * 3 as "large"
             f.large_trade_threshold = float(np.mean(all_values) * 3) if all_values else 1000.0
 
         # --- Buy/sell volumes 5m ---
@@ -216,7 +278,7 @@ class FeatureCalculator:
         # --- Volume 1m ---
         f.volume_1m = sum(t.usdt_value for t in trades_1m)
 
-        # --- Volume z-score (compare 1m volume to historical 1m volumes from candles) ---
+        # --- Volume z-score ---
         if len(self._candles_1m) >= 10:
             candle_vols = [c.turnover for c in self._candles_1m]
             mu = np.mean(candle_vols)
@@ -226,17 +288,24 @@ class FeatureCalculator:
             else:
                 f.volume_zscore_1m = 0.0
 
-        # --- Price changes ---
-        price_now = trades_5m[-1].price if trades_5m else 0.0
-        prices_1m_ago = [t.price for t in self._trades if abs(t.ts - (now - 60)) < 5]
-        prices_5m_ago = [t.price for t in self._trades if abs(t.ts - (now - 300)) < 5]
+        # --- Price changes (используем last_price и ближайший трейд) ---
+        price_now = self._last_price if self._last_price else (
+            trades_5m[-1].price if trades_5m else 0.0
+        )
 
-        if prices_1m_ago and price_now:
-            f.price_change_1m = (price_now - prices_1m_ago[0]) / prices_1m_ago[0] * 100
-        if prices_5m_ago and price_now:
-            f.price_change_5m = (price_now - prices_5m_ago[0]) / prices_5m_ago[0] * 100
+        # Ищем ближайший трейд не позднее чем 1/5 минут назад
+        trades_before_1m = [t for t in self._trades if t.ts <= now - 55]
+        trades_before_5m = [t for t in self._trades if t.ts <= now - 295]
 
+        price_1m_ago = trades_before_1m[-1].price if trades_before_1m else None
+        price_5m_ago = trades_before_5m[-1].price if trades_before_5m else None
+
+        if price_1m_ago and price_now:
+            f.price_change_1m = (price_now - price_1m_ago) / price_1m_ago * 100
+        if price_5m_ago and price_now:
+            f.price_change_5m = (price_now - price_5m_ago) / price_5m_ago * 100
     # ── Candle features ───────────────────────────────────────────
+
 
     def _compute_candle_features(self, f: CoinFeatures) -> None:
         candles = list(self._candles_1m)
@@ -253,8 +322,14 @@ class FeatureCalculator:
         if len(closes) >= 15:
             f.price_change_15m = (closes[-1] - closes[-15]) / closes[-15] * 100
 
-        # --- RSI(14) ---
+        # --- RSI 1m ---
         f.rsi_14_1m = self._calc_rsi(closes, 14)
+
+        # --- RSI 5m ---
+        candles_5m = list(self._candles_5m)
+        if len(candles_5m) >= 15:
+            closes_5m = np.array([c.close for c in candles_5m])
+            f.rsi_14_5m = self._calc_rsi(closes_5m, 14)
 
         # --- ATR(14) ---
         f.atr_14_1m = self._calc_atr(highs, lows, closes, 14)
@@ -263,7 +338,7 @@ class FeatureCalculator:
         if len(closes) >= 2:
             returns = np.diff(closes) / closes[:-1]
             window = min(60, len(returns))
-            f.realized_vol_1h = float(np.std(returns[-window:]) * 100)  # in %
+            f.realized_vol_1h = float(np.std(returns[-window:]) * 100)
 
         # --- VWAP (15m) ---
         if len(candles) >= 15:
@@ -293,12 +368,11 @@ class FeatureCalculator:
             f.upper_wick_ratio = upper_wick / body
             f.lower_wick_ratio = lower_wick / body
 
-        # --- Price acceleration (speed-up detection) ---
+        # --- Price acceleration ---
         if len(closes) >= 6:
-            # Compare last 1m change vs avg of prior 5 1m changes
             recent_change = (closes[-1] - closes[-2]) / closes[-2] * 100
             prior_changes = [(closes[i] - closes[i-1]) / closes[i-1] * 100
-                             for i in range(-6, -1)]
+                            for i in range(-6, -1)]
             avg_prior = np.mean(prior_changes)
             f.price_acceleration = recent_change - avg_prior
 
@@ -309,20 +383,26 @@ class FeatureCalculator:
             if sigma > 0:
                 f.volume_zscore_1m = (volumes[-1] - mu) / sigma
 
-        # --- Volume decline after spike (momentum loss) ---
+        # --- Volume decline after spike (исправлено) ---
         if len(volumes) >= 5:
-            peak_vol = np.max(volumes[-10:-2]) if len(volumes) >= 10 else np.max(volumes[:-2])
-            current_vol = volumes[-1]
-            # Price still high but volume dropped > 50% from peak
-            if current_vol < peak_vol * 0.5 and f.price_change_5m > 2.0:
-                f.volume_decline_after_spike = True
+            if len(volumes) >= 10:
+                peak_slice = volumes[-10:-2]
+            else:
+                peak_slice = volumes[:-2]
 
-        # --- Momentum loss: price stalls after impulse ---
+            if len(peak_slice) > 0:
+                peak_vol = np.max(peak_slice)
+                current_vol = volumes[-1]
+                if current_vol < peak_vol * 0.5 and f.price_change_5m > 2.0:
+                    f.volume_decline_after_spike = True
+
+        # --- Momentum loss ---
         if len(closes) >= 10:
             impulse = (closes[-5] - closes[-10]) / closes[-10] * 100
             stall = (closes[-1] - closes[-5]) / closes[-5] * 100
             if impulse > 3.0 and abs(stall) < 0.5:
                 f.momentum_loss_signal = True
+
 
     # ── Orderbook features ────────────────────────────────────────
 

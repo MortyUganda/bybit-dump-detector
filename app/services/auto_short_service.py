@@ -25,16 +25,17 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 # ── Параметры шорта ───────────────────────────────────────────────
-LEVERAGE = 10           # плечо
-TARGET_PNL_PCT = 15.0   # желаемый P&L % с плечом
-TARGET_SL_PCT = 7.5     # максимальный убыток % с плечом
+LEVERAGE = 10
+TARGET_PNL_PCT = 15.0
+TARGET_SL_PCT = 15.0
 
-# Реальное движение цены
 TP_PRICE_MOVE = TARGET_PNL_PCT / LEVERAGE  # 1.5%
-SL_PRICE_MOVE = TARGET_SL_PCT / LEVERAGE   # 0.75%
+SL_PRICE_MOVE = TARGET_SL_PCT / LEVERAGE   # 1.5%
 
+ENTRY_DELAY_SEC = 90        # ждём перед входом
+MAX_PRICE_RISE_PCT = 0.3    # если цена выросла больше — пропускаем
 MONITOR_INTERVAL = 30
-MAX_TRADE_DURATION = 60 * 60 * 4  # 4 часа
+MAX_TRADE_DURATION = 60 * 60 * 4
 
 ACTIVE_SHORTS: dict[int, dict] = {}
 
@@ -47,6 +48,56 @@ class AutoShortService:
 
     def set_bot(self, bot) -> None:
         self._bot = bot
+
+    async def _notify_skipped(
+        self,
+        symbol: str,
+        signal_price: float,
+        entry_price: float,
+        price_change_pct: float,
+        score: float,
+    ) -> None:
+        """Уведомить что сигнал пропущен из-за продолжения памп."""
+        if not self._bot:
+            return
+
+        try:
+            from app.bot.user_store import get_active_users
+            user_ids = await get_active_users(self._redis)
+
+            if not user_ids:
+                return
+
+            bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
+
+            text = (
+                f"⏭ <b>Сигнал пропущен</b>\n\n"
+                f"📌 <a href=\"{bybit_url}\">{symbol}</a>\n"
+                f"📊 Score: <b>{score:.0f}</b>\n\n"
+                f"📍 Цена сигнала: <b>${signal_price:.6g}</b>\n"
+                f"📈 Цена через {ENTRY_DELAY_SEC}с: <b>${entry_price:.6g}</b>\n"
+                f"⚠️ Рост: <b>+{price_change_pct:.2f}%</b> (порог +{MAX_PRICE_RISE_PCT}%)\n\n"
+                f"<i>Памп продолжается — вход отложен во избежание убытка</i>"
+            )
+
+            for user_id in user_ids:
+                try:
+                    await self._bot.send_message(
+                        chat_id=user_id,
+                        text=text,
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    logger.warning("Skip notify failed", user_id=user_id, error=str(e))
+
+            logger.info(
+                "Skip notification sent",
+                symbol=symbol,
+                change_pct=round(price_change_pct, 3),
+            )
+
+        except Exception as e:
+            logger.error("Skip notification error", error=str(e))
 
     async def restore_active_trades(self) -> None:
         try:
@@ -125,19 +176,67 @@ class AutoShortService:
 
     async def open_short(self, risk_score: RiskScore) -> None:
         symbol = risk_score.symbol
-        entry_price = await self._get_price(symbol)
-        if not entry_price:
-            logger.warning("Cannot open short — no price", symbol=symbol)
+
+        # Запоминаем цену в момент сигнала
+        signal_price = await self._get_price(symbol)
+        if not signal_price:
+            logger.warning("Cannot open short — no price at signal", symbol=symbol)
             return
 
-        # TP: цена падает на 1.5% → P&L +15%
-        # SL: цена растёт на 0.75% → P&L -7.5%
+        logger.info(
+            "Short signal received — waiting before entry",
+            symbol=symbol,
+            signal_price=signal_price,
+            delay_sec=ENTRY_DELAY_SEC,
+        )
+
+        # Ждём перед входом
+        await asyncio.sleep(ENTRY_DELAY_SEC)
+
+        # Проверяем цену после задержки
+        entry_price = await self._get_price(symbol)
+
+        logger.info(
+            "Price check after delay",
+            symbol=symbol,
+            signal_price=signal_price,
+            entry_price=entry_price,
+            change_pct=round((entry_price - signal_price) / signal_price * 100, 3) if entry_price else None,
+        )
+
+        if not entry_price:
+            logger.warning("Cannot open short — no price after delay", symbol=symbol)
+            return
+
+        # Если цена всё ещё растёт — пропускаем
+        price_change_pct = (entry_price - signal_price) / signal_price * 100
+        if price_change_pct > MAX_PRICE_RISE_PCT:
+            logger.info(
+                "Skipping short — price still rising",
+                symbol=symbol,
+                signal_price=signal_price,
+                entry_price=entry_price,
+                change_pct=round(price_change_pct, 3),
+                threshold=MAX_PRICE_RISE_PCT,
+            )
+            await self._notify_skipped(
+                symbol=symbol,
+                signal_price=signal_price,
+                entry_price=entry_price,
+                price_change_pct=price_change_pct,
+                score=risk_score.score,
+            )
+            return
+
+        # Входим по текущей цене
         tp_price = entry_price * (1 - TP_PRICE_MOVE / 100)
         sl_price = entry_price * (1 + SL_PRICE_MOVE / 100)
 
         trade_id = await self._save_to_db(
             risk_score=risk_score,
             entry_price=entry_price,
+            signal_price=signal_price,
+            price_change_at_entry=price_change_pct,
             tp_price=tp_price,
             sl_price=sl_price,
         )
@@ -157,13 +256,17 @@ class AutoShortService:
             "price_15m_saved": False,
             "price_30m_saved": False,
             "price_60m_saved": False,
+            "signal_price": signal_price,
+            "price_change_at_entry": round(price_change_pct, 3),
         }
 
         logger.info(
             "Auto short opened",
             trade_id=trade_id,
             symbol=symbol,
+            signal_price=signal_price,
             entry=entry_price,
+            change_pct=round(price_change_pct, 3),
             tp=tp_price,
             sl=sl_price,
             leverage=LEVERAGE,
@@ -171,10 +274,12 @@ class AutoShortService:
         )
 
         await self._notify_opened(
-            trade_id, symbol, entry_price, tp_price, sl_price, risk_score.score
+            trade_id, symbol, signal_price, entry_price,
+            tp_price, sl_price, risk_score.score, price_change_pct,
         )
 
         asyncio.create_task(self._monitor_trade(trade_id))
+
 
     async def _monitor_trade(self, trade_id: int) -> None:
         trade = ACTIVE_SHORTS.get(trade_id)
@@ -289,6 +394,8 @@ class AutoShortService:
         self,
         risk_score: RiskScore,
         entry_price: float,
+        signal_price: float,
+        price_change_at_entry: float,
         tp_price: float,
         sl_price: float,
     ) -> int | None:
@@ -400,10 +507,12 @@ class AutoShortService:
         self,
         trade_id: int,
         symbol: str,
+        signal_price: float,
         entry_price: float,
         tp_price: float,
         sl_price: float,
         score: float,
+        price_change_pct: float,
     ) -> None:
         if not self._bot:
             return
@@ -413,14 +522,17 @@ class AutoShortService:
             user_ids = await get_active_users(self._redis)
 
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
+            change_em = "🔴" if price_change_pct > 0 else "🟢"
 
             text = (
                 f"🤖 <b>Авто-шорт открыт</b>\n\n"
                 f"📌 <a href=\"{bybit_url}\">{symbol}</a>\n"
-                f"📊 Score: <b>{score:.0f}</b>\n"
-                f"💰 Вход: <b>${entry_price:.6g}</b>\n\n"
+                f"📊 Score: <b>{score:.0f}</b>\n\n"
+                f"📍 Цена сигнала: <b>${signal_price:.6g}</b>\n"
+                f"{change_em} Цена входа: <b>${entry_price:.6g}</b> "
+                f"({price_change_pct:+.2f}% за {ENTRY_DELAY_SEC}с)\n\n"
                 f"🎯 TP: ${tp_price:.6g} (-{TP_PRICE_MOVE:.1f}% = +{TARGET_PNL_PCT:.0f}% P&L)\n"
-                f"🛑 SL: ${sl_price:.6g} (+{SL_PRICE_MOVE:.2f}% = -{TARGET_SL_PCT:.1f}% P&L)\n"
+                f"🛑 SL: ${sl_price:.6g} (+{SL_PRICE_MOVE:.1f}% = -{TARGET_SL_PCT:.0f}% P&L)\n"
                 f"⚡ Плечо: {LEVERAGE}x\n\n"
                 f"<i>Сделка #{trade_id} | Бот следит автоматически</i>"
             )
@@ -437,6 +549,7 @@ class AutoShortService:
 
         except Exception as e:
             logger.error("Open notification failed", error=str(e))
+
 
     async def _notify_closed(
         self,

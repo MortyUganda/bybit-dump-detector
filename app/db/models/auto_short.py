@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Float, Integer, String, DateTime, Boolean, Text
+from sqlalchemy import Float, Integer, String, DateTime, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models.base import Base
@@ -23,28 +23,28 @@ class AutoShort(Base):
     signal_type: Mapped[str] = mapped_column(String(32), nullable=False)
 
     # ── Вход ──────────────────────────────────────────────────────
+    signal_price: Mapped[float] = mapped_column(Float, nullable=True)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    price_change_at_entry: Mapped[float] = mapped_column(Float, nullable=True)
     entry_ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+    entry_delay_sec: Mapped[int] = mapped_column(Integer, default=90, nullable=True)
 
-    # ── Уровни шорта (цена падает = прибыль) ─────────────────────
-    tp_pct: Mapped[float] = mapped_column(Float, default=20.0)   # TP -20% от входа
-    sl_pct: Mapped[float] = mapped_column(Float, default=10.0)   # SL +10% от входа
-    tp_price: Mapped[float] = mapped_column(Float, nullable=False)  # entry * (1 - 0.20)
-    sl_price: Mapped[float] = mapped_column(Float, nullable=False)  # entry * (1 + 0.10)
+    # ── Параметры шорта ───────────────────────────────────────────
+    leverage: Mapped[int] = mapped_column(Integer, default=10, nullable=True)
+    tp_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    sl_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    tp_price: Mapped[float] = mapped_column(Float, nullable=False)
+    sl_price: Mapped[float] = mapped_column(Float, nullable=False)
 
     # ── Результат ─────────────────────────────────────────────────
     status: Mapped[str] = mapped_column(String(16), default="open")
-    # open / tp_hit / sl_hit / closed_manual / expired
     exit_price: Mapped[float] = mapped_column(Float, nullable=True)
     exit_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     pnl_pct: Mapped[float] = mapped_column(Float, nullable=True)
-    # Для шорта: pnl = (entry - exit) / entry * 100
-    # Положительный = прибыль (цена упала)
-    # Отрицательный = убыток (цена выросла)
 
     # ── Цены через N минут после входа (для ИИ) ───────────────────
     price_15m: Mapped[float] = mapped_column(Float, nullable=True)
@@ -54,15 +54,13 @@ class AutoShort(Base):
     price_30m_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     price_60m_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Исход для обучения (заполняется после закрытия)
-    # 1 = шорт был прибыльным (цена упала), 0 = убыток
+    # ml_label: 1 = прибыль, 0 = убыток
     ml_label: Mapped[int] = mapped_column(Integer, nullable=True)
 
-    # ── Метрики движка в момент входа (для ИИ) ───────────────────
+    # ── Метрики движка в момент сигнала (для ИИ) ─────────────────
     score: Mapped[float] = mapped_column(Float, nullable=False)
     triggered_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # Факторы движка
     f_rsi: Mapped[float] = mapped_column(Float, nullable=True)
     f_vwap_extension: Mapped[float] = mapped_column(Float, nullable=True)
     f_volume_zscore: Mapped[float] = mapped_column(Float, nullable=True)
@@ -76,7 +74,7 @@ class AutoShort(Base):
     f_upper_wick: Mapped[float] = mapped_column(Float, nullable=True)
     f_funding_rate: Mapped[float] = mapped_column(Float, nullable=True)
 
-    # Рыночный контекст в момент входа
+    # ── Рыночный контекст ─────────────────────────────────────────
     volume_24h_usdt: Mapped[float] = mapped_column(Float, nullable=True)
     price_change_5m: Mapped[float] = mapped_column(Float, nullable=True)
     price_change_1h: Mapped[float] = mapped_column(Float, nullable=True)

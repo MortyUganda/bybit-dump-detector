@@ -15,30 +15,27 @@ FACTOR TABLE
 ═══════════════════════════════════════════════════════════════
 Factor                    | Weight | Direction
 ──────────────────────────┼────────┼────────────────────────────
-RSI overbought (>75)       |  15%   | ↑ risk when high
-VWAP extension (>3%)       |  12%   | ↑ risk when above vwap
-Volume z-score (>2σ)       |  12%   | ↑ risk when spiking
-Trade imbalance (buy-heavy)|  10%   | ↑ risk when buy-dominated
-Large buy cluster (5m)     |  10%   | ↑ risk when clustered
-Price acceleration         |  10%   | ↑ risk when accelerating
-Consecutive green candles  |   8%   | ↑ risk when 5+
-OB imbalance (bid removal) |   8%   | ↑ risk when bids thin
-Spread expansion           |   5%   | ↑ risk when wide
-Momentum loss after spike  |   5%   | ↑ risk when stalling
-Upper wick rejection       |   3%   | ↑ risk on long upper wick
-Funding rate (perp only)   |   2%   | ↑ risk when extreme
+RSI overbought 1m (>75)    |  13%   | ↑ risk when high
+RSI overbought 5m (>70)    |   8%   | ↑ risk when high (confirmation)
+VWAP extension (>3%)       |  11%   | ↑ risk when above vwap
+Volume z-score (>2σ)       |  11%   | ↑ risk when spiking
+Trade imbalance (buy-heavy)|   9%   | ↑ risk when buy-dominated
+Large buy cluster (5m)     |   9%   | ↑ risk when clustered
+Large sell cluster (5m)    |   6%   | ↑ risk when big sells appear
+Price acceleration         |   9%   | ↑ risk when accelerating
+Consecutive green candles  |   7%   | ↑ risk when 5+
+OB imbalance (bid removal) |   7%   | ↑ risk when bids thin
+Spread expansion           |   4%   | ↑ risk when wide
+Momentum loss after spike  |   4%   | ↑ risk when stalling
+Upper wick rejection       |   2%   | ↑ risk on long upper wick
+Funding rate (perp only)   |   0%   | ↑ risk when extreme
 ═══════════════════════════════════════════════════════════════
-
-Anti-noise mechanisms:
-- Minimum 100 trades in buffer before scoring
-- score only increases if >= 3 factors triggered
-- cooldown: same symbol re-scored at most every 30s
 
 TODO: Calibrate thresholds after 1 week of live data.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -57,37 +54,37 @@ class RiskLevel(str, Enum):
 
 
 class SignalType(str, Enum):
-    EARLY_WARNING = "early_warning"    # Score 30–49, 2+ factors
-    OVERHEATED = "overheated"          # Score 50–74, RSI + VWAP + volume all high
-    REVERSAL_RISK = "reversal_risk"    # Momentum loss + wick + OB thinning
-    DUMP_STARTED = "dump_started"      # Price already -3% from recent high + OB collapse
+    EARLY_WARNING = "early_warning"
+    OVERHEATED = "overheated"
+    REVERSAL_RISK = "reversal_risk"
+    DUMP_STARTED = "dump_started"
 
 
 @dataclass
 class FactorResult:
     name: str
     raw_value: float
-    normalized: float   # 0–1
+    normalized: float
     weight: float
-    contribution: float  # normalized * weight * 100
-    triggered: bool      # normalized >= 0.5
+    contribution: float
+    triggered: bool
 
 
 @dataclass
 class RiskScore:
     symbol: str
     ts: float
-    score: float                        # 0–100
+    score: float
     level: RiskLevel
     factors: list[FactorResult]
     signal_type: Optional[SignalType]
     triggered_count: int
-    top_reasons: list[str]              # human-readable top 3 reasons
+    top_reasons: list[str]
     features_snapshot: Optional[CoinFeatures] = None
 
     @property
     def is_actionable(self) -> bool:
-        return self.score >= 45 and self.triggered_count >= 2  # HIGH-SENSITIVITY (was 50/3)
+        return self.score >= 45 and self.triggered_count >= 2
 
     def to_dict(self) -> dict:
         return {
@@ -129,140 +126,154 @@ class ScoringEngine:
 
     # ── Factor weights (must sum to 1.0) ─────────────────────────
     WEIGHTS = {
-        "rsi":                  0.15,
-        "vwap_extension":       0.12,
-        "volume_zscore":        0.12,
-        "trade_imbalance":      0.10,
-        "large_buy_cluster":    0.10,
-        "price_acceleration":   0.10,
-        "consecutive_greens":   0.08,
-        "ob_bid_thinning":      0.08,
-        "spread_expansion":     0.05,
-        "momentum_loss":        0.05,
-        "upper_wick":           0.03,
-        "funding_rate":         0.02,
+        "rsi_1m":               0.13,
+        "rsi_5m":               0.08,  # NEW — подтверждение на 5m
+        "vwap_extension":       0.11,
+        "volume_zscore":        0.11,
+        "trade_imbalance":      0.09,
+        "large_buy_cluster":    0.09,
+        "large_sell_cluster":   0.06,  # NEW — крупные продажи = начало слива
+        "price_acceleration":   0.09,
+        "consecutive_greens":   0.07,
+        "ob_bid_thinning":      0.07,
+        "spread_expansion":     0.04,
+        "momentum_loss":        0.04,
+        "upper_wick":           0.02,
+        "funding_rate":         0.00,  # оставлен для совместимости
     }
 
-    # ── Threshold calibration defaults ────────────────────────────
-    # RSI thresholds for normalization: below low_thresh → 0, above high_thresh → 1
-    RSI_LOW = 55.0   # HIGH-SENSITIVITY MODE (was 60/80)
+    # ── RSI 1m thresholds ─────────────────────────────────────────
+    RSI_LOW = 55.0
     RSI_HIGH = 72.0
 
-    VWAP_EXT_LOW = 1.5   # % — HIGH-SENSITIVITY (was 2.0/5.0)
+    # ── RSI 5m thresholds (чуть ниже — 5m медленнее реагирует) ───
+    RSI_5M_LOW = 58.0
+    RSI_5M_HIGH = 75.0
+
+    # ── VWAP extension ────────────────────────────────────────────
+    VWAP_EXT_LOW = 1.5
     VWAP_EXT_HIGH = 3.5
 
-    VOLUME_ZSCORE_LOW = 1.0   # HIGH-SENSITIVITY (was 1.5/3.0)
+    # ── Volume z-score ────────────────────────────────────────────
+    VOLUME_ZSCORE_LOW = 1.0
     VOLUME_ZSCORE_HIGH = 2.2
 
-    # Imbalance: +1 = all buys, –1 = all sells. High buy imbalance = risk
-    IMBALANCE_LOW = 0.2   # HIGH-SENSITIVITY (was 0.3/0.7)
+    # ── Trade imbalance ───────────────────────────────────────────
+    IMBALANCE_LOW = 0.2
     IMBALANCE_HIGH = 0.55
 
-    # Large buy cluster (count 5m)
-    LARGE_BUY_LOW = 2   # HIGH-SENSITIVITY (was 3/8)
+    # ── Large buy cluster ─────────────────────────────────────────
+    LARGE_BUY_LOW = 2
     LARGE_BUY_HIGH = 5
 
-    # Price acceleration (% vs prior baseline)
-    ACCEL_LOW = 0.3   # HIGH-SENSITIVITY (was 0.5/2.0)
+    # ── Large sell cluster (крупные продажи = риск слива) ─────────
+    LARGE_SELL_LOW = 1    # даже 1 крупная продажа — сигнал
+    LARGE_SELL_HIGH = 4
+
+    # ── Price acceleration ────────────────────────────────────────
+    ACCEL_LOW = 0.3
     ACCEL_HIGH = 1.5
 
-    # Consecutive green candles
-    GREEN_LOW = 3   # HIGH-SENSITIVITY (was 4/8)
+    # ── Consecutive green candles ─────────────────────────────────
+    GREEN_LOW = 3
     GREEN_HIGH = 6
 
-    # OB bid depth change (negative = thinning = risk)
-    BID_THIN_LOW = -20.0  # %
+    # ── OB bid thinning ───────────────────────────────────────────
+    BID_THIN_LOW = -20.0
     BID_THIN_HIGH = -50.0
 
-    # Spread expansion
-    SPREAD_LOW = 0.15   # % — HIGH-SENSITIVITY (was 0.2/0.8)
+    # ── Spread expansion ──────────────────────────────────────────
+    SPREAD_LOW = 0.15
     SPREAD_HIGH = 0.5
 
-    # Upper wick (ratio to body)
+    # ── Upper wick ────────────────────────────────────────────────
     WICK_LOW = 1.0
     WICK_HIGH = 3.0
 
-    # Funding rate (positive = longs paying = crowded long)
-    FUNDING_LOW = 0.0005   # 0.05%
-    FUNDING_HIGH = 0.002   # 0.2%
+    # ── Funding rate ──────────────────────────────────────────────
+    FUNDING_LOW = 0.0005
+    FUNDING_HIGH = 0.002
 
     def score(self, features: CoinFeatures) -> RiskScore:
-        """
-        Compute RiskScore from CoinFeatures.
-        Returns LOW score with no signal if features are insufficient.
-        """
-
- 
         factors: list[FactorResult] = []
 
-        # ── 1. RSI overbought ─────────────────────────────────────
-        rsi = features.rsi_14_1m
+        # ── 1. RSI 1m overbought ──────────────────────────────────
+        rsi_1m = features.rsi_14_1m
         factors.append(self._factor(
-            "rsi",
-            rsi,
+            "rsi_1m",
+            rsi_1m,
             self.RSI_LOW, self.RSI_HIGH,
-            f"RSI={rsi:.1f} (overbought threshold {self.RSI_HIGH})",
         ))
 
-        # ── 2. VWAP extension ─────────────────────────────────────
-        vwap_ext = max(features.vwap_extension_pct, 0.0)  # only positive (price above VWAP)
+        # ── 2. RSI 5m overbought (подтверждение) ─────────────────
+        rsi_5m = features.rsi_14_5m
+        factors.append(self._factor(
+            "rsi_5m",
+            rsi_5m,
+            self.RSI_5M_LOW, self.RSI_5M_HIGH,
+        ))
+
+        # ── 3. VWAP extension ─────────────────────────────────────
+        vwap_ext = max(features.vwap_extension_pct, 0.0)
         factors.append(self._factor(
             "vwap_extension",
             vwap_ext,
             self.VWAP_EXT_LOW, self.VWAP_EXT_HIGH,
-            f"VWAP+{vwap_ext:.1f}% (price above VWAP)",
         ))
 
-        # ── 3. Volume z-score ─────────────────────────────────────
+        # ── 4. Volume z-score ─────────────────────────────────────
         vz = max(features.volume_zscore_1m, 0.0)
         factors.append(self._factor(
             "volume_zscore",
             vz,
             self.VOLUME_ZSCORE_LOW, self.VOLUME_ZSCORE_HIGH,
-            f"Vol z-score={vz:.1f}σ (abnormal volume spike)",
         ))
 
-        # ── 4. Trade imbalance (buy-dominated) ────────────────────
-        imbalance = max(features.trade_imbalance_5m, 0.0)  # only buy dominance counts
+        # ── 5. Trade imbalance (buy-dominated) ────────────────────
+        imbalance = max(features.trade_imbalance_5m, 0.0)
         factors.append(self._factor(
             "trade_imbalance",
             imbalance,
             self.IMBALANCE_LOW, self.IMBALANCE_HIGH,
-            f"Buy imbalance={imbalance:.2f} (buy-heavy flow)",
         ))
 
-        # ── 5. Large buy cluster ───────────────────────────────────
+        # ── 6. Large buy cluster ──────────────────────────────────
         large_buys = float(features.large_buy_count_5m)
         factors.append(self._factor(
             "large_buy_cluster",
             large_buys,
             float(self.LARGE_BUY_LOW), float(self.LARGE_BUY_HIGH),
-            f"{int(large_buys)} large buys in 5m (cluster detected)",
         ))
 
-        # ── 6. Price acceleration ─────────────────────────────────
+        # ── 7. Large sell cluster (NEW) ───────────────────────────
+        # Крупные продажи после памп-сигнала = умные деньги выходят
+        large_sells = float(features.large_sell_count_5m)
+        factors.append(self._factor(
+            "large_sell_cluster",
+            large_sells,
+            float(self.LARGE_SELL_LOW), float(self.LARGE_SELL_HIGH),
+        ))
+
+        # ── 8. Price acceleration ─────────────────────────────────
         accel = features.price_acceleration
         factors.append(self._factor(
             "price_acceleration",
             accel,
             self.ACCEL_LOW, self.ACCEL_HIGH,
-            f"Acceleration={accel:+.2f}% vs baseline",
         ))
 
-        # ── 7. Consecutive green candles ──────────────────────────
+        # ── 9. Consecutive green candles ──────────────────────────
         greens = float(features.consecutive_green_candles)
         factors.append(self._factor(
             "consecutive_greens",
             greens,
             float(self.GREEN_LOW), float(self.GREEN_HIGH),
-            f"{int(greens)} consecutive green 1m candles",
         ))
 
-        # ── 8. OB bid thinning ────────────────────────────────────
-        # Negative change = bids are disappearing = risk
+        # ── 10. OB bid thinning ───────────────────────────────────
         bid_change = features.bid_depth_change_5m
         bid_thin_norm = self._normalize(
-            -bid_change,  # invert: more negative = higher normalized
+            -bid_change,
             -self.BID_THIN_LOW,
             -self.BID_THIN_HIGH,
         )
@@ -275,16 +286,15 @@ class ScoringEngine:
             triggered=bid_thin_norm >= 0.5,
         ))
 
-        # ── 9. Spread expansion ───────────────────────────────────
+        # ── 11. Spread expansion ──────────────────────────────────
         spread = features.spread_pct
         factors.append(self._factor(
             "spread_expansion",
             spread,
             self.SPREAD_LOW, self.SPREAD_HIGH,
-            f"Spread={spread:.3f}% (liquidity thinning)",
         ))
 
-        # ── 10. Momentum loss ─────────────────────────────────────
+        # ── 12. Momentum loss ─────────────────────────────────────
         mom_loss = 1.0 if features.momentum_loss_signal else 0.0
         vol_decline = 1.0 if features.volume_decline_after_spike else 0.0
         momentum_val = max(mom_loss, vol_decline * 0.7)
@@ -297,23 +307,21 @@ class ScoringEngine:
             triggered=momentum_val >= 0.5,
         ))
 
-        # ── 11. Upper wick rejection ──────────────────────────────
+        # ── 13. Upper wick rejection ──────────────────────────────
         wick = features.upper_wick_ratio
         factors.append(self._factor(
             "upper_wick",
             wick,
             self.WICK_LOW, self.WICK_HIGH,
-            f"Upper wick={wick:.1f}x body (rejection signal)",
         ))
 
-        # ── 12. Funding rate (optional) ───────────────────────────
+        # ── 14. Funding rate (optional) ───────────────────────────
         if features.funding_rate is not None:
             fr = max(features.funding_rate, 0.0)
             factors.append(self._factor(
                 "funding_rate",
                 fr,
                 self.FUNDING_LOW, self.FUNDING_HIGH,
-                f"Funding={fr*100:.3f}% (crowded longs)",
             ))
         else:
             factors.append(FactorResult(
@@ -331,30 +339,19 @@ class ScoringEngine:
 
         triggered_count = sum(1 for f in factors if f.triggered)
 
-        # ── Anti-noise: suppress weak signals ────────────────────
-        # HIGH-SENSITIVITY: require >= 2 factors (was 3)
+        # ── Anti-noise ────────────────────────────────────────────
         if triggered_count < 2:
             total_score = min(total_score, 30.0)
 
         level = _level_from_score(total_score)
 
-        # ── Signal type classification ────────────────────────────
         signal_type = self._classify_signal(features, total_score, factors)
 
-        # ── Top reasons ───────────────────────────────────────────
         top_reasons = [
             f.name
             for f in sorted(factors, key=lambda x: -x.contribution)
             if f.triggered
         ][:3]
-
-        top_reason_messages = []
-        for f in sorted(factors, key=lambda x: -x.contribution):
-            if f.triggered:
-                # Find the human label we embedded in the factor name
-                top_reason_messages.append(f.name)
-                if len(top_reason_messages) >= 3:
-                    break
 
         return RiskScore(
             symbol=features.symbol,
@@ -376,15 +373,20 @@ class ScoringEngine:
     ) -> SignalType | None:
         factor_map = {fr.name: fr for fr in factors}
 
-        # DUMP_STARTED: price already falling + OB collapse
+        # DUMP_STARTED: цена уже падает + OB collapse + крупные продажи
+        large_sell_f = factor_map.get("large_sell_cluster")
         if (
             f.price_change_5m < -3.0
             and f.bid_depth_change_5m < -40.0
             and f.trade_imbalance_5m < -0.3
+        ) or (
+            f.price_change_5m < -2.0
+            and large_sell_f and large_sell_f.triggered
+            and f.bid_depth_change_5m < -30.0
         ):
             return SignalType.DUMP_STARTED
 
-        # REVERSAL_RISK: stalling momentum + wick rejection + bid thinning
+        # REVERSAL_RISK: стагнация + wick + bid thinning
         if (
             f.momentum_loss_signal
             and f.upper_wick_ratio >= self.WICK_LOW
@@ -392,30 +394,36 @@ class ScoringEngine:
         ):
             return SignalType.REVERSAL_RISK
 
-        # OVERHEATED: RSI + VWAP + volume spike — need 2 of 3
-        # HIGH-SENSITIVITY: score >= 45, 2 of 3 core factors (was all 3 + score 50)
-        rsi_f = factor_map.get("rsi")
+        # OVERHEATED: RSI 1m + RSI 5m + (VWAP или volume) — подтверждение
+        rsi_1m_f = factor_map.get("rsi_1m")
+        rsi_5m_f = factor_map.get("rsi_5m")
         vwap_f = factor_map.get("vwap_extension")
         vol_f = factor_map.get("volume_zscore")
-        core_triggered = sum(1 for x in [rsi_f, vwap_f, vol_f] if x and x.triggered)
-        if score >= 45 and core_triggered >= 2:
+
+        # Оба RSI сработали + хотя бы один из VWAP/volume
+        rsi_confirmed = rsi_1m_f and rsi_1m_f.triggered and rsi_5m_f and rsi_5m_f.triggered
+        core_triggered = sum(1 for x in [vwap_f, vol_f] if x and x.triggered)
+
+        if score >= 45 and rsi_confirmed and core_triggered >= 1:
             return SignalType.OVERHEATED
 
-        # EARLY_WARNING: score 25–49 with some factors triggering
-        # HIGH-SENSITIVITY: lowered from 30 to 25
+        # Fallback OVERHEATED: 2 из 3 базовых факторов (как раньше)
+        all_core = sum(1 for x in [rsi_1m_f, vwap_f, vol_f] if x and x.triggered)
+        if score >= 45 and all_core >= 2:
+            return SignalType.OVERHEATED
+
+        # EARLY_WARNING
         if 25 <= score < 50 and sum(1 for fr in factors if fr.triggered) >= 2:
             return SignalType.EARLY_WARNING
 
         return None
 
-        
     def _factor(
         self,
         name: str,
         value: float,
         low_thresh: float,
         high_thresh: float,
-        label: str = "",
     ) -> FactorResult:
         norm = self._normalize(value, low_thresh, high_thresh)
         weight = self.WEIGHTS.get(name, 0.0)

@@ -54,7 +54,6 @@ class MonitorService:
             raw = await self._redis.get("last_signal_ts")
 
             if not raw:
-                # Сигналов ещё не было — не алертим первые 2 часа
                 return
 
             last_ts = datetime.fromisoformat(raw)
@@ -67,12 +66,9 @@ class MonitorService:
                         f"⚠️ <b>Мониторинг: нет сигналов</b>\n\n"
                         f"Analyzer молчит уже <b>{int(silence_minutes)} минут</b>.\n"
                         f"Последний сигнал: {last_ts.strftime('%d.%m %H:%M')} UTC\n\n"
-                        f"Проверьте логи:\n"
-                        f"de>docker logs --tail=50 dd_analyzer</code>"
                     )
                     self._alert_sent = True
             else:
-                # Сигналы есть — сбрасываем флаг
                 if self._alert_sent:
                     await self._send_alert(
                         f"✅ <b>Мониторинг: всё в порядке</b>\n\n"
@@ -82,6 +78,7 @@ class MonitorService:
 
         except Exception as e:
             logger.error("Analyzer health check failed", error=str(e))
+
 
     async def _check_redis_health(self) -> None:
         """Проверить что Redis отвечает."""
