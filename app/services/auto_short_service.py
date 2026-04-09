@@ -33,13 +33,22 @@ TARGET_SL_PCT = 25.0
 TP_PRICE_MOVE = TARGET_PNL_PCT / LEVERAGE   # 2.25% движения цены вниз
 SL_PRICE_MOVE = TARGET_SL_PCT / LEVERAGE    # 1.25% движения цены вверх
 
-ENTRY_DELAY_SEC = 60
-MAX_PRICE_RISE_PCT = 0.3
-MONITOR_INTERVAL = 30
-MAX_TRADE_DURATION = 60 * 60 * 4
-ENTRY_MONITOR_INTERVAL = 30
-MAX_WAIT_ATTEMPTS = 10  # 10 * 30 сек = 5 минут
+# ── Параметры отложенного входа ───────────────────────────────────
 
+ENTRY_DELAY_SEC = 60                    # задержка после сигнала перед первой проверкой
+MONITOR_ATTEMPTS = 24                   # макс. количество проверок при мониторинге входа
+MONITOR_INTERVAL_SEC = 5                # интервал между проверками входа (секунды)
+MIN_SCORE_TO_ENTER = 40                 # минимальный score для входа в сделку
+STABILIZATION_THRESHOLD_PCT = 0.3       # порог стабилизации — входим если рост ≤ этого значения
+MAX_RISE_PCT = 1.5                      # отмена входа если рост превышает этот порог
+MAX_ENTRY_DROP_PCT = -0.30              # отмена входа если цена уже упала от сигнала
+
+# ── Параметры мониторинга открытых сделок ─────────────────────────
+
+TRADE_MONITOR_INTERVAL = 5              # интервал проверки открытых сделок (секунды)
+MAX_TRADE_DURATION = 60 * 60 * 4        # макс. длительность сделки (4 часа)
+
+# ── Redis key for active shorts (shared across workers) ──────────
 REDIS_ACTIVE_SHORTS_KEY = "active_shorts"
 
 
@@ -138,14 +147,228 @@ class AutoShortService:
 
         task.add_done_callback(_cleanup)
 
-    async def _notify_skipped(
+    # ── Оценка условий входа ──────────────────────────────────────
+
+    def _evaluate_entry_conditions(
+        self,
+        price_change_pct: float,
+        current_score: float,
+        symbol: str,
+    ) -> str:
+        """
+        Проверяет условия входа и возвращает решение:
+        - "enter"        — можно открывать шорт
+        - "monitor"      — цена ещё растёт, нужен мониторинг
+        - "cancel_score" — score упал ниже минимума
+        - "cancel_drop"  — цена уже упала слишком сильно
+        - "cancel_rise"  — цена улетела слишком высоко
+        """
+        if current_score < MIN_SCORE_TO_ENTER:
+            logger.debug(
+                "Entry check: score below minimum",
+                symbol=symbol,
+                score=round(current_score, 1),
+                min_score=MIN_SCORE_TO_ENTER,
+            )
+            return "cancel_score"
+
+        if price_change_pct < MAX_ENTRY_DROP_PCT:
+            logger.debug(
+                "Entry check: price dropped too much",
+                symbol=symbol,
+                change_pct=round(price_change_pct, 3),
+                threshold=MAX_ENTRY_DROP_PCT,
+            )
+            return "cancel_drop"
+
+        if price_change_pct > MAX_RISE_PCT:
+            logger.debug(
+                "Entry check: price rose too much",
+                symbol=symbol,
+                change_pct=round(price_change_pct, 3),
+                max_rise=MAX_RISE_PCT,
+            )
+            return "cancel_rise"
+
+        if price_change_pct > STABILIZATION_THRESHOLD_PCT:
+            logger.debug(
+                "Entry check: price still rising above stabilization threshold",
+                symbol=symbol,
+                change_pct=round(price_change_pct, 3),
+                threshold=STABILIZATION_THRESHOLD_PCT,
+            )
+            return "monitor"
+
+        return "enter"
+
+    # ── Получение текущего score из Redis ─────────────────────────
+
+    async def _get_current_score(self, symbol: str) -> float | None:
+        """Получает актуальный score символа из Redis."""
+        try:
+            raw = await self._redis.get(f"score:{symbol}")
+            if raw:
+                data = json.loads(raw)
+                score = data.get("score")
+                if score is not None:
+                    return float(score)
+        except Exception as e:
+            logger.debug("Redis score fetch failed", symbol=symbol, error=str(e))
+        return None
+
+    # ── Мониторинг входа (ожидание стабилизации) ──────────────────
+
+    async def _monitor_entry(
         self,
         symbol: str,
         signal_price: float,
-        entry_price: float,
+        initial_score: float,
+    ) -> tuple[float, float] | None:
+        """
+        Мониторинг входа: до MONITOR_ATTEMPTS проверок каждые MONITOR_INTERVAL_SEC.
+        На каждой проверке заново получает price и score.
+        Возвращает (entry_price, price_change_pct) при стабилизации или None при отмене.
+        """
+        logger.info(
+            "Price still rising — monitoring for entry",
+            symbol=symbol,
+            max_attempts=MONITOR_ATTEMPTS,
+            interval_sec=MONITOR_INTERVAL_SEC,
+        )
+
+        for attempt in range(MONITOR_ATTEMPTS):
+            await asyncio.sleep(MONITOR_INTERVAL_SEC)
+
+            current_price = await self._get_price(symbol)
+            if not current_price:
+                continue
+
+            current_score = await self._get_current_score(symbol)
+            if current_score is None:
+                current_score = initial_score
+
+            price_change_pct = self._calc_price_move_pct(signal_price, current_price)
+
+            logger.info(
+                "Monitoring entry",
+                symbol=symbol,
+                attempt=attempt + 1,
+                max_attempts=MONITOR_ATTEMPTS,
+                signal_price=signal_price,
+                current_price=current_price,
+                change_pct=round(price_change_pct, 3),
+                current_score=round(current_score, 1),
+            )
+
+            decision = self._evaluate_entry_conditions(
+                price_change_pct=price_change_pct,
+                current_score=current_score,
+                symbol=symbol,
+            )
+
+            if decision == "enter":
+                logger.info(
+                    "Price stabilized — entering short",
+                    symbol=symbol,
+                    attempt=attempt + 1,
+                    change_pct=round(price_change_pct, 3),
+                    score=round(current_score, 1),
+                )
+                return current_price, price_change_pct
+
+            if decision == "cancel_score":
+                logger.info(
+                    "Canceled because score dropped",
+                    symbol=symbol,
+                    attempt=attempt + 1,
+                    score=round(current_score, 1),
+                    min_score=MIN_SCORE_TO_ENTER,
+                )
+                await self._notify_entry_canceled(
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    current_price=current_price,
+                    price_change_pct=price_change_pct,
+                    score=current_score,
+                    reason="score_dropped",
+                )
+                return None
+
+            if decision == "cancel_drop":
+                logger.info(
+                    "Canceled because price dropped too much during monitoring",
+                    symbol=symbol,
+                    attempt=attempt + 1,
+                    change_pct=round(price_change_pct, 3),
+                )
+                await self._notify_entry_canceled(
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    current_price=current_price,
+                    price_change_pct=price_change_pct,
+                    score=current_score,
+                    reason="price_dropped",
+                )
+                return None
+
+            if decision == "cancel_rise":
+                logger.info(
+                    "Canceled because price rose too much",
+                    symbol=symbol,
+                    attempt=attempt + 1,
+                    change_pct=round(price_change_pct, 3),
+                    max_rise=MAX_RISE_PCT,
+                )
+                await self._notify_entry_canceled(
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    current_price=current_price,
+                    price_change_pct=price_change_pct,
+                    score=current_score,
+                    reason="price_too_high",
+                )
+                return None
+
+            # decision == "monitor" → продолжаем цикл
+
+        # ── Таймаут мониторинга ───────────────────────────────────
+        logger.info(
+            "Canceled because monitoring timeout",
+            symbol=symbol,
+            attempts=MONITOR_ATTEMPTS,
+            total_sec=MONITOR_ATTEMPTS * MONITOR_INTERVAL_SEC,
+        )
+
+        last_price = await self._get_price(symbol)
+        last_score = await self._get_current_score(symbol) or initial_score
+        last_change = (
+            self._calc_price_move_pct(signal_price, last_price)
+            if last_price
+            else 0.0
+        )
+
+        await self._notify_entry_canceled(
+            symbol=symbol,
+            signal_price=signal_price,
+            current_price=last_price or signal_price,
+            price_change_pct=last_change,
+            score=last_score,
+            reason="timeout",
+        )
+        return None
+
+    # ── Уведомление об отмене входа ───────────────────────────────
+
+    async def _notify_entry_canceled(
+        self,
+        symbol: str,
+        signal_price: float,
+        current_price: float,
         price_change_pct: float,
         score: float,
+        reason: str,
     ) -> None:
+        """Отправляет уведомление об отмене входа с указанием причины."""
         if not self._bot:
             return
 
@@ -157,14 +380,39 @@ class AutoShortService:
                 return
 
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
+
+            reason_details = {
+                "score_dropped": (
+                    f"⚠️ Score: <b>{score:.0f}</b> (мин. {MIN_SCORE_TO_ENTER})\n\n"
+                    f"<i>Score упал ниже порога — вход отменён</i>"
+                ),
+                "price_dropped": (
+                    f"📉 Изменение: <b>{price_change_pct:+.2f}%</b> "
+                    f"(порог {MAX_ENTRY_DROP_PCT}%)\n\n"
+                    f"<i>Цена уже упала — движение произошло без нас</i>"
+                ),
+                "price_too_high": (
+                    f"📈 Рост: <b>+{abs(price_change_pct):.2f}%</b> "
+                    f"(порог +{MAX_RISE_PCT}%)\n\n"
+                    f"<i>Памп слишком сильный — вход отменён во избежание риска</i>"
+                ),
+                "timeout": (
+                    f"📈 Изменение: <b>{price_change_pct:+.2f}%</b>\n"
+                    f"⏱ Мониторинг: {MONITOR_ATTEMPTS} × {MONITOR_INTERVAL_SEC}с "
+                    f"({MONITOR_ATTEMPTS * MONITOR_INTERVAL_SEC}с)\n\n"
+                    f"<i>Стабилизация не наступила — вход отменён по таймауту</i>"
+                ),
+            }
+
+            detail = reason_details.get(reason, f"<i>Причина: {reason}</i>")
+
             text = (
                 f"⏭ <b>Сигнал пропущен</b>\n\n"
                 f"📌 <a href=\"{bybit_url}\">{symbol}</a>\n"
                 f"📊 Score: <b>{score:.0f}</b>\n\n"
                 f"📍 Цена сигнала: <b>${signal_price:.6g}</b>\n"
-                f"📈 Цена через {ENTRY_DELAY_SEC}с: <b>${entry_price:.6g}</b>\n"
-                f"⚠️ Рост: <b>+{price_change_pct:.2f}%</b> (порог +{MAX_PRICE_RISE_PCT}%)\n\n"
-                f"<i>Памп продолжается — вход пропущен во избежание лишнего риска</i>"
+                f"📍 Текущая цена: <b>${current_price:.6g}</b>\n"
+                f"{detail}"
             )
 
             for user_id in user_ids:
@@ -176,19 +424,22 @@ class AutoShortService:
                     )
                 except Exception as e:
                     logger.warning(
-                        "Skip notify failed",
+                        "Entry cancel notify failed",
                         user_id=user_id,
                         error=str(e),
                     )
 
             logger.info(
-                "Skip notification sent",
+                "Entry cancel notification sent",
                 symbol=symbol,
+                reason=reason,
                 change_pct=round(price_change_pct, 3),
             )
 
         except Exception as e:
-            logger.error("Skip notification error", error=str(e))
+            logger.error("Entry cancel notification error", error=str(e))
+
+    # ── Восстановление активных сделок ────────────────────────────
 
     async def restore_active_trades(self) -> None:
         try:
@@ -273,6 +524,8 @@ class AutoShortService:
         except Exception as e:
             logger.exception("Failed to restore trades", error=str(e))
 
+    # ── Открытие шорта (основной flow) ────────────────────────────
+
     async def open_short(self, risk_score: RiskScore) -> None:
         symbol = risk_score.symbol
         lock = self._get_symbol_lock(symbol)
@@ -305,6 +558,7 @@ class AutoShortService:
                 symbol=symbol,
                 signal_price=signal_price,
                 delay_sec=ENTRY_DELAY_SEC,
+                score=risk_score.score,
             )
 
             await asyncio.sleep(ENTRY_DELAY_SEC)
@@ -314,9 +568,23 @@ class AutoShortService:
                 logger.warning("Cannot open short — no price after delay", symbol=symbol)
                 return
 
+            current_score = await self._get_current_score(symbol)
+            effective_score = (
+                current_score if current_score is not None else risk_score.score
+            )
+
             price_change_pct = self._calc_price_move_pct(signal_price, entry_price)
 
-            # ── Фильтр сильного восходящего тренда ───────────────────────────
+            logger.info(
+                "Price check after delay",
+                symbol=symbol,
+                signal_price=signal_price,
+                entry_price=entry_price,
+                change_pct=round(price_change_pct, 3),
+                current_score=round(effective_score, 1),
+            )
+
+            # ── Трендовый фильтр ──────────────────────────────────
             trend_ok = await self._check_trend_filter(risk_score)
             if not trend_ok:
                 logger.info(
@@ -326,65 +594,83 @@ class AutoShortService:
                 )
                 return
 
-            logger.info(
-                "Price check after delay",
+            # ── Оценка условий входа ──────────────────────────────
+            decision = self._evaluate_entry_conditions(
+                price_change_pct=price_change_pct,
+                current_score=effective_score,
                 symbol=symbol,
-                signal_price=signal_price,
-                entry_price=entry_price,
-                change_pct=round(price_change_pct, 3),
             )
 
-            if price_change_pct > MAX_PRICE_RISE_PCT:
+            if decision == "cancel_score":
                 logger.info(
-                    "Price still rising — monitoring for entry",
+                    "Canceled because score dropped",
                     symbol=symbol,
+                    score=round(effective_score, 1),
+                    min_score=MIN_SCORE_TO_ENTER,
+                )
+                await self._notify_entry_canceled(
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    current_price=entry_price,
+                    price_change_pct=price_change_pct,
+                    score=effective_score,
+                    reason="score_dropped",
+                )
+                return
+
+            if decision == "cancel_drop":
+                logger.info(
+                    "Skipping short — price already dropped too much from signal",
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    entry_price=entry_price,
                     change_pct=round(price_change_pct, 3),
                 )
+                await self._notify_entry_canceled(
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    current_price=entry_price,
+                    price_change_pct=price_change_pct,
+                    score=effective_score,
+                    reason="price_dropped",
+                )
+                return
 
-                entered = False
+            if decision == "cancel_rise":
+                logger.info(
+                    "Canceled because price rose too much after delay",
+                    symbol=symbol,
+                    change_pct=round(price_change_pct, 3),
+                    max_rise=MAX_RISE_PCT,
+                )
+                await self._notify_entry_canceled(
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    current_price=entry_price,
+                    price_change_pct=price_change_pct,
+                    score=effective_score,
+                    reason="price_too_high",
+                )
+                return
 
-                for attempt in range(MAX_WAIT_ATTEMPTS):
-                    await asyncio.sleep(ENTRY_MONITOR_INTERVAL)
-
-                    entry_price = await self._get_price(symbol)
-                    if not entry_price:
-                        continue
-
-                    price_change_pct = self._calc_price_move_pct(signal_price, entry_price)
-
-                    logger.info(
-                        "Monitoring entry",
-                        symbol=symbol,
-                        attempt=attempt + 1,
-                        signal_price=signal_price,
-                        current_price=entry_price,
-                        change_pct=round(price_change_pct, 3),
-                    )
-
-                    if price_change_pct <= MAX_PRICE_RISE_PCT:
-                        logger.info(
-                            "Price stabilized — entering short",
-                            symbol=symbol,
-                            change_pct=round(price_change_pct, 3),
-                        )
-                        entered = True
-                        break
-
-                if not entered:
-                    await self._notify_skipped(
-                        symbol=symbol,
-                        signal_price=signal_price,
-                        entry_price=entry_price,  # type: ignore
-                        price_change_pct=price_change_pct,
-                        score=risk_score.score,
-                    )
+            if decision == "monitor":
+                entry_result = await self._monitor_entry(
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    initial_score=effective_score,
+                )
+                if entry_result is None:
+                    # Мониторинг завершился отменой — уведомление уже отправлено
                     return
+                entry_price, price_change_pct = entry_result
+
+            # decision == "enter" или успешный выход из мониторинга
 
             # Phase 3: Re-acquire lock for final check and trade creation
             async with lock:
                 if await self._is_symbol_already_open(symbol):
                     logger.info(
-                        "Skipping short after delay — trade already opened in parallel",
+                        "Skipping short after monitoring — trade already opened in parallel",
                         symbol=symbol,
                     )
                     return
@@ -518,6 +804,7 @@ class AutoShortService:
 
         return True
 
+    # ── Мониторинг открытой сделки (TP / SL / время) ──────────────
 
     async def _monitor_trade(self, trade_id: int) -> None:
         trade = await self._get_active_short(trade_id)
@@ -528,15 +815,14 @@ class AutoShortService:
         entry_price = trade["entry_price"]
         entry_ts = trade["entry_ts"]
 
-        # Трейлинг стоп — двигаем SL за ценой когда позиция в прибыли
-        TRAILING_ACTIVATE_PCT = 10.0
-        TRAILING_DISTANCE_PCT = SL_PRICE_MOVE
+        TRAILING_ACTIVATE_PCT = 10.0   # активировать при +10% P&L
+        BREAKEVEN_BUFFER_PCT = 0.1     # SL на 0.1% выше входа
+        MAX_LOSS_PCT = -50.0           # аварийный стоп
 
-        trailing_active = False
-        best_price = entry_price
+        trailing_activated = False
 
         while trade["status"] == "open":
-            await asyncio.sleep(MONITOR_INTERVAL)
+            await asyncio.sleep(TRADE_MONITOR_INTERVAL)
 
             current_price = await self._get_price(symbol)
             if not current_price:
@@ -547,37 +833,34 @@ class AutoShortService:
 
             await self._save_price_snapshot(trade_id, trade, current_price, elapsed, now)
 
-            price_move = (entry_price - current_price) / entry_price * 100
-            pnl = price_move * LEVERAGE
+            pnl = self._calc_short_pnl_pct(entry_price, current_price)
 
-            # ── Трейлинг стоп ─────────────────────────────────────
-            if pnl >= TRAILING_ACTIVATE_PCT:
-                if current_price < best_price:
-                    best_price = current_price
-                    new_sl = best_price * (1 + TRAILING_DISTANCE_PCT / 100)
-                    if new_sl < trade["sl_price"]:
-                        old_sl = trade["sl_price"]
-                        trade["sl_price"] = new_sl
-                        await self._set_active_short(trade_id, trade)
-                        trailing_active = True
-                        logger.info(
-                            "Trailing stop moved",
-                            trade_id=trade_id,
-                            symbol=symbol,
-                            best_price=best_price,
-                            old_sl=round(old_sl, 6),
-                            new_sl=round(new_sl, 6),
-                            pnl=f"{pnl:+.2f}%",
-                        )
+            # ── Аварийный стоп ────────────────────────────────────
+            if pnl <= MAX_LOSS_PCT:
+                logger.warning(
+                    "Max loss reached — emergency stop",
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    pnl=f"{pnl:+.2f}%",
+                )
+                await self._close_trade(trade_id, current_price, "sl_hit", pnl)
+                return
 
-                if not trailing_active:
-                    trailing_active = True
+            # ── Трейлинг = перенос SL на безубыток ───────────────
+            if pnl >= TRAILING_ACTIVATE_PCT and not trailing_activated:
+                breakeven_sl = entry_price * (1 + BREAKEVEN_BUFFER_PCT / 100)
+                if breakeven_sl < trade["sl_price"]:
+                    old_sl = trade["sl_price"]
+                    trade["sl_price"] = breakeven_sl
+                    await self._set_active_short(trade_id, trade)
+                    trailing_activated = True
                     logger.info(
-                        "Trailing stop activated",
+                        "Trailing: SL moved to breakeven",
                         trade_id=trade_id,
                         symbol=symbol,
+                        old_sl=round(old_sl, 6),
+                        new_sl=round(breakeven_sl, 6),
                         pnl=f"{pnl:+.2f}%",
-                        current_sl=trade["sl_price"],
                     )
 
             # ── Проверяем TP ──────────────────────────────────────
@@ -585,9 +868,9 @@ class AutoShortService:
                 await self._close_trade(trade_id, current_price, "tp_hit", pnl)
                 return
 
-            # ── Проверяем SL (включая трейлинг) ──────────────────
+            # ── Проверяем SL ──────────────────────────────────────
             if current_price >= trade["sl_price"]:
-                reason = "trailing_sl" if trailing_active else "sl_hit"
+                reason = "trailing_sl" if trailing_activated else "sl_hit"
                 await self._close_trade(trade_id, current_price, reason, pnl)
                 return
 
@@ -595,7 +878,6 @@ class AutoShortService:
             if elapsed >= MAX_TRADE_DURATION:
                 await self._close_trade(trade_id, current_price, "expired", pnl)
                 return
-        
 
     async def _close_trade(
         self,
