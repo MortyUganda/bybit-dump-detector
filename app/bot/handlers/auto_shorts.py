@@ -85,37 +85,47 @@ async def _get_stats() -> dict:
         return {}
 
 
-def _format_active_shorts() -> str:
-    if not ACTIVE_SHORTS:
+async def _format_active_shorts() -> str:
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.db.models.auto_short import AutoShort
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(AutoShort).where(AutoShort.status == "open")
+            )
+            trades = result.scalars().all()
+
+    except Exception as e:
+        logger.error("Failed to fetch active shorts", error=str(e))
+        return "❌ Ошибка загрузки данных."
+
+    if not trades:
         return (
             "🤖 <b>Авто-шорты</b>\n\n"
             "<i>Нет активных сделок.</i>\n\n"
             "Сделки открываются автоматически при score ≥ 45."
         )
 
-    lines = [f"🤖 <b>Авто-шорты</b> ({len(ACTIVE_SHORTS)} активных)\n"]
+    lines = [f"🤖 <b>Авто-шорты</b> ({len(trades)} активных)\n"]
 
-    for trade_id, trade in sorted(ACTIVE_SHORTS.items(), reverse=True):
-        entry = trade["entry_price"]
-        symbol = trade["symbol"]
-        base = symbol.replace("USDT", "")
+    for trade in sorted(trades, key=lambda t: -t.id):
+        symbol = trade.symbol
         bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
 
-        entry_ts = trade.get("entry_ts")
-        if isinstance(entry_ts, datetime):
-            elapsed = (datetime.now(timezone.utc) - entry_ts).total_seconds()
-            elapsed_str = f"{int(elapsed // 60)}м"
-        else:
-            elapsed_str = "—"
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        elapsed_min = int((now - trade.entry_ts).total_seconds() / 60)
 
         lines.append(
-            f"📌 #{trade_id} <a href=\"{bybit_url}\">{symbol}</a>\n"
-            f"   💰 Вход: <b>${entry:.6g}</b> | ⏱ {elapsed_str}\n"
-            f"   🎯 TP: ${trade['tp_price']:.6g} | 🛑 SL: ${trade['sl_price']:.6g}"
+            f"📌 #{trade.id} <a href=\"{bybit_url}\">{symbol}</a>\n"
+            f"   💰 Вход: <b>${trade.entry_price:.6g}</b> | ⏱ {elapsed_min}м\n"
+            f"   🎯 TP: ${trade.tp_price:.6g} | 🛑 SL: ${trade.sl_price:.6g}\n"
+            f"   📊 Score: {trade.score:.0f}"
         )
 
     return "\n\n".join(lines)
-
 
 async def _format_stats() -> str:
     stats = await _get_stats()
@@ -137,6 +147,7 @@ async def _format_stats() -> str:
     status_labels = {
         "tp_hit": "🎯 TP hit",
         "sl_hit": "🛑 SL hit",
+        "trailing_sl": "📉 Trailing SL",
         "expired": "⏰ Истекли",
         "closed_manual": "✋ Вручную",
     }
@@ -167,7 +178,7 @@ async def _format_stats() -> str:
 
 @router.message(Command("auto_shorts"))
 async def cmd_auto_shorts(msg: Message) -> None:
-    text = _format_active_shorts()
+    text = await _format_active_shorts()
     await msg.answer(text, reply_markup=auto_shorts_keyboard())
 
 
@@ -185,7 +196,7 @@ async def cb_auto_shorts_refresh(query: CallbackQuery) -> None:
         await query.answer("🔄 Обновляю...")
     except Exception:
         pass
-    text = _format_active_shorts()
+    text = await _format_active_shorts()  # ← await
     try:
         await query.message.edit_text(
             text,

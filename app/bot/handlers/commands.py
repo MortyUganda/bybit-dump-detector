@@ -207,7 +207,7 @@ async def btn_help(msg: Message) -> None:
 async def btn_auto_shorts(msg: Message) -> None:
     from app.bot.handlers.auto_shorts import _format_active_shorts, auto_shorts_keyboard
     text = _format_active_shorts()
-    await msg.answer(text, reply_markup=auto_shorts_keyboard())
+    await msg.answer(await text, reply_markup=auto_shorts_keyboard())
 
 
 @router.message(F.text == "📊 Статистика")

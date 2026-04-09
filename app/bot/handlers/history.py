@@ -149,8 +149,10 @@ def _format_history(trades: list, filter_type: str, period: str, page: int) -> s
         status_labels = {
             "tp_hit": "🎯 TP",
             "sl_hit": "🛑 SL",
+            "trailing_sl": "📉 Trailing",
             "expired": "⏰ Истёк",
             "closed_manual": "✋ Вручную",
+            "manual": "✋ Вручную",
         }
         status_label = status_labels.get(trade.status, trade.status)
 

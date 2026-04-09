@@ -76,12 +76,12 @@ class UniverseManager:
                 logger.error("Universe refresh failed", error=str(e))
                 return self._symbols
 
+
     async def _compute_universe(self) -> set[str]:
-        # Step 1: get all spot instruments with metadata
-        instruments = await self._rest.get_instruments(category="spot")
-        # Step 2: get 24h tickers for volume filter
-        tickers = await self._rest.get_tickers(category="spot")
+        instruments = await self._rest.get_instruments(category="linear")
+        tickers = await self._rest.get_tickers(category="linear")
         ticker_map = {t["symbol"]: t for t in tickers}
+
 
         cutoff_date = utcnow() - timedelta(days=settings.universe_min_listing_age_days)
         selected: set[str] = set()
@@ -92,29 +92,24 @@ class UniverseManager:
             quote: str = inst.get("quoteCoin", "").upper()
             status: str = inst.get("status", "")
 
-            # Rule 1: only USDT pairs
             if quote != "USDT":
                 continue
-
-            # Rule 2: instrument must be Trading
             if status != "Trading":
                 continue
-
-            # Rule 3: exclude major assets
             if base in settings.excluded_base_assets:
                 continue
 
-            # Rule 4: listing age filter
+
+
             launch_time_ms = inst.get("launchTime")
             if launch_time_ms:
                 try:
                     listing_dt = ms_to_dt(int(launch_time_ms))
                     if listing_dt > cutoff_date:
-                        continue  # Too new
+                        continue
                 except (ValueError, TypeError):
                     pass
 
-            # Rule 5: volume filter
             ticker = ticker_map.get(symbol)
             if ticker is None:
                 continue
@@ -136,7 +131,24 @@ class UniverseManager:
                 "price_change_pct": float(ticker.get("price24hPcnt", 0)) * 100,
             }
 
+        # Лог топ-10 по объёму для диагностики
+        if selected:
+            top10 = sorted(
+                selected,
+                key=lambda s: self._symbol_meta[s]["volume_24h"],
+                reverse=True,
+            )[:10]
+            logger.info(
+                "Universe top-10 by volume",
+                symbols=[
+                    f"{s}(${self._symbol_meta[s]['volume_24h']/1_000_000:.1f}M)"
+                    for s in top10
+                ],
+            )
+
         return selected
+
+
 
     async def run_forever(self) -> None:
         """Periodically refresh the universe."""

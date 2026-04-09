@@ -190,7 +190,7 @@ class AnalyzerService:
 
         # Получаем 24h тикеры одним запросом для всех монет
         try:
-            tickers_list = await self._ingestion._rest.get_tickers(category="spot")
+            tickers_list = await self._ingestion._rest.get_tickers(category="linear")
             tickers = {t["symbol"]: t for t in tickers_list}
         except Exception as e:
             logger.warning("Failed to fetch tickers for 24h change", error=str(e))

@@ -50,7 +50,7 @@ class BybitWSClient:
 
     def __init__(
         self,
-        category: str = "spot",
+        category: str = "linear",
         on_trade: TradeCallback | None = None,
         on_ticker: TickerCallback | None = None,
         on_orderbook: OrderbookCallback | None = None,
@@ -139,17 +139,42 @@ class BybitWSClient:
                 payload = {"op": "subscribe", "args": list(self._subscriptions)}
                 await ws.send_str(json.dumps(payload))
 
-            async for msg in ws:
-                if not self._running:
+            # Запускаем application-level ping
+            ping_task = asyncio.create_task(self._ping_loop())
+
+            try:
+                async for msg in ws:
+                    if not self._running:
+                        break
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        await self._handle_message(msg.data)
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        logger.error("WS error", error=str(ws.exception()))
+                        break
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+                        logger.warning("WS closed")
+                        break
+            finally:
+                ping_task.cancel()
+                try:
+                    await ping_task
+                except asyncio.CancelledError:
+                    pass
+
+
+    async def _ping_loop(self) -> None:
+        """Отправлять application-level ping каждые 20 секунд."""
+        while self._running:
+            await asyncio.sleep(20)
+            if self._ws and not self._ws.closed:
+                try:
+                    await self._ws.send_str(json.dumps({"op": "ping"}))
+                    logger.debug("WS ping sent")
+                except Exception as e:
+                    logger.warning("WS ping failed", error=str(e))
                     break
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    await self._handle_message(msg.data)
-                elif msg.type == aiohttp.WSMsgType.ERROR:
-                    logger.error("WS error", error=str(ws.exception()))
-                    break
-                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
-                    logger.warning("WS closed")
-                    break
+
+
 
     async def _handle_message(self, raw: str) -> None:
         try:

@@ -70,7 +70,7 @@ class IngestionService:
 
         # Start WebSocket
         self._ws_spot = BybitWSClient(
-            category="spot",
+            category="linear",
             on_trade=self._on_trade,
             on_ticker=self._on_ticker,
             on_orderbook=self._on_orderbook,
@@ -162,11 +162,11 @@ class IngestionService:
     async def _refresh_candles(self, symbol: str) -> None:
         calc = self._get_or_create_calculator(symbol)
         try:
-            raw_1m = await self._rest.get_klines(symbol, interval="1", limit=120)
+            raw_1m = await self._rest.get_klines(symbol, interval="1", limit=120, category="linear")
             candles_1m = [CandleData(**c) for c in raw_1m]
             calc.update_candles(candles_1m, "1")
 
-            raw_5m = await self._rest.get_klines(symbol, interval="5", limit=100)
+            raw_5m = await self._rest.get_klines(symbol, interval="5", limit=100, category="linear")
             candles_5m = [CandleData(**c) for c in raw_5m]
             calc.update_candles(candles_5m, "5")
         except Exception as e:
