@@ -22,6 +22,7 @@ import uuid
 
 import redis.asyncio as aioredis
 
+from app.analytics.market_context import MarketContext
 from app.config import get_settings
 from app.scoring.engine import RiskScore, ScoringEngine
 from app.services.ingestion import IngestionService
@@ -55,6 +56,7 @@ class AnalyzerService:
         self._db = db_session_factory
         self._alert_callback = alert_callback
         self._scoring = ScoringEngine()
+        self._market_context = MarketContext(ingestion._rest)
         self._running = False
         self._cycle_count = 0
 
@@ -80,6 +82,16 @@ class AnalyzerService:
 
     async def _run_scoring_cycle(self) -> None:
         self._cycle_count += 1
+
+        # Refresh BTC market context for correlation filter
+        await self._market_context.refresh()
+        btc_suppressing = self._market_context.should_suppress_shorts()
+        if btc_suppressing:
+            logger.info(
+                "BTC rally detected — suppressing alt short signals",
+                btc_change_15m=round(self._market_context.btc_change_15m, 2),
+            )
+
         features_list = await self._ingestion.get_all_features()
 
         if not features_list:
@@ -89,6 +101,9 @@ class AnalyzerService:
         scored = []
         for features in features_list:
             try:
+                # Populate BTC context on each feature
+                features.btc_change_15m = self._market_context.btc_change_15m
+
                 risk_score = self._scoring.score(features)
                 scored.append(risk_score)
 
@@ -96,9 +111,16 @@ class AnalyzerService:
                 key = REDIS_SCORE_KEY.format(symbol=features.symbol)
                 await self._redis.setex(key, REDIS_SCORE_TTL, json.dumps(risk_score.to_dict()))
 
-                # Check if alert should fire
+                # Check if alert should fire (suppress during BTC rally)
                 if risk_score.is_actionable and risk_score.signal_type:
-                    await self._maybe_alert(risk_score)
+                    if btc_suppressing:
+                        logger.debug(
+                            "Alert suppressed by BTC correlation filter",
+                            symbol=features.symbol,
+                            score=risk_score.score,
+                        )
+                    else:
+                        await self._maybe_alert(risk_score)
 
             except Exception as e:
                 logger.debug("Scoring error", symbol=features.symbol, error=str(e))

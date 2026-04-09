@@ -110,6 +110,9 @@ class CoinFeatures:
     oi_change_pct_1h: float | None = None  # % OI change in last hour
     funding_rate: float | None = None       # latest funding rate
 
+    # ── Market context ──────────────────────────────────────────
+    btc_change_15m: float = 0.0       # BTC 15m momentum at feature time
+
     # ── Metadata ─────────────────────────────────────────────────
     last_price: float = 0.0
     market_cap_proxy: float = 0.0     # price * circulating_supply (if available)
