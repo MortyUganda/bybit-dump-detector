@@ -221,8 +221,13 @@ class ScoringEngine:
             self.VWAP_EXT_LOW, self.VWAP_EXT_HIGH,
         ))
 
-        # ── 4. Volume z-score ─────────────────────────────────────
-        vz = max(features.volume_zscore_1m, 0.0)
+        # ── 4. Volume z-score (average trade-based and candle-based) ─
+        vz_trade = features.volume_zscore_1m
+        vz_candle = features.volume_zscore_candle
+        if vz_trade > 0 and vz_candle > 0:
+            vz = (vz_trade + vz_candle) / 2
+        else:
+            vz = max(vz_trade, vz_candle, 0.0)
         factors.append(self._factor(
             "volume_zscore",
             vz,

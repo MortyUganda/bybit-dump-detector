@@ -68,7 +68,8 @@ class CoinFeatures:
 
     # ── Volume anomaly ────────────────────────────────────────────
     volume_1m: float = 0.0            # current 1m volume (USDT turnover)
-    volume_zscore_1m: float = 0.0     # z-score vs rolling 60-period mean
+    volume_zscore_1m: float = 0.0     # z-score vs rolling 60-period mean (trade-based)
+    volume_zscore_candle: float = 0.0 # z-score from candle turnover (candle-based)
     volume_ratio_5m: float = 0.0      # 5m volume / avg 5m volume (rolling 12 periods)
 
     # ── Price momentum ────────────────────────────────────────────
@@ -376,12 +377,12 @@ class FeatureCalculator:
             avg_prior = np.mean(prior_changes)
             f.price_acceleration = recent_change - avg_prior
 
-        # --- Volume z-score from candles ---
+        # --- Volume z-score from candles (separate field to avoid overwriting trade-based) ---
         if len(volumes) >= 10:
             mu = np.mean(volumes[:-1])
             sigma = np.std(volumes[:-1])
             if sigma > 0:
-                f.volume_zscore_1m = (volumes[-1] - mu) / sigma
+                f.volume_zscore_candle = (volumes[-1] - mu) / sigma
 
         # --- Volume decline after spike (исправлено) ---
         if len(volumes) >= 5:
