@@ -179,7 +179,7 @@ async def cmd_coin(msg: Message) -> None:
     if len(args) < 2:
         await msg.answer(
             "Укажи тикер монеты.\n\n"
-            "Пример: de>/coin DOGE</code>"
+            "Пример: <code>/coin DOGE</code>"
         )
         return
 
