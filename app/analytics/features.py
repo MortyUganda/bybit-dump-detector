@@ -23,6 +23,24 @@ from app.utils.time_utils import utcnow_ts
 logger = get_logger(__name__)
 
 
+# ─── Trend context ───────────────────────────────────────────────────────────
+
+@dataclass
+class TrendContext:
+    """1-hour trend context for multi-timeframe filtering."""
+    ema20_1h: float = 0.0
+    ema50_1h: float = 0.0
+    ema20_above_ema50_1h: bool = False
+    price_above_ema20_1h: bool = False
+    trend_strength: float = 0.0  # -1.0 (strong down) to +1.0 (strong up)
+
+    def is_safe_to_short(self) -> bool:
+        """Don't short when strong uptrend on 1h."""
+        if self.price_above_ema20_1h and self.ema20_above_ema50_1h:
+            return False  # strong uptrend — block short
+        return True
+
+
 # ─── Data containers ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -68,7 +86,8 @@ class CoinFeatures:
 
     # ── Volume anomaly ────────────────────────────────────────────
     volume_1m: float = 0.0            # current 1m volume (USDT turnover)
-    volume_zscore_1m: float = 0.0     # z-score vs rolling 60-period mean
+    volume_zscore_1m: float = 0.0     # z-score vs rolling 60-period mean (trade-based)
+    volume_zscore_candle: float = 0.0 # z-score from candle turnover (candle-based)
     volume_ratio_5m: float = 0.0      # 5m volume / avg 5m volume (rolling 12 periods)
 
     # ── Price momentum ────────────────────────────────────────────
@@ -107,7 +126,15 @@ class CoinFeatures:
 
     # ── Open Interest (perpetual only, None for spot) ─────────────
     oi_change_pct_1h: float | None = None  # % OI change in last hour
+    oi_change_pct: float = 0.0             # % change vs 5 min ago
+    oi_zscore: float = 0.0                 # z-score of OI change rate
     funding_rate: float | None = None       # latest funding rate
+
+    # ── Trend context (multi-timeframe) ─────────────────────────
+    trend_context: TrendContext = field(default_factory=TrendContext)
+
+    # ── Market context ──────────────────────────────────────────
+    btc_change_15m: float = 0.0       # BTC 15m momentum at feature time
 
     # ── Metadata ─────────────────────────────────────────────────
     last_price: float = 0.0
@@ -142,6 +169,8 @@ class FeatureCalculator:
         self._last_ob: dict | None = None
         self._volume_24h: float = 0.0
         self._last_price: float = 0.0
+        self._trend_context: TrendContext = TrendContext()
+        self._oi_history: Deque[float] = deque(maxlen=12)  # 12 * 5min = 1 hour
 
     def update_trade(self, tick: TradeTick) -> None:
         self._trades.append(tick)
@@ -162,14 +191,46 @@ class FeatureCalculator:
     def update_24h_volume(self, volume_usdt: float) -> None:
         self._volume_24h = volume_usdt
 
+    def update_oi(self, oi_value: float) -> None:
+        """Append latest open interest value."""
+        self._oi_history.append(oi_value)
+
+    def update_trend(self, candles_1h: list[CandleData]) -> None:
+        """Update 1h trend context from hourly candles."""
+        if len(candles_1h) < 50:
+            return
+        closes = np.array([c.close for c in candles_1h])
+        ema20 = self._calc_ema(closes, 20)
+        ema50 = self._calc_ema(closes, 50)
+        price = closes[-1]
+
+        self._trend_context.ema20_1h = ema20
+        self._trend_context.ema50_1h = ema50
+        self._trend_context.ema20_above_ema50_1h = ema20 > ema50
+        self._trend_context.price_above_ema20_1h = price > ema20
+
+        # Trend strength: +1 if price > EMA20 > EMA50, -1 if price < EMA20 < EMA50
+        if price > ema20 > ema50:
+            self._trend_context.trend_strength = 1.0
+        elif price < ema20 < ema50:
+            self._trend_context.trend_strength = -1.0
+        elif ema20 > ema50:
+            self._trend_context.trend_strength = 0.3
+        elif ema20 < ema50:
+            self._trend_context.trend_strength = -0.3
+        else:
+            self._trend_context.trend_strength = 0.0
+
     def compute(self) -> CoinFeatures:
         now = utcnow_ts()
         features = CoinFeatures(symbol=self.symbol, ts=now, last_price=self._last_price)
         features.volume_24h_usdt = self._volume_24h
+        features.trend_context = self._trend_context
 
         self._compute_trade_features(features, now)
         self._compute_candle_features(features)
         self._compute_ob_features(features)
+        self._compute_oi_features(features)
 
         return features
 
@@ -376,12 +437,12 @@ class FeatureCalculator:
             avg_prior = np.mean(prior_changes)
             f.price_acceleration = recent_change - avg_prior
 
-        # --- Volume z-score from candles ---
+        # --- Volume z-score from candles (separate field to avoid overwriting trade-based) ---
         if len(volumes) >= 10:
             mu = np.mean(volumes[:-1])
             sigma = np.std(volumes[:-1])
             if sigma > 0:
-                f.volume_zscore_1m = (volumes[-1] - mu) / sigma
+                f.volume_zscore_candle = (volumes[-1] - mu) / sigma
 
         # --- Volume decline after spike (исправлено) ---
         if len(volumes) >= 5:
@@ -448,21 +509,54 @@ class FeatureCalculator:
                 except (TypeError, ValueError):
                     pass
 
+    # ── OI features ───────────────────────────────────────────────
+
+    def _compute_oi_features(self, f: CoinFeatures) -> None:
+        if len(self._oi_history) < 2:
+            return
+        oi_values = list(self._oi_history)
+        latest = oi_values[-1]
+        prev = oi_values[-2]
+        if prev > 0:
+            f.oi_change_pct = (latest - prev) / prev * 100
+        if len(oi_values) >= 4:
+            changes = [(oi_values[i] - oi_values[i - 1]) / oi_values[i - 1] * 100
+                       for i in range(1, len(oi_values)) if oi_values[i - 1] > 0]
+            if len(changes) >= 3:
+                mu = np.mean(changes[:-1])
+                sigma = np.std(changes[:-1])
+                if sigma > 0:
+                    f.oi_zscore = (changes[-1] - mu) / sigma
+
     # ── Math helpers ──────────────────────────────────────────────
 
     @staticmethod
     def _calc_rsi(closes: np.ndarray, period: int = 14) -> float:
         if len(closes) < period + 1:
             return 50.0
-        deltas = np.diff(closes)[-period:]
+        deltas = np.diff(closes)
         gains = np.where(deltas > 0, deltas, 0.0)
         losses = np.where(deltas < 0, -deltas, 0.0)
-        avg_gain = np.mean(gains)
-        avg_loss = np.mean(losses)
+        # Wilder's exponential smoothing
+        avg_gain = np.mean(gains[:period])
+        avg_loss = np.mean(losses[:period])
+        for i in range(period, len(gains)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
         if avg_loss == 0:
             return 100.0
         rs = avg_gain / avg_loss
         return float(100 - (100 / (1 + rs)))
+
+    @staticmethod
+    def _calc_ema(closes: np.ndarray, period: int) -> float:
+        if len(closes) < period:
+            return float(closes[-1]) if len(closes) > 0 else 0.0
+        k = 2.0 / (period + 1)
+        ema = float(np.mean(closes[:period]))
+        for price in closes[period:]:
+            ema = price * k + ema * (1 - k)
+        return ema
 
     @staticmethod
     def _calc_atr(

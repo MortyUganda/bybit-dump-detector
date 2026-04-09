@@ -83,3 +83,9 @@ class AutoShort(Base):
     price_change_1h: Mapped[float] = mapped_column(Float, nullable=True)
     spread_pct: Mapped[float] = mapped_column(Float, nullable=True)
     bid_depth_change_5m: Mapped[float] = mapped_column(Float, nullable=True)
+
+    # ── ML enrichment columns ────────────────────────────────────
+    btc_change_15m: Mapped[float] = mapped_column(Float, nullable=True)
+    funding_rate_at_signal: Mapped[float] = mapped_column(Float, nullable=True)
+    oi_change_pct_at_signal: Mapped[float] = mapped_column(Float, nullable=True)
+    trend_strength_1h: Mapped[float] = mapped_column(Float, nullable=True)

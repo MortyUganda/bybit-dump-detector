@@ -14,7 +14,6 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import get_settings
-from app.services.auto_short_service import ACTIVE_SHORTS
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)

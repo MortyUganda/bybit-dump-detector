@@ -89,6 +89,8 @@ class IngestionService:
         # Background tasks
         asyncio.create_task(self._candle_refresh_loop())
         asyncio.create_task(self._universe_sync_loop())
+        asyncio.create_task(self._trend_refresh_loop())
+        asyncio.create_task(self._oi_refresh_loop())
 
     async def stop(self) -> None:
         self._running = False
@@ -171,6 +173,68 @@ class IngestionService:
             calc.update_candles(candles_5m, "5")
         except Exception as e:
             logger.debug("Candle refresh failed", symbol=symbol, error=str(e))
+
+    async def _trend_refresh_loop(self) -> None:
+        """Fetch 1h candles and update trend context every 5 minutes."""
+        while self._running:
+            try:
+                symbols = list(self._universe.symbols)
+                batch_size = 20
+                for i in range(0, len(symbols), batch_size):
+                    if not self._running:
+                        break
+                    batch = symbols[i: i + batch_size]
+                    tasks = [self._refresh_trend(sym) for sym in batch]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.error("Trend refresh loop error", error=str(e))
+            await asyncio.sleep(300)
+
+    async def _oi_refresh_loop(self) -> None:
+        """Fetch open interest for all symbols every 5 minutes."""
+        while self._running:
+            try:
+                symbols = list(self._universe.symbols)
+                batch_size = 20
+                for i in range(0, len(symbols), batch_size):
+                    if not self._running:
+                        break
+                    batch = symbols[i: i + batch_size]
+                    tasks = [self._refresh_oi(sym) for sym in batch]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.error("OI refresh loop error", error=str(e))
+            await asyncio.sleep(300)
+
+    async def _refresh_oi(self, symbol: str) -> None:
+        """Fetch open interest for a symbol and update calculator."""
+        calc = self._calculators.get(symbol)
+        if not calc:
+            return
+        try:
+            oi_data = await self._rest.get_open_interest(symbol, interval="5min", limit=2)
+            if oi_data:
+                latest_oi = float(oi_data[0].get("openInterest", 0))
+                if latest_oi > 0:
+                    calc.update_oi(latest_oi)
+        except Exception as e:
+            logger.debug("OI refresh failed", symbol=symbol, error=str(e))
+
+    async def _refresh_trend(self, symbol: str) -> None:
+        """Fetch 1h candles for a symbol and update trend context."""
+        calc = self._calculators.get(symbol)
+        if not calc:
+            return
+        try:
+            raw_1h = await self._rest.get_klines(
+                symbol, interval="60", limit=60, category="linear",
+            )
+            candles_1h = [CandleData(**c) for c in raw_1h]
+            calc.update_trend(candles_1h)
+        except Exception as e:
+            logger.debug("Trend refresh failed", symbol=symbol, error=str(e))
 
     async def _universe_sync_loop(self) -> None:
         """Re-subscribe WS when universe changes."""

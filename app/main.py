@@ -86,7 +86,7 @@ async def run_analyzer() -> None:
     )
 
     # Создаём AutoShortService и восстанавливаем активные сделки
-    auto_short = AutoShortService(redis=redis_client, bot=bot)
+    auto_short = AutoShortService(redis=redis_client, bot=bot, rest_client=rest)
     await auto_short.restore_active_trades()
 
     # Создаём MonitorService
