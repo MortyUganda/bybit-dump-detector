@@ -50,6 +50,7 @@ class AutoShortService:
         self._bot = bot
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._trade_tasks: dict[int, asyncio.Task] = {}
+        self._pending_symbols: set[str] = set()
 
     def set_bot(self, bot) -> None:
         self._bot = bot
@@ -231,6 +232,7 @@ class AutoShortService:
         symbol = risk_score.symbol
         lock = self._get_symbol_lock(symbol)
 
+        # Phase 1: Acquire lock, check duplicates, mark pending, release lock
         async with lock:
             if self._is_symbol_already_open(symbol):
                 logger.info(
@@ -238,7 +240,16 @@ class AutoShortService:
                     symbol=symbol,
                 )
                 return
+            if symbol in self._pending_symbols:
+                logger.info(
+                    "Skipping short — symbol already pending entry",
+                    symbol=symbol,
+                )
+                return
+            self._pending_symbols.add(symbol)
 
+        # Phase 2: Sleep and monitor entry WITHOUT holding the lock
+        try:
             signal_price = await self._get_price(symbol)
             if not signal_price:
                 logger.warning("Cannot open short — no price at signal", symbol=symbol)
@@ -269,7 +280,7 @@ class AutoShortService:
                     score=risk_score.score,
                 )
                 return
-            
+
             logger.info(
                 "Price check after delay",
                 symbol=symbol,
@@ -318,57 +329,59 @@ class AutoShortService:
                     await self._notify_skipped(
                         symbol=symbol,
                         signal_price=signal_price,
-                        entry_price=entry_price, # type: ignore
+                        entry_price=entry_price,  # type: ignore
                         price_change_pct=price_change_pct,
                         score=risk_score.score,
                     )
                     return
 
-            if self._is_symbol_already_open(symbol):
-                logger.info(
-                    "Skipping short after delay — trade already opened in parallel",
-                    symbol=symbol,
+            # Phase 3: Re-acquire lock for final check and trade creation
+            async with lock:
+                if self._is_symbol_already_open(symbol):
+                    logger.info(
+                        "Skipping short after delay — trade already opened in parallel",
+                        symbol=symbol,
+                    )
+                    return
+
+                tp_price = self._build_tp_price(entry_price)  # type: ignore
+                sl_price = self._build_sl_price(entry_price)  # type: ignore
+
+                trade_id = await self._save_to_db(
+                    risk_score=risk_score,
+                    entry_price=entry_price,  # type: ignore
+                    signal_price=signal_price,
+                    price_change_at_entry=price_change_pct,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
                 )
-                return
 
-            tp_price = self._build_tp_price(entry_price) # type: ignore
-            sl_price = self._build_sl_price(entry_price)# type: ignore
+                if not trade_id:
+                    logger.warning(
+                        "Failed to persist short trade",
+                        symbol=symbol,
+                        entry_price=entry_price,
+                    )
+                    return
 
-            trade_id = await self._save_to_db(
-                risk_score=risk_score,
-                entry_price=entry_price,# type: ignore
-                signal_price=signal_price,
-                price_change_at_entry=price_change_pct,
-                tp_price=tp_price,
-                sl_price=sl_price,
-            )
+                trade_payload = {
+                    "id": trade_id,
+                    "symbol": symbol,
+                    "status": "open",
+                    "close_reason": None,
+                    "signal_price": signal_price,
+                    "entry_price": entry_price,
+                    "price_change_at_entry": price_change_pct,
+                    "tp_price": tp_price,
+                    "sl_price": sl_price,
+                    "score": risk_score.score,
+                    "entry_ts": datetime.now(timezone.utc),
+                    "price_15m_saved": False,
+                    "price_30m_saved": False,
+                    "price_60m_saved": False,
+                }
 
-            if not trade_id:
-                logger.warning(
-                    "Failed to persist short trade",
-                    symbol=symbol,
-                    entry_price=entry_price,
-                )
-                return
-
-            trade_payload = {
-                "id": trade_id,
-                "symbol": symbol,
-                "status": "open",
-                "close_reason": None,
-                "signal_price": signal_price,
-                "entry_price": entry_price,
-                "price_change_at_entry": price_change_pct,
-                "tp_price": tp_price,
-                "sl_price": sl_price,
-                "score": risk_score.score,
-                "entry_ts": datetime.now(timezone.utc),
-                "price_15m_saved": False,
-                "price_30m_saved": False,
-                "price_60m_saved": False,
-            }
-
-            ACTIVE_SHORTS[trade_id] = trade_payload
+                ACTIVE_SHORTS[trade_id] = trade_payload
 
             logger.info(
                 "Auto short opened",
@@ -388,7 +401,7 @@ class AutoShortService:
                 trade_id=trade_id,
                 symbol=symbol,
                 signal_price=signal_price,
-                entry_price=entry_price,# type: ignore
+                entry_price=entry_price,  # type: ignore
                 price_change_pct=price_change_pct,
                 tp_price=tp_price,
                 sl_price=sl_price,
@@ -397,6 +410,9 @@ class AutoShortService:
 
             task = asyncio.create_task(self._monitor_trade(trade_id))
             self._track_task(trade_id, task)
+
+        finally:
+            self._pending_symbols.discard(symbol)
 
     async def _check_trend_filter(self, risk_score: RiskScore) -> bool:
         """
