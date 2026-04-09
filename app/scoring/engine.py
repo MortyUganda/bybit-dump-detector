@@ -127,19 +127,19 @@ class ScoringEngine:
     # ── Factor weights (must sum to 1.0) ─────────────────────────
     WEIGHTS = {
         "rsi_1m":               0.13,
-        "rsi_5m":               0.08,  # NEW — подтверждение на 5m
+        "rsi_5m":               0.08,
         "vwap_extension":       0.11,
         "volume_zscore":        0.11,
         "trade_imbalance":      0.09,
         "large_buy_cluster":    0.09,
-        "large_sell_cluster":   0.06,  # NEW — крупные продажи = начало слива
+        "large_sell_cluster":   0.06,
         "price_acceleration":   0.09,
-        "consecutive_greens":   0.07,
+        "consecutive_greens":   0.04,  # reduced from 0.07 to make room for funding
         "ob_bid_thinning":      0.07,
-        "spread_expansion":     0.04,
+        "spread_expansion":     0.03,  # reduced from 0.04
         "momentum_loss":        0.04,
-        "upper_wick":           0.02,
-        "funding_rate":         0.00,  # оставлен для совместимости
+        "upper_wick":           0.01,  # reduced from 0.02
+        "funding_rate":         0.05,  # enabled: extreme funding = crowded longs
     }
 
     # ── RSI 1m thresholds ─────────────────────────────────────────
@@ -191,8 +191,8 @@ class ScoringEngine:
     WICK_HIGH = 3.0
 
     # ── Funding rate ──────────────────────────────────────────────
-    FUNDING_LOW = 0.0005
-    FUNDING_HIGH = 0.002
+    FUNDING_LOW = 0.0003   # 0.03% = slightly elevated
+    FUNDING_HIGH = 0.001   # 0.1% = very crowded longs
 
     def score(self, features: CoinFeatures) -> RiskScore:
         factors: list[FactorResult] = []
