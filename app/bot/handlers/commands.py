@@ -128,7 +128,7 @@ async def cmd_status(msg: Message) -> None:
 @router.message(F.text == "📡 Сигналы")
 async def btn_signals(msg: Message) -> None:
     from app.bot.handlers.signals import _format_signals_page, signals_history_keyboard
-    text, has_next = _format_signals_page(page=0)
+    text, has_next = await _format_signals_page(page=0)
     await msg.answer(text, reply_markup=signals_history_keyboard(page=0, has_next=has_next))
 
 

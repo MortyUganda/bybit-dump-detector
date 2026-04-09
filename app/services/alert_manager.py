@@ -47,7 +47,7 @@ class AlertManager:
         if risk_score.features_snapshot:
             price = risk_score.features_snapshot.last_price
 
-        add_signal(
+        await add_signal(
             symbol=symbol,
             signal_type=risk_score.signal_type.value if risk_score.signal_type else "unknown",
             score=risk_score.score,
