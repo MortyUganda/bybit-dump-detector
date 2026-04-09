@@ -15,7 +15,6 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-import aiohttp
 import redis.asyncio as aioredis
 
 from app.config import get_settings
@@ -45,12 +44,14 @@ ACTIVE_SHORTS: dict[int, dict[str, Any]] = {}
 
 
 class AutoShortService:
-    def __init__(self, redis: aioredis.Redis, bot=None) -> None:
+    def __init__(self, redis: aioredis.Redis, bot=None, rest_client=None) -> None:
         self._redis = redis
         self._bot = bot
+        self._rest_client = rest_client
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._trade_tasks: dict[int, asyncio.Task] = {}
         self._pending_symbols: set[str] = set()
+        self._price_cache: dict[str, float] = {}
 
     def set_bot(self, bot) -> None:
         self._bot = bot
@@ -768,28 +769,48 @@ class AutoShortService:
             raise
 
     async def _get_price(self, symbol: str) -> float | None:
+        # Try 1: Redis features key (real-time WS data, written by ingestion)
+        try:
+            raw = await self._redis.get(f"features:{symbol}")
+            if raw:
+                data = json.loads(raw)
+                price = data.get("last_price")
+                if price and float(price) > 0:
+                    self._price_cache[symbol] = float(price)
+                    return float(price)
+        except Exception as e:
+            logger.debug("Redis features price fetch failed", symbol=symbol, error=str(e))
+
+        # Try 2: Redis score key (scoring cycle snapshot, up to 30s stale)
         try:
             raw = await self._redis.get(f"score:{symbol}")
             if raw:
                 data = json.loads(raw)
                 snapshot = data.get("features_snapshot") or {}
                 price = snapshot.get("last_price")
-                if price is not None:
+                if price is not None and float(price) > 0:
+                    self._price_cache[symbol] = float(price)
                     return float(price)
         except Exception as e:
-            logger.debug("Redis price fetch failed", symbol=symbol, error=str(e))
+            logger.debug("Redis score price fetch failed", symbol=symbol, error=str(e))
 
-        try:
-            url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
-            timeout = aiohttp.ClientTimeout(total=5)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url) as resp:
-                    data = await resp.json()
-                    items = data.get("result", {}).get("list", [])
-                    if items:
-                        return float(items[0]["lastPrice"])
-        except Exception as e:
-            logger.debug("Bybit price fetch failed", symbol=symbol, error=str(e))
+        # Try 3: Shared REST client (reuses persistent session)
+        if self._rest_client:
+            try:
+                ticker = await self._rest_client.get_ticker(symbol, category="linear")
+                if ticker:
+                    price = float(ticker.get("lastPrice", 0))
+                    if price > 0:
+                        self._price_cache[symbol] = price
+                        return price
+            except Exception as e:
+                logger.debug("REST client price fetch failed", symbol=symbol, error=str(e))
+
+        # Try 4: Fallback to in-memory cache
+        cached = self._price_cache.get(symbol)
+        if cached:
+            logger.debug("Using cached price", symbol=symbol, price=cached)
+            return cached
 
         return None
 
