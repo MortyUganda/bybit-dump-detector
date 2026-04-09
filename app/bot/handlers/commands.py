@@ -162,18 +162,29 @@ async def btn_watchlist(msg: Message) -> None:
 async def btn_trades(msg: Message) -> None:
     if not msg.from_user:
         return
-    from app.services.auto_short_service import ACTIVE_SHORTS
-    if not ACTIVE_SHORTS:
+    # Read active shorts from Redis (cross-process safe)
+    import redis.asyncio as aioredis
+    from app.config import get_settings
+    from app.services.auto_short_service import REDIS_ACTIVE_SHORTS_KEY, _deserialize_trade
+    _settings = get_settings()
+    _redis = aioredis.from_url(_settings.redis_url, decode_responses=True)
+    try:
+        raw_all = await _redis.hgetall(REDIS_ACTIVE_SHORTS_KEY)
+    finally:
+        await _redis.aclose()
+
+    if not raw_all:
         await msg.answer(
             "📋 <b>Авто-шорты</b>\n\n"
             "<i>Нет активных сделок.</i>\n\n"
             "Сделки открываются автоматически при score ≥ 45."
         )
         return
+    active_shorts = {int(k): _deserialize_trade(v) for k, v in raw_all.items()}
     lines = ["📋 <b>Активные авто-шорты</b>\n"]
-    for trade_id, trade in sorted(ACTIVE_SHORTS.items(), reverse=True):
+    for trade_id, trade in sorted(active_shorts.items(), reverse=True):
         lines.append(
-            f"🟡 #{trade_id} de>{trade['symbol']}</code>\n"
+            f"🟡 #{trade_id} <code>{trade['symbol']}</code>\n"
             f"   Вход: ${trade['entry_price']:.6g}\n"
             f"   TP: ${trade['tp_price']:.6g} | SL: ${trade['sl_price']:.6g}"
         )

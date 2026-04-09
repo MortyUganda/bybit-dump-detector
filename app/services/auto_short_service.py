@@ -40,7 +40,23 @@ MAX_TRADE_DURATION = 60 * 60 * 4
 ENTRY_MONITOR_INTERVAL = 30
 MAX_WAIT_ATTEMPTS = 10  # 10 * 30 сек = 5 минут
 
-ACTIVE_SHORTS: dict[int, dict[str, Any]] = {}
+REDIS_ACTIVE_SHORTS_KEY = "active_shorts"
+
+
+def _serialize_trade(trade: dict[str, Any]) -> str:
+    """Serialize trade dict to JSON for Redis storage."""
+    data = dict(trade)
+    if isinstance(data.get("entry_ts"), datetime):
+        data["entry_ts"] = data["entry_ts"].isoformat()
+    return json.dumps(data)
+
+
+def _deserialize_trade(raw: str) -> dict[str, Any]:
+    """Deserialize trade dict from Redis JSON."""
+    data = json.loads(raw)
+    if isinstance(data.get("entry_ts"), str):
+        data["entry_ts"] = datetime.fromisoformat(data["entry_ts"])
+    return data
 
 
 class AutoShortService:
@@ -53,6 +69,27 @@ class AutoShortService:
         self._pending_symbols: set[str] = set()
         self._price_cache: dict[str, float] = {}
 
+    # ── Redis-backed active shorts ───────────────────────────────
+
+    async def _get_active_short(self, trade_id: int) -> dict[str, Any] | None:
+        raw = await self._redis.hget(REDIS_ACTIVE_SHORTS_KEY, str(trade_id))
+        if raw:
+            return _deserialize_trade(raw)
+        return None
+
+    async def _set_active_short(self, trade_id: int, trade: dict[str, Any]) -> None:
+        await self._redis.hset(REDIS_ACTIVE_SHORTS_KEY, str(trade_id), _serialize_trade(trade))
+
+    async def _del_active_short(self, trade_id: int) -> None:
+        await self._redis.hdel(REDIS_ACTIVE_SHORTS_KEY, str(trade_id))
+
+    async def _get_all_active_shorts(self) -> dict[int, dict[str, Any]]:
+        raw_all = await self._redis.hgetall(REDIS_ACTIVE_SHORTS_KEY)
+        result: dict[int, dict[str, Any]] = {}
+        for k, v in raw_all.items():
+            result[int(k)] = _deserialize_trade(v)
+        return result
+
     def set_bot(self, bot) -> None:
         self._bot = bot
 
@@ -63,10 +100,11 @@ class AutoShortService:
             self._symbol_locks[symbol] = lock
         return lock
 
-    def _is_symbol_already_open(self, symbol: str) -> bool:
+    async def _is_symbol_already_open(self, symbol: str) -> bool:
+        all_trades = await self._get_all_active_shorts()
         return any(
             trade["symbol"] == symbol and trade["status"] == "open"
-            for trade in ACTIVE_SHORTS.values()
+            for trade in all_trades.values()
         )
 
     def _calc_price_move_pct(self, from_price: float, to_price: float) -> float:
@@ -158,6 +196,9 @@ class AutoShortService:
             from app.db.models.auto_short import AutoShort
             from app.db.session import AsyncSessionLocal
 
+            # Clear stale Redis entries before restoring from DB
+            await self._redis.delete(REDIS_ACTIVE_SHORTS_KEY)
+
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
                     select(AutoShort).where(AutoShort.status == "open")
@@ -169,6 +210,7 @@ class AutoShortService:
                 return
 
             logger.info("Restoring open trades", count=len(open_trades))
+            restored_count = 0
 
             for trade in open_trades:
                 now = datetime.now(timezone.utc)
@@ -195,7 +237,7 @@ class AutoShortService:
                         )
                     continue
 
-                ACTIVE_SHORTS[trade.id] = {
+                trade_payload = {
                     "id": trade.id,
                     "symbol": trade.symbol,
                     "entry_price": trade.entry_price,
@@ -208,6 +250,8 @@ class AutoShortService:
                     "price_30m_saved": trade.price_30m is not None,
                     "price_60m_saved": trade.price_60m is not None,
                 }
+                await self._set_active_short(trade.id, trade_payload)
+                restored_count += 1
 
                 logger.info(
                     "Trade restored",
@@ -223,7 +267,7 @@ class AutoShortService:
             logger.info(
                 "Trades restored",
                 count=len(open_trades),
-                active=len(ACTIVE_SHORTS),
+                active=restored_count,
             )
 
         except Exception as e:
@@ -235,7 +279,7 @@ class AutoShortService:
 
         # Phase 1: Acquire lock, check duplicates, mark pending, release lock
         async with lock:
-            if self._is_symbol_already_open(symbol):
+            if await self._is_symbol_already_open(symbol):
                 logger.info(
                     "Skipping short — already have open trade for symbol",
                     symbol=symbol,
@@ -338,7 +382,7 @@ class AutoShortService:
 
             # Phase 3: Re-acquire lock for final check and trade creation
             async with lock:
-                if self._is_symbol_already_open(symbol):
+                if await self._is_symbol_already_open(symbol):
                     logger.info(
                         "Skipping short after delay — trade already opened in parallel",
                         symbol=symbol,
@@ -382,7 +426,7 @@ class AutoShortService:
                     "price_60m_saved": False,
                 }
 
-                ACTIVE_SHORTS[trade_id] = trade_payload
+                await self._set_active_short(trade_id, trade_payload)
 
             logger.info(
                 "Auto short opened",
@@ -476,7 +520,7 @@ class AutoShortService:
 
 
     async def _monitor_trade(self, trade_id: int) -> None:
-        trade = ACTIVE_SHORTS.get(trade_id)
+        trade = await self._get_active_short(trade_id)
         if not trade:
             return
 
@@ -485,13 +529,11 @@ class AutoShortService:
         entry_ts = trade["entry_ts"]
 
         # Трейлинг стоп — двигаем SL за ценой когда позиция в прибыли
-        # Активируется когда P&L >= TRAILING_ACTIVATE_PCT
-        # После активации SL = лучшая цена + TRAILING_DISTANCE_PCT
-        TRAILING_ACTIVATE_PCT = 10.0   # активировать трейлинг при +10% P&L
-        TRAILING_DISTANCE_PCT = SL_PRICE_MOVE  # расстояние трейлинга = 1.25% от цены
+        TRAILING_ACTIVATE_PCT = 10.0
+        TRAILING_DISTANCE_PCT = SL_PRICE_MOVE
 
         trailing_active = False
-        best_price = entry_price  # лучшая цена (минимальная для шорта)
+        best_price = entry_price
 
         while trade["status"] == "open":
             await asyncio.sleep(MONITOR_INTERVAL)
@@ -505,20 +547,18 @@ class AutoShortService:
 
             await self._save_price_snapshot(trade_id, trade, current_price, elapsed, now)
 
-            # P&L с плечом
             price_move = (entry_price - current_price) / entry_price * 100
             pnl = price_move * LEVERAGE
 
             # ── Трейлинг стоп ─────────────────────────────────────
             if pnl >= TRAILING_ACTIVATE_PCT:
-                # Обновляем лучшую цену (для шорта — минимум)
                 if current_price < best_price:
                     best_price = current_price
-                    # Двигаем SL вниз за ценой
                     new_sl = best_price * (1 + TRAILING_DISTANCE_PCT / 100)
                     if new_sl < trade["sl_price"]:
                         old_sl = trade["sl_price"]
                         trade["sl_price"] = new_sl
+                        await self._set_active_short(trade_id, trade)
                         trailing_active = True
                         logger.info(
                             "Trailing stop moved",
@@ -564,7 +604,7 @@ class AutoShortService:
         reason: str,
         pnl: float,
     ) -> None:
-        trade = ACTIVE_SHORTS.get(trade_id)
+        trade = await self._get_active_short(trade_id)
         if not trade:
             return
 
@@ -605,7 +645,7 @@ class AutoShortService:
         )
 
         await self._notify_closed(trade_id, trade["symbol"], exit_price, pnl, reason)
-        ACTIVE_SHORTS.pop(trade_id, None)
+        await self._del_active_short(trade_id)
 
     async def _save_price_snapshot(
         self,
