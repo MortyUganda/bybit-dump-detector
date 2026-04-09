@@ -19,17 +19,30 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def alert_action_keyboard(symbol: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="🔔 Сигнал получен",
-        callback_data=f"pt:skip:{symbol}",
-    )
-    builder.button(
-        text="📈 Открыть на Bybit",
-        url=f"https://www.bybit.com/trade/usdt/{symbol}",
-    )
-    builder.adjust(2)
-    return builder.as_markup()
+    base = symbol.replace("USDT", "")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📊 Детали", callback_data=f"coin:detail:{symbol}"),
+            InlineKeyboardButton(text="⭐ В watchlist", callback_data=f"watch_add:{symbol}"),
+            InlineKeyboardButton(
+                text="🔗 Bybit",
+                url=f"https://www.bybit.com/trade/usdt/{base}USDT",
+            ),
+        ]
+    ])
+
+
+def trade_action_keyboard(symbol: str, trade_id: int) -> InlineKeyboardMarkup:
+    base = symbol.replace("USDT", "")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📊 Детали", callback_data=f"coin:detail:{symbol}"),
+            InlineKeyboardButton(
+                text="🔗 Bybit",
+                url=f"https://www.bybit.com/trade/usdt/{base}USDT",
+            ),
+        ]
+    ])
 
 def watchlist_keyboard(symbols: list[str]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
