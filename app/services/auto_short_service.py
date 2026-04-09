@@ -748,6 +748,14 @@ class AutoShortService:
                 price_change_5m=features.price_change_5m if features else None,
                 spread_pct=features.spread_pct if features else None,
                 bid_depth_change_5m=features.bid_depth_change_5m if features else None,
+                # ML enrichment columns
+                btc_change_15m=features.btc_change_15m if features else None,
+                funding_rate_at_signal=features.funding_rate if features else None,
+                oi_change_pct_at_signal=features.oi_change_pct if features else None,
+                trend_strength_1h=(
+                    features.trend_context.trend_strength
+                    if features and features.trend_context else None
+                ),
             )
 
             async with AsyncSessionLocal() as session:

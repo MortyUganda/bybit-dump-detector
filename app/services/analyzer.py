@@ -23,6 +23,7 @@ import uuid
 import redis.asyncio as aioredis
 
 from app.analytics.market_context import MarketContext
+from app.analytics.ml_scorer import MLScorer
 from app.config import get_settings
 from app.scoring.engine import RiskScore, ScoringEngine
 from app.services.ingestion import IngestionService
@@ -57,6 +58,7 @@ class AnalyzerService:
         self._alert_callback = alert_callback
         self._scoring = ScoringEngine()
         self._market_context = MarketContext(ingestion._rest)
+        self._ml_scorer = MLScorer()
         self._running = False
         self._cycle_count = 0
 
@@ -105,19 +107,47 @@ class AnalyzerService:
                 features.btc_change_15m = self._market_context.btc_change_15m
 
                 risk_score = self._scoring.score(features)
+
+                # ML blending (when model is trained)
+                if self._ml_scorer.is_ready():
+                    factor_map = {f.name: f.raw_value for f in risk_score.factors}
+                    ml_features = {
+                        **factor_map,
+                        "btc_change_15m": features.btc_change_15m,
+                        "funding_rate_at_signal": features.funding_rate or 0,
+                        "oi_change_pct_at_signal": features.oi_change_pct,
+                        "trend_strength_1h": (
+                            features.trend_context.trend_strength
+                            if features.trend_context else 0
+                        ),
+                    }
+                    ml_prob = self._ml_scorer.predict_probability(ml_features)
+                    risk_score.ml_probability = ml_prob
+                    # Blend: 70% rule-based + 30% ML
+                    rule_score = risk_score.score
+                    risk_score.score = 0.7 * rule_score + 0.3 * (ml_prob * 100)
+                    risk_score.score = max(0.0, min(100.0, risk_score.score))
+
                 scored.append(risk_score)
 
                 # Persist score to Redis
                 key = REDIS_SCORE_KEY.format(symbol=features.symbol)
                 await self._redis.setex(key, REDIS_SCORE_TTL, json.dumps(risk_score.to_dict()))
 
-                # Check if alert should fire (suppress during BTC rally)
+                # Check if alert should fire (suppress during BTC rally or ML veto)
                 if risk_score.is_actionable and risk_score.signal_type:
                     if btc_suppressing:
                         logger.debug(
                             "Alert suppressed by BTC correlation filter",
                             symbol=features.symbol,
                             score=risk_score.score,
+                        )
+                    elif (risk_score.ml_probability is not None
+                          and risk_score.ml_probability < 0.35):
+                        logger.debug(
+                            "Alert suppressed by ML scorer — pattern historically loses",
+                            symbol=features.symbol,
+                            ml_prob=round(risk_score.ml_probability, 3),
                         )
                     else:
                         await self._maybe_alert(risk_score)

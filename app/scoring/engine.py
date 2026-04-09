@@ -81,6 +81,7 @@ class RiskScore:
     triggered_count: int
     top_reasons: list[str]
     features_snapshot: Optional[CoinFeatures] = None
+    ml_probability: Optional[float] = None  # ML model probability (0-1)
 
     @property
     def is_actionable(self) -> bool:
