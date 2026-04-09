@@ -143,10 +143,10 @@ async def btn_overvalued(msg: Message) -> None:
 async def btn_watchlist(msg: Message) -> None:
     if not msg.from_user:
         return
-    from app.bot.handlers.watchlist_store import WATCHLISTS
+    from app.bot.handlers.watchlist_store import get_watchlist
     from app.bot.keyboards import watchlist_keyboard
     user_id = msg.from_user.id
-    symbols = sorted(WATCHLISTS.get(user_id, set()))
+    symbols = sorted(await get_watchlist(user_id))
     if not symbols:
         await msg.answer(
             "⭐ <b>Ваш список отслеживания</b>\n\n"

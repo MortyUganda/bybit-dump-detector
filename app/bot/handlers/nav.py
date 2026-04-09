@@ -4,7 +4,12 @@
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
-from app.bot.handlers.watchlist_store import WATCHLISTS, normalize_symbol
+from app.bot.handlers.watchlist_store import (
+    add_to_watchlist,
+    get_watchlist,
+    normalize_symbol,
+    remove_from_watchlist,
+)
 from app.bot.keyboards import watchlist_keyboard
 
 router = Router()
@@ -17,7 +22,7 @@ async def cb_nav_signals(query: CallbackQuery) -> None:
     except Exception:
         pass
     from app.bot.handlers.signals import _format_signals_page, signals_history_keyboard
-    text, has_next = _format_signals_page(page=0)
+    text, has_next = await _format_signals_page(page=0)
     await query.message.answer(
         text,
         reply_markup=signals_history_keyboard(page=0, has_next=has_next),
@@ -52,7 +57,7 @@ async def cb_nav_watchlist(query: CallbackQuery) -> None:
         return
 
     user_id = query.from_user.id
-    symbols = sorted(WATCHLISTS.get(user_id, set()))
+    symbols = sorted(await get_watchlist(user_id))
 
     if not symbols:
         await query.message.answer(
@@ -109,13 +114,13 @@ async def cb_watch_add(query: CallbackQuery) -> None:
     symbol = normalize_symbol(raw_symbol)
 
     user_id = query.from_user.id
-    WATCHLISTS.setdefault(user_id, set())
+    current = await get_watchlist(user_id)
 
-    if symbol in WATCHLISTS[user_id]:
+    if symbol in current:
         await query.answer(f"ℹ️ {symbol} уже в списке")
         return
 
-    WATCHLISTS[user_id].add(symbol)
+    await add_to_watchlist(user_id, symbol)
     await query.answer(f"✅ {symbol} добавлена в список отслеживания")
 
 
@@ -129,17 +134,13 @@ async def cb_watch_remove(query: CallbackQuery) -> None:
     symbol = normalize_symbol(raw_symbol)
 
     user_id = query.from_user.id
-    user_watchlist = WATCHLISTS.get(user_id, set())
+    current = await get_watchlist(user_id)
 
-    if symbol not in user_watchlist:
+    if symbol not in current:
         await query.answer(f"ℹ️ {symbol} нет в списке")
         return
 
-    user_watchlist.remove(symbol)
-
-    if not user_watchlist:
-        WATCHLISTS.pop(user_id, None)
-
+    await remove_from_watchlist(user_id, symbol)
     await query.answer(f"🗑 {symbol} удалена из списка отслеживания")
 
 
