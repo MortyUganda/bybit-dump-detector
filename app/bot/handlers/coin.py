@@ -62,10 +62,12 @@ def _signal_emoji(signal_type: str) -> str:
 
 FACTOR_LABELS = {
     "rsi":                "RSI перекупленность",
+    "rsi_5m":             "RSI 5m перекупленность",
     "vwap_extension":     "Отклонение от VWAP",
     "volume_zscore":      "Всплеск объёма",
     "trade_imbalance":    "Дисбаланс покупок",
     "large_buy_cluster":  "Кластер крупных покупок",
+    "large_sell_cluster": "Кластер крупных продаж",
     "price_acceleration": "Ускорение цены",
     "consecutive_greens": "Зелёные свечи подряд",
     "ob_bid_thinning":    "Уход бидов",
@@ -73,6 +75,9 @@ FACTOR_LABELS = {
     "momentum_loss":      "Потеря моментума",
     "upper_wick":         "Верхний хвост (rejection)",
     "funding_rate":       "Funding rate",
+    "oi_spike":           "OI всплеск",
+    "cvd_divergence":     "CVD дивергенция",
+    "liquidation_cascade": "Ликвидационный каскад",
 }
 
 
@@ -98,6 +103,22 @@ async def _fetch_coin_data(symbol: str) -> dict | None:
         return None
 
 
+def _value_emoji(value: float, warn_threshold: float, crit_threshold: float, higher_is_worse: bool = True) -> str:
+    """Return emoji indicator based on thresholds."""
+    if higher_is_worse:
+        if value >= crit_threshold:
+            return "🔴"
+        if value >= warn_threshold:
+            return "⚠️"
+        return "✅"
+    else:
+        if value <= crit_threshold:
+            return "🔴"
+        if value <= warn_threshold:
+            return "⚠️"
+        return "✅"
+
+
 def _format_coin_card(symbol: str, data: dict) -> str:
     score = data.get("score", 0)
     level = data.get("level", "low")
@@ -108,20 +129,107 @@ def _format_coin_card(symbol: str, data: dict) -> str:
     level_em = _risk_emoji(level)
     signal_em = _signal_emoji(signal_type)
     signal_label = (signal_type or "нет").replace("_", " ").title()
+    level_label = {
+        "low": "НИЗКИЙ", "moderate": "УМЕРЕННЫЙ",
+        "high": "ВЫСОКИЙ", "critical": "КРИТИЧЕСКИЙ",
+    }.get(level, level.upper())
 
-    base = symbol.replace("USDT", "")
     bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
 
     # Заголовок
     lines = [
         f"🔍 <b><a href=\"{bybit_url}\">{symbol}</a> — Диагностика</b>\n",
-        f"{level_em} <b>Risk Score: {score:.0f}/100</b> ({level.upper()})",
-        f"{signal_em} Сигнал: <b>{signal_label}</b>",
-        f"⚡ Факторов сработало: <b>{triggered_count}/12</b>\n",
     ]
 
-    # Факторы с барами
-    lines.append("<b>Факторы риска:</b>")
+    snapshot = data.get("features_snapshot") or {}
+    price = snapshot.get("last_price")
+    if price:
+        lines.append(f"💰 Цена: <b>${price:.6g}</b>")
+
+    lines.extend([
+        f"📊 Risk Score: {level_em} <b>{score:.0f}/100</b> ({level_label})",
+        f"{signal_em} Сигнал: <b>{signal_label}</b>",
+        f"⚡ Факторов сработало: <b>{triggered_count}/17</b>\n",
+    ])
+
+    # ── Индикаторы ───────────────────────────────────────────────
+    if snapshot:
+        rsi_1m = snapshot.get("rsi_14_1m")
+        rsi_5m = snapshot.get("rsi_14_5m")
+        vwap = snapshot.get("vwap_extension_pct")
+        volume_z = snapshot.get("volume_zscore_1m")
+
+        lines.append("<b>📈 Индикаторы:</b>")
+        indicator_parts = []
+        if rsi_1m is not None:
+            indicator_parts.append(f"RSI 1m: <b>{rsi_1m:.1f}</b>")
+        if rsi_5m is not None:
+            indicator_parts.append(f"RSI 5m: <b>{rsi_5m:.1f}</b>")
+        if indicator_parts:
+            lines.append(f"  {' | '.join(indicator_parts)}")
+        if vwap is not None:
+            vwap_em = _value_emoji(abs(vwap), 1.5, 3.0)
+            lines.append(f"  VWAP отклонение: {vwap_em} <b>{vwap:+.1f}%</b>")
+        if volume_z is not None:
+            vol_em = _value_emoji(volume_z, 1.5, 2.5)
+            lines.append(f"  Volume z-score: {vol_em} <b>{volume_z:.1f}σ</b>")
+
+    # ── Продвинутые метрики ──────────────────────────────────────
+    if snapshot:
+        cvd_div = snapshot.get("cvd_divergence")
+        liq_score = snapshot.get("liquidation_cascade_score")
+        trend_ctx = snapshot.get("trend_context") or {}
+        trend_strength = trend_ctx.get("trend_strength") if isinstance(trend_ctx, dict) else None
+        funding = snapshot.get("funding_rate")
+        oi_change = snapshot.get("oi_change_pct")
+        vol_1h = snapshot.get("realized_vol_1h")
+
+        has_advanced = any(v is not None for v in [
+            cvd_div, liq_score, trend_strength, funding, oi_change, vol_1h,
+        ])
+
+        if has_advanced:
+            lines.append("\n<b>🆕 Продвинутые:</b>")
+
+            if cvd_div is not None:
+                cvd_label = "медвежья ⚠️" if cvd_div < -0.2 else (
+                    "бычья" if cvd_div > 0.2 else "нейтральная"
+                )
+                lines.append(f"  CVD дивергенция: <b>{cvd_div:.2f}</b> ({cvd_label})")
+
+            if liq_score is not None:
+                liq_em = _value_emoji(liq_score, 0.3, 0.6)
+                liq_label = "⚠️ повышенный" if liq_score >= 0.3 else "спокойно"
+                lines.append(
+                    f"  Ликвидационный каскад: {liq_em} <b>{liq_score:.2f}</b> ({liq_label})"
+                )
+
+            if trend_strength is not None:
+                if trend_strength > 0.3:
+                    trend_label = "аптренд"
+                    trend_em = "📈"
+                elif trend_strength < -0.3:
+                    trend_label = "даунтренд"
+                    trend_em = "📉"
+                else:
+                    trend_label = "боковик"
+                    trend_em = "➡️"
+                lines.append(
+                    f"  {trend_em} Тренд 1h: <b>{trend_strength:+.1f}</b> ({trend_label})"
+                )
+
+            if funding is not None:
+                fund_em = _value_emoji(abs(funding), 0.03, 0.08)
+                lines.append(f"  Funding rate: {fund_em} <b>{funding:.4f}%</b>")
+
+            if oi_change is not None:
+                lines.append(f"  OI изменение: <b>{oi_change:+.1f}%</b>")
+
+            if vol_1h is not None:
+                lines.append(f"  Волатильность 1h: <b>{vol_1h:.1f}%</b>")
+
+    # ── Факторы с барами ─────────────────────────────────────────
+    lines.append("\n<b>Факторы риска:</b>")
 
     sorted_factors = sorted(factors, key=lambda x: -x.get("contribution", 0))
 
@@ -140,35 +248,15 @@ def _format_coin_card(symbol: str, data: dict) -> str:
             f"         {contribution:.1f}pts | raw: {raw_value:.3g}"
         )
 
-    # Снимок признаков если есть
-    snapshot = data.get("features_snapshot") or {}
-    if snapshot:
-        price = snapshot.get("last_price")
-        rsi = snapshot.get("rsi_14_1m")
-        vwap = snapshot.get("vwap_extension_pct")
-        volume_z = snapshot.get("volume_zscore_1m")
-        imbalance = snapshot.get("trade_imbalance_5m")
-        spread = snapshot.get("spread_pct")
-        momentum = snapshot.get("momentum_loss_signal")
-        greens = snapshot.get("consecutive_green_candles")
-
-        lines.append("\n<b>Ключевые метрики:</b>")
-        if price:
-            lines.append(f"  💰 Цена: <b>${price:.6g}</b>")
-        if rsi is not None:
-            lines.append(f"  📊 RSI (1m): <b>{rsi:.1f}</b>")
-        if vwap is not None:
-            lines.append(f"  📈 VWAP ext: <b>{vwap:+.2f}%</b>")
-        if volume_z is not None:
-            lines.append(f"  📦 Volume z: <b>{volume_z:.2f}σ</b>")
-        if imbalance is not None:
-            lines.append(f"  ⚖️ Buy imbalance: <b>{imbalance:.2f}</b>")
-        if spread is not None:
-            lines.append(f"  ↔️ Спред: <b>{spread:.3f}%</b>")
-        if greens is not None:
-            lines.append(f"  🟢 Зелёных свечей: <b>{int(greens)}</b>")
-        if momentum is not None:
-            lines.append(f"  ⬇️ Моментум потерян: <b>{'Да ⚠️' if momentum else 'Нет'}</b>")
+    # ── BTC контекст ─────────────────────────────────────────────
+    btc_change = snapshot.get("btc_change_15m") if snapshot else None
+    if btc_change is not None:
+        btc_filter = abs(btc_change) > 1.0
+        btc_label = "фильтр АКТИВЕН" if btc_filter else "фильтр неактивен"
+        btc_em = "🚫" if btc_filter else "📌"
+        lines.append(
+            f"\n{btc_em} BTC: <b>{btc_change:+.1f}%</b> (15m) — {btc_label}"
+        )
 
     return "\n".join(lines)
 
@@ -179,7 +267,7 @@ async def cmd_coin(msg: Message) -> None:
     if len(args) < 2:
         await msg.answer(
             "Укажи тикер монеты.\n\n"
-            "Пример: de>/coin DOGE</code>"
+            "Пример: <code>/coin DOGE</code>"
         )
         return
 

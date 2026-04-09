@@ -22,9 +22,11 @@ logger = get_logger(__name__)
 async def run_bot() -> None:
     """Start the Telegram bot (polling mode)."""
     from app.bot.dispatcher import create_bot, create_dispatcher
+    from app.bot.handlers.commands import mark_bot_started
 
     bot = create_bot()
     dp = create_dispatcher(settings.redis_url)
+    mark_bot_started()
 
     logger.info("Starting Telegram bot")
     await dp.start_polling(bot)

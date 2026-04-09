@@ -1184,12 +1184,16 @@ class AutoShortService:
                 f"<i>Сделка #{trade_id} | Бот следит автоматически</i>"
             )
 
+            from app.bot.keyboards import trade_action_keyboard
+            keyboard = trade_action_keyboard(symbol, trade_id)
+
             for user_id in user_ids:
                 try:
                     await self._bot.send_message(
                         chat_id=user_id,
                         text=text,
                         parse_mode="HTML",
+                        reply_markup=keyboard,
                     )
                 except Exception as e:
                     logger.warning("Notify open failed", user_id=user_id, error=str(e))
@@ -1240,12 +1244,16 @@ class AutoShortService:
                 f"<i>Сделка #{trade_id} | /stats для статистики</i>"
             )
 
+            from app.bot.keyboards import trade_action_keyboard
+            keyboard = trade_action_keyboard(symbol, trade_id)
+
             for user_id in user_ids:
                 try:
                     await self._bot.send_message(
                         chat_id=user_id,
                         text=text,
                         parse_mode="HTML",
+                        reply_markup=keyboard,
                     )
                     logger.info(
                         "Close notification sent",

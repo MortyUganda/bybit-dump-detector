@@ -49,15 +49,75 @@ def format_risk_alert(score: RiskScore) -> str:
     rsi_line = f"{features.rsi_14_1m:.1f}" if features else "N/A"
     vwap_line = f"+{features.vwap_extension_pct:.1f}%" if features else "N/A"
 
-    return (
-        f"{level_em} <b>{signal_label}</b>\n"
-        f"<b>Symbol:</b> <code>{score.symbol}</code>\n"
-        f"<b>Risk Score:</b> {score.score:.0f}/100 ({score.level.value.upper()})\n"
-        f"<b>Price:</b> {price_line}\n"
-        f"<b>RSI:</b> {rsi_line}  |  <b>VWAP Ext:</b> {vwap_line}\n\n"
-        f"<b>Top Reasons:</b>\n{top_reasons_text}\n"
-        f"<i>⚠️ Not financial advice. Risk score ≥50 with {score.triggered_count} factors.</i>"
+    lines = [
+        f"{level_em} <b>{signal_label}</b>",
+        f"<b>Symbol:</b> <code>{score.symbol}</code>",
+        f"<b>Risk Score:</b> {score.score:.0f}/100 ({score.level.value.upper()})",
+        f"<b>Price:</b> {price_line}",
+        f"<b>RSI:</b> {rsi_line}  |  <b>VWAP Ext:</b> {vwap_line}",
+        "",
+        f"<b>Top Reasons:</b>",
+        top_reasons_text.rstrip(),
+    ]
+
+    # ── Context lines from features_snapshot ──────────────────────
+    if features:
+        context_lines = []
+
+        # BTC context
+        btc_change = features.btc_change_15m
+        if btc_change is not None:
+            btc_filter_active = abs(btc_change) > 1.0
+            if btc_filter_active:
+                context_lines.append(
+                    f"🚫 BTC: <b>{btc_change:+.1f}%</b> (15m) — фильтр АКТИВЕН"
+                )
+            else:
+                context_lines.append(
+                    f"📌 BTC: <b>{btc_change:+.1f}%</b> (15m) — фильтр неактивен"
+                )
+
+        # Funding rate
+        funding = features.funding_rate
+        if funding is not None:
+            context_lines.append(f"💸 Funding: <b>{funding:.4f}%</b>")
+
+        # Trend context
+        trend_ctx = features.trend_context
+        if trend_ctx and trend_ctx.trend_strength is not None:
+            ts_val = trend_ctx.trend_strength
+            if ts_val > 0.3:
+                context_lines.append(
+                    f"📈 Тренд 1h: аптренд (<b>{ts_val:+.1f}</b>)"
+                )
+            elif ts_val < -0.3:
+                context_lines.append(
+                    f"📉 Тренд 1h: даунтренд (<b>{ts_val:+.1f}</b>)"
+                )
+            else:
+                context_lines.append(
+                    f"➡️ Тренд 1h: боковик (<b>{ts_val:+.1f}</b>)"
+                )
+
+        # CVD divergence
+        cvd = features.cvd_divergence
+        if cvd is not None and abs(cvd) > 0.2:
+            cvd_label = "медвежья" if cvd < 0 else "бычья"
+            context_lines.append(
+                f"⚡ CVD дивергенция: {cvd_label} (<b>{cvd:.2f}</b>)"
+            )
+
+        if context_lines:
+            lines.append("")
+            lines.extend(context_lines)
+
+    lines.append("")
+    lines.append(
+        f"<i>⚠️ Не является финансовой рекомендацией. "
+        f"Score ≥50, {score.triggered_count} факторов.</i>"
     )
+
+    return "\n".join(lines)
 
 
 def format_overvalued_list(items: list[dict], page: int = 0, total: int = 0) -> str:

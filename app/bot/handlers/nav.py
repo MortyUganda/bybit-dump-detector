@@ -96,12 +96,9 @@ async def cb_nav_status(query: CallbackQuery) -> None:
         await query.answer()
     except Exception:
         pass
-    await query.message.answer(
-        "⚙️ <b>Статус бота</b>\n\n"
-        "✅ Сбор данных: работает\n"
-        "✅ Анализ: работает\n"
-        "📊 Список монет: обновляется...",
-    )
+    from app.bot.handlers.commands import _build_status_dashboard
+    text = await _build_status_dashboard()
+    await query.message.answer(text)
 
 
 @router.callback_query(F.data.startswith("watch:add:"))
@@ -142,6 +139,32 @@ async def cb_watch_remove(query: CallbackQuery) -> None:
 
     await remove_from_watchlist(user_id, symbol)
     await query.answer(f"🗑 {symbol} удалена из списка отслеживания")
+
+
+@router.callback_query(F.data.startswith("watch_add:"))
+async def cb_watch_add_alert(query: CallbackQuery) -> None:
+    """Handle watchlist add from alert inline button."""
+    if not query.from_user:
+        await query.answer("Не удалось определить пользователя", show_alert=True)
+        return
+
+    raw_symbol = query.data.split(":", 1)[-1]
+    symbol = normalize_symbol(raw_symbol)
+
+    user_id = query.from_user.id
+    current = await get_watchlist(user_id)
+
+    if symbol in current:
+        await query.answer(f"ℹ️ {symbol} уже в списке")
+        return
+
+    await add_to_watchlist(user_id, symbol)
+    await query.answer(f"✅ Добавлено в watchlist")
+
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(query: CallbackQuery) -> None:
+    await query.answer()
 
 
 @router.callback_query(F.data.startswith("coin:refresh:"))
