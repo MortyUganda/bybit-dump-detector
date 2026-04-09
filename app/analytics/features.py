@@ -126,6 +126,8 @@ class CoinFeatures:
 
     # ── Open Interest (perpetual only, None for spot) ─────────────
     oi_change_pct_1h: float | None = None  # % OI change in last hour
+    oi_change_pct: float = 0.0             # % change vs 5 min ago
+    oi_zscore: float = 0.0                 # z-score of OI change rate
     funding_rate: float | None = None       # latest funding rate
 
     # ── Trend context (multi-timeframe) ─────────────────────────
@@ -168,6 +170,7 @@ class FeatureCalculator:
         self._volume_24h: float = 0.0
         self._last_price: float = 0.0
         self._trend_context: TrendContext = TrendContext()
+        self._oi_history: Deque[float] = deque(maxlen=12)  # 12 * 5min = 1 hour
 
     def update_trade(self, tick: TradeTick) -> None:
         self._trades.append(tick)
@@ -187,6 +190,10 @@ class FeatureCalculator:
 
     def update_24h_volume(self, volume_usdt: float) -> None:
         self._volume_24h = volume_usdt
+
+    def update_oi(self, oi_value: float) -> None:
+        """Append latest open interest value."""
+        self._oi_history.append(oi_value)
 
     def update_trend(self, candles_1h: list[CandleData]) -> None:
         """Update 1h trend context from hourly candles."""
@@ -223,6 +230,7 @@ class FeatureCalculator:
         self._compute_trade_features(features, now)
         self._compute_candle_features(features)
         self._compute_ob_features(features)
+        self._compute_oi_features(features)
 
         return features
 
@@ -500,6 +508,25 @@ class FeatureCalculator:
                         f.bid_depth_change_5m = (f.bid_depth_usdt - old_bid_depth) / old_bid_depth * 100
                 except (TypeError, ValueError):
                     pass
+
+    # ── OI features ───────────────────────────────────────────────
+
+    def _compute_oi_features(self, f: CoinFeatures) -> None:
+        if len(self._oi_history) < 2:
+            return
+        oi_values = list(self._oi_history)
+        latest = oi_values[-1]
+        prev = oi_values[-2]
+        if prev > 0:
+            f.oi_change_pct = (latest - prev) / prev * 100
+        if len(oi_values) >= 4:
+            changes = [(oi_values[i] - oi_values[i - 1]) / oi_values[i - 1] * 100
+                       for i in range(1, len(oi_values)) if oi_values[i - 1] > 0]
+            if len(changes) >= 3:
+                mu = np.mean(changes[:-1])
+                sigma = np.std(changes[:-1])
+                if sigma > 0:
+                    f.oi_zscore = (changes[-1] - mu) / sigma
 
     # ── Math helpers ──────────────────────────────────────────────
 

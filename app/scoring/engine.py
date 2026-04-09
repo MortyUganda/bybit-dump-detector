@@ -126,20 +126,21 @@ class ScoringEngine:
 
     # ── Factor weights (must sum to 1.0) ─────────────────────────
     WEIGHTS = {
-        "rsi_1m":               0.13,
-        "rsi_5m":               0.08,
-        "vwap_extension":       0.11,
-        "volume_zscore":        0.11,
+        "rsi_1m":               0.12,   # reduced from 0.13
+        "rsi_5m":               0.07,   # reduced from 0.08
+        "vwap_extension":       0.10,   # reduced from 0.11
+        "volume_zscore":        0.10,   # reduced from 0.11
         "trade_imbalance":      0.09,
-        "large_buy_cluster":    0.09,
+        "large_buy_cluster":    0.08,   # reduced from 0.09
         "large_sell_cluster":   0.06,
-        "price_acceleration":   0.09,
-        "consecutive_greens":   0.04,  # reduced from 0.07 to make room for funding
+        "price_acceleration":   0.08,   # reduced from 0.09
+        "consecutive_greens":   0.04,
         "ob_bid_thinning":      0.07,
-        "spread_expansion":     0.03,  # reduced from 0.04
+        "spread_expansion":     0.03,
         "momentum_loss":        0.04,
-        "upper_wick":           0.01,  # reduced from 0.02
-        "funding_rate":         0.05,  # enabled: extreme funding = crowded longs
+        "upper_wick":           0.01,
+        "funding_rate":         0.06,   # increased from 0.05
+        "oi_spike":             0.05,   # NEW: open interest spike detection
     }
 
     # ── RSI 1m thresholds ─────────────────────────────────────────
@@ -193,6 +194,10 @@ class ScoringEngine:
     # ── Funding rate ──────────────────────────────────────────────
     FUNDING_LOW = 0.0003   # 0.03% = slightly elevated
     FUNDING_HIGH = 0.001   # 0.1% = very crowded longs
+
+    # ── Open Interest spike ───────────────────────────────────────
+    OI_ZSCORE_LOW = 1.0    # slightly elevated OI growth
+    OI_ZSCORE_HIGH = 2.5   # very strong OI spike
 
     def score(self, features: CoinFeatures) -> RiskScore:
         factors: list[FactorResult] = []
@@ -337,6 +342,18 @@ class ScoringEngine:
                 contribution=0.0,
                 triggered=False,
             ))
+
+        # ── 15. Open Interest spike ───────────────────────────────
+        # Rising OI + rising price = leveraged longs building up = stronger short signal
+        oi_z = max(features.oi_zscore, 0.0)
+        # Boost if OI rising AND price rising (convergent signal)
+        if features.oi_change_pct > 0 and features.price_change_5m > 0:
+            oi_z = oi_z * 1.2  # 20% boost for convergent signal
+        factors.append(self._factor(
+            "oi_spike",
+            oi_z,
+            self.OI_ZSCORE_LOW, self.OI_ZSCORE_HIGH,
+        ))
 
         # ── Aggregate score ───────────────────────────────────────
         total_score = sum(f.contribution for f in factors)
