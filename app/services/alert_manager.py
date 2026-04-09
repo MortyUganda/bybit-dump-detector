@@ -81,7 +81,7 @@ class AlertManager:
             try:
                 # Проверяем настройки пользователя
                 from app.bot.handlers.settings import get_user_settings
-                s = get_user_settings(user_id)
+                s = await get_user_settings(user_id)
 
                 # Тихий режим
                 if s.get("quiet_mode"):
