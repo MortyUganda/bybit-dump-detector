@@ -15,7 +15,7 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 router = Router()
 
-PAGE_SIZE = 5
+PAGE_SIZE = 10
 
 
 def history_keyboard(
@@ -24,48 +24,59 @@ def history_keyboard(
     filter_type: str = "all",
     period: str = "all",
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
+    rows: list[list[InlineKeyboardButton]] = []
 
-    # Фильтр по результату
+    # Row 1: Filter by result
     filters = [
         ("Все", "all"),
         ("✅ Прибыльные", "wins"),
         ("❌ Убыточные", "losses"),
     ]
+    filter_row = []
     for label, ftype in filters:
         marker = "→ " if ftype == filter_type else ""
-        builder.button(
+        filter_row.append(InlineKeyboardButton(
             text=f"{marker}{label}",
-            callback_data=f"history:{ftype}:{period}:{page}",
-        )
+            callback_data=f"history:{ftype}:{period}:0",
+        ))
+    rows.append(filter_row)
 
-    # Фильтр по периоду
+    # Row 2: Filter by period
     periods = [
         ("Сегодня", "today"),
         ("Неделя", "week"),
         ("Всё время", "all"),
     ]
+    period_row = []
     for label, p in periods:
         marker = "→ " if p == period else ""
-        builder.button(
+        period_row.append(InlineKeyboardButton(
             text=f"{marker}{label}",
             callback_data=f"history:{filter_type}:{p}:0",
-        )
+        ))
+    rows.append(period_row)
 
-    # Навигация
-    if page > 0:
-        builder.button(
-            text="◀ Назад",
-            callback_data=f"history:{filter_type}:{period}:{page - 1}",
-        )
-    if has_next:
-        builder.button(
-            text="Вперёд ▶",
-            callback_data=f"history:{filter_type}:{period}:{page + 1}",
-        )
+    # Row 3: Pagination (Назад / page indicator / Вперёд)
+    has_prev = page > 0
+    if has_prev or has_next:
+        nav_row = []
+        if has_prev:
+            nav_row.append(InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"history:{filter_type}:{period}:{page - 1}",
+            ))
+        nav_row.append(InlineKeyboardButton(
+            text=f"📄 {page + 1}",
+            callback_data="noop",
+        ))
+        if has_next:
+            nav_row.append(InlineKeyboardButton(
+                text="▶️ Вперёд",
+                callback_data=f"history:{filter_type}:{period}:{page + 1}",
+            ))
+        rows.append(nav_row)
 
-    builder.adjust(3, 3, 2)
-    return builder.as_markup()
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _fetch_history(
