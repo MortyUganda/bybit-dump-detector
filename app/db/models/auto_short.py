@@ -89,3 +89,8 @@ class AutoShort(Base):
     funding_rate_at_signal: Mapped[float] = mapped_column(Float, nullable=True)
     oi_change_pct_at_signal: Mapped[float] = mapped_column(Float, nullable=True)
     trend_strength_1h: Mapped[float] = mapped_column(Float, nullable=True)
+
+    # ── CVD / Liquidation / Volatility columns ────────────────────
+    f_cvd_divergence: Mapped[float] = mapped_column(Float, nullable=True)
+    f_liquidation_cascade: Mapped[float] = mapped_column(Float, nullable=True)
+    realized_vol_1h: Mapped[float] = mapped_column(Float, nullable=True)

@@ -136,10 +136,77 @@ class CoinFeatures:
     # ── Market context ──────────────────────────────────────────
     btc_change_15m: float = 0.0       # BTC 15m momentum at feature time
 
+    # ── CVD (Cumulative Volume Delta) ────────────────────────────
+    cvd_1m: float = 0.0              # CVD over last 1 minute (raw, in USDT)
+    cvd_5m: float = 0.0              # CVD over last 5 minutes
+    cvd_divergence: float = 0.0      # -1 to +1: negative = price up but CVD down (bearish)
+
+    # ── Liquidation cascade ───────────────────────────────────────
+    liquidation_cascade_score: float = 0.0
+
     # ── Metadata ─────────────────────────────────────────────────
     last_price: float = 0.0
     market_cap_proxy: float = 0.0     # price * circulating_supply (if available)
     volume_24h_usdt: float = 0.0
+
+
+# ─── Liquidation Cascade Detector ─────────────────────────────────────────────
+
+class LiquidationDetector:
+    """
+    Detects forced liquidation cascades in the trade stream.
+    Liquidations manifest as:
+    - Accelerating pace of sell trades (intervals getting shorter)
+    - Large market sells in rapid succession
+    - Price gaps between trades (slippage = forced execution)
+    """
+
+    @staticmethod
+    def cascade_score(trades: list[TradeTick]) -> float:
+        """
+        Returns 0.0-1.0 probability of liquidation cascade.
+        0 = no cascade, 1 = strong cascade signal.
+        """
+        if len(trades) < 10:
+            return 0.0
+
+        now = trades[-1].ts if trades else 0.0
+        recent_sells = [t for t in trades if t.side == "Sell" and t.ts >= now - 60]
+
+        if len(recent_sells) < 5:
+            return 0.0
+
+        score = 0.0
+
+        # Signal 1: Accelerating sell pace (intervals shrinking)
+        if len(recent_sells) >= 6:
+            timestamps = sorted(t.ts for t in recent_sells)
+            intervals = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+            if len(intervals) >= 4:
+                half = len(intervals) // 2
+                early_pace = np.mean(intervals[:half])
+                late_pace = np.mean(intervals[half:])
+                if late_pace > 0 and early_pace > 0:
+                    acceleration = early_pace / late_pace  # >1 means sells speeding up
+                    score += min(0.4, max(0.0, (acceleration - 1.0) * 0.4))
+
+        # Signal 2: Large sells dominate (>2x average size)
+        if recent_sells:
+            sizes = [t.qty * t.price for t in recent_sells]
+            avg_size = np.mean(sizes)
+            large_sells = sum(1 for s in sizes if s > avg_size * 2.0)
+            score += min(0.3, large_sells / len(recent_sells) * 0.6)
+
+        # Signal 3: Price gaps between sells (slippage = liquidation)
+        if len(recent_sells) >= 3:
+            sorted_sells = sorted(recent_sells, key=lambda t: t.ts)
+            prices = [t.price for t in sorted_sells]
+            gaps = [abs(prices[i] - prices[i - 1]) / prices[i - 1] * 100
+                    for i in range(1, len(prices))]
+            max_gap = max(gaps) if gaps else 0
+            score += min(0.3, max_gap * 3.0)
+
+        return min(1.0, score)
 
 
 # ─── Feature Calculator ───────────────────────────────────────────────────────
@@ -365,6 +432,34 @@ class FeatureCalculator:
             f.price_change_1m = (price_now - price_1m_ago) / price_1m_ago * 100
         if price_5m_ago and price_now:
             f.price_change_5m = (price_now - price_5m_ago) / price_5m_ago * 100
+
+        # --- CVD (Cumulative Volume Delta) ---
+        def _calc_cvd(trades: list[TradeTick]) -> float:
+            total = 0.0
+            for t in trades:
+                signed = t.qty * t.price if t.side == "Buy" else -t.qty * t.price
+                total += signed
+            return total
+
+        f.cvd_1m = _calc_cvd(trades_1m)
+        f.cvd_5m = _calc_cvd(trades_5m)
+
+        # CVD divergence: compare CVD direction vs price direction over 5m
+        # Negative divergence (bearish): price rose but CVD fell = smart money selling into rally
+        price_change_5m_pct = f.price_change_5m
+        cvd_direction = 1.0 if f.cvd_5m > 0 else -1.0
+        price_direction = 1.0 if price_change_5m_pct > 0 else -1.0
+        cvd_divergence = -1.0 if (price_direction > 0 and cvd_direction < 0) else (
+            1.0 if (price_direction < 0 and cvd_direction > 0) else 0.0
+        )
+        if cvd_divergence != 0:
+            magnitude = min(1.0, abs(f.cvd_5m) / max(1.0, abs(price_change_5m_pct) * 1000))
+            cvd_divergence *= magnitude
+        f.cvd_divergence = cvd_divergence
+
+        # --- Liquidation cascade detection ---
+        f.liquidation_cascade_score = LiquidationDetector.cascade_score(list(self._trades))
+
     # ── Candle features ───────────────────────────────────────────
 
 

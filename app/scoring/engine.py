@@ -11,24 +11,27 @@ Risk levels:
   75–100 CRITICAL  — urgent alert
 
 ═══════════════════════════════════════════════════════════════
-FACTOR TABLE
+FACTOR TABLE  (17 factors, weights sum to 1.00)
 ═══════════════════════════════════════════════════════════════
 Factor                    | Weight | Direction
 ──────────────────────────┼────────┼────────────────────────────
-RSI overbought 1m (>75)    |  13%   | ↑ risk when high
-RSI overbought 5m (>70)    |   8%   | ↑ risk when high (confirmation)
-VWAP extension (>3%)       |  11%   | ↑ risk when above vwap
-Volume z-score (>2σ)       |  11%   | ↑ risk when spiking
-Trade imbalance (buy-heavy)|   9%   | ↑ risk when buy-dominated
-Large buy cluster (5m)     |   9%   | ↑ risk when clustered
-Large sell cluster (5m)    |   6%   | ↑ risk when big sells appear
-Price acceleration         |   9%   | ↑ risk when accelerating
-Consecutive green candles  |   7%   | ↑ risk when 5+
-OB imbalance (bid removal) |   7%   | ↑ risk when bids thin
-Spread expansion           |   4%   | ↑ risk when wide
-Momentum loss after spike  |   4%   | ↑ risk when stalling
-Upper wick rejection       |   2%   | ↑ risk on long upper wick
-Funding rate (perp only)   |   0%   | ↑ risk when extreme
+RSI overbought 1m           |   9%   | ↑ risk when high (adaptive)
+RSI overbought 5m           |   7%   | ↑ risk when high (adaptive)
+VWAP extension              |   8%   | ↑ risk when above vwap (adaptive)
+Volume z-score              |   8%   | ↑ risk when spiking (adaptive)
+Trade imbalance (buy-heavy) |   5%   | ↑ risk when buy-dominated
+Large buy cluster (5m)      |   8%   | ↑ risk when clustered
+Large sell cluster (5m)     |   6%   | ↑ risk when big sells appear
+Price acceleration          |   6%   | ↑ risk when accelerating
+Consecutive green candles   |   4%   | ↑ risk when 5+
+OB imbalance (bid removal)  |   7%   | ↑ risk when bids thin
+Spread expansion            |   3%   | ↑ risk when wide
+Momentum loss after spike   |   2%   | ↑ risk when stalling
+Upper wick rejection        |   1%   | ↑ risk on long upper wick
+Funding rate (perp only)    |   6%   | ↑ risk when extreme
+OI spike                    |   5%   | ↑ risk when leveraged longs build
+CVD divergence (bearish)    |   8%   | ↑ risk on price↑ CVD↓
+Liquidation cascade         |   7%   | ↑ risk on forced liquidations
 ═══════════════════════════════════════════════════════════════
 
 TODO: Calibrate thresholds after 1 week of live data.
@@ -126,22 +129,26 @@ class ScoringEngine:
     """
 
     # ── Factor weights (must sum to 1.0) ─────────────────────────
+    # Sum = 0.09+0.07+0.08+0.08+0.05+0.08+0.06+0.06+0.04+0.07
+    #       +0.03+0.02+0.01+0.06+0.05+0.08+0.07 = 1.00
     WEIGHTS = {
-        "rsi_1m":               0.12,   # reduced from 0.13
-        "rsi_5m":               0.07,   # reduced from 0.08
-        "vwap_extension":       0.10,   # reduced from 0.11
-        "volume_zscore":        0.10,   # reduced from 0.11
-        "trade_imbalance":      0.09,
-        "large_buy_cluster":    0.08,   # reduced from 0.09
+        "rsi_1m":               0.09,   # reduced: adaptive thresholds compensate
+        "rsi_5m":               0.07,
+        "vwap_extension":       0.08,   # reduced: adaptive thresholds compensate
+        "volume_zscore":        0.08,   # reduced: adaptive thresholds compensate
+        "trade_imbalance":      0.05,   # reduced from 0.09: CVD is superior version
+        "large_buy_cluster":    0.08,
         "large_sell_cluster":   0.06,
-        "price_acceleration":   0.08,   # reduced from 0.09
+        "price_acceleration":   0.06,   # reduced from 0.08
         "consecutive_greens":   0.04,
         "ob_bid_thinning":      0.07,
         "spread_expansion":     0.03,
-        "momentum_loss":        0.04,
+        "momentum_loss":        0.02,   # reduced from 0.04
         "upper_wick":           0.01,
-        "funding_rate":         0.06,   # increased from 0.05
-        "oi_spike":             0.05,   # NEW: open interest spike detection
+        "funding_rate":         0.06,
+        "oi_spike":             0.05,
+        "cvd_divergence":       0.08,   # NEW: bearish CVD divergence
+        "liquidation_cascade":  0.07,   # NEW: forced liquidation detection
     }
 
     # ── RSI 1m thresholds ─────────────────────────────────────────
@@ -200,15 +207,40 @@ class ScoringEngine:
     OI_ZSCORE_LOW = 1.0    # slightly elevated OI growth
     OI_ZSCORE_HIGH = 2.5   # very strong OI spike
 
+    def _adaptive_thresholds(self, features: CoinFeatures) -> dict:
+        """Returns thresholds scaled by realized volatility."""
+        vol = max(0.1, features.realized_vol_1h)
+        vol_ratio = vol / 1.0  # 1.0% is "normal" volatility baseline
+
+        # High-vol coins need MORE extreme readings to confirm overbought
+        # Low-vol coins: even modest readings are significant
+        rsi_adj = min(8.0, max(-8.0, (vol_ratio - 1.0) * 5.0))
+        vwap_adj = min(1.5, max(-0.5, (vol_ratio - 1.0) * 0.8))
+        vol_adj = min(0.5, max(-0.3, (vol_ratio - 1.0) * 0.3))
+
+        return {
+            "RSI_LOW": self.RSI_LOW + rsi_adj,
+            "RSI_HIGH": self.RSI_HIGH + rsi_adj,
+            "RSI_5M_LOW": self.RSI_5M_LOW + rsi_adj,
+            "RSI_5M_HIGH": self.RSI_5M_HIGH + rsi_adj,
+            "VWAP_LOW": self.VWAP_EXT_LOW + vwap_adj,
+            "VWAP_HIGH": self.VWAP_EXT_HIGH + vwap_adj,
+            "VOL_LOW": self.VOLUME_ZSCORE_LOW + vol_adj,
+            "VOL_HIGH": self.VOLUME_ZSCORE_HIGH + vol_adj,
+        }
+
     def score(self, features: CoinFeatures) -> RiskScore:
         factors: list[FactorResult] = []
+
+        # Adaptive thresholds based on realized volatility
+        at = self._adaptive_thresholds(features)
 
         # ── 1. RSI 1m overbought ──────────────────────────────────
         rsi_1m = features.rsi_14_1m
         factors.append(self._factor(
             "rsi_1m",
             rsi_1m,
-            self.RSI_LOW, self.RSI_HIGH,
+            at["RSI_LOW"], at["RSI_HIGH"],
         ))
 
         # ── 2. RSI 5m overbought (подтверждение) ─────────────────
@@ -216,7 +248,7 @@ class ScoringEngine:
         factors.append(self._factor(
             "rsi_5m",
             rsi_5m,
-            self.RSI_5M_LOW, self.RSI_5M_HIGH,
+            at["RSI_5M_LOW"], at["RSI_5M_HIGH"],
         ))
 
         # ── 3. VWAP extension ─────────────────────────────────────
@@ -224,7 +256,7 @@ class ScoringEngine:
         factors.append(self._factor(
             "vwap_extension",
             vwap_ext,
-            self.VWAP_EXT_LOW, self.VWAP_EXT_HIGH,
+            at["VWAP_LOW"], at["VWAP_HIGH"],
         ))
 
         # ── 4. Volume z-score (average trade-based and candle-based) ─
@@ -237,7 +269,7 @@ class ScoringEngine:
         factors.append(self._factor(
             "volume_zscore",
             vz,
-            self.VOLUME_ZSCORE_LOW, self.VOLUME_ZSCORE_HIGH,
+            at["VOL_LOW"], at["VOL_HIGH"],
         ))
 
         # ── 5. Trade imbalance (buy-dominated) ────────────────────
@@ -354,6 +386,25 @@ class ScoringEngine:
             "oi_spike",
             oi_z,
             self.OI_ZSCORE_LOW, self.OI_ZSCORE_HIGH,
+        ))
+
+        # ── 16. CVD divergence (bearish = price up, CVD down) ────
+        # Normalize: divergence < -0.3 → 0.5, < -0.6 → 1.0
+        cvd_div = features.cvd_divergence
+        cvd_raw = -cvd_div  # flip sign: negative divergence is bearish = high score
+        factors.append(self._factor(
+            "cvd_divergence",
+            cvd_raw,
+            0.3, 0.6,
+        ))
+
+        # ── 17. Liquidation cascade ──────────────────────────────
+        # Normalize: score > 0.3 → 0.5, score > 0.6 → 1.0
+        liq_score = features.liquidation_cascade_score
+        factors.append(self._factor(
+            "liquidation_cascade",
+            liq_score,
+            0.3, 0.6,
         ))
 
         # ── Aggregate score ───────────────────────────────────────
