@@ -47,7 +47,7 @@ class AlertManager:
         if risk_score.features_snapshot:
             price = risk_score.features_snapshot.last_price
 
-        add_signal(
+        await add_signal(
             symbol=symbol,
             signal_type=risk_score.signal_type.value if risk_score.signal_type else "unknown",
             score=risk_score.score,
@@ -81,7 +81,7 @@ class AlertManager:
             try:
                 # Проверяем настройки пользователя
                 from app.bot.handlers.settings import get_user_settings
-                s = get_user_settings(user_id)
+                s = await get_user_settings(user_id)
 
                 # Тихий режим
                 if s.get("quiet_mode"):

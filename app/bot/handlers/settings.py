@@ -1,22 +1,24 @@
 """
 /settings — настройки уведомлений пользователя.
-Хранение в памяти (MVP).
+Хранение в Redis (hash per user).
 """
 from __future__ import annotations
 
+import json
+
+import redis.asyncio as aioredis
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.config import get_settings
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 router = Router()
 
-# MVP: хранение настроек в памяти
-# user_id -> dict
-USER_SETTINGS: dict[int, dict] = {}
+REDIS_USER_SETTINGS_PREFIX = "user_settings"
 
 DEFAULT_SETTINGS = {
     "alerts_enabled": True,
@@ -29,14 +31,67 @@ DEFAULT_SETTINGS = {
 }
 
 
-def get_user_settings(user_id: int) -> dict:
-    if user_id not in USER_SETTINGS:
-        USER_SETTINGS[user_id] = DEFAULT_SETTINGS.copy()
-    return USER_SETTINGS[user_id]
+async def _get_redis() -> aioredis.Redis:
+    settings = get_settings()
+    return aioredis.from_url(
+        settings.redis_url,
+        encoding="utf-8",
+        decode_responses=True,
+    )
 
 
-def settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    s = get_user_settings(user_id)
+async def get_user_settings(user_id: int, redis: aioredis.Redis | None = None) -> dict:
+    close_after = False
+    if redis is None:
+        redis = await _get_redis()
+        close_after = True
+
+    try:
+        raw = await redis.hgetall(f"{REDIS_USER_SETTINGS_PREFIX}:{user_id}")
+        if not raw:
+            return DEFAULT_SETTINGS.copy()
+        return {k: json.loads(v) for k, v in raw.items()}
+    finally:
+        if close_after:
+            await redis.aclose()
+
+
+async def set_user_setting(
+    user_id: int, key: str, value, redis: aioredis.Redis | None = None
+) -> None:
+    close_after = False
+    if redis is None:
+        redis = await _get_redis()
+        close_after = True
+
+    try:
+        await redis.hset(
+            f"{REDIS_USER_SETTINGS_PREFIX}:{user_id}", key, json.dumps(value)
+        )
+    finally:
+        if close_after:
+            await redis.aclose()
+
+
+async def save_all_settings(
+    user_id: int, settings_dict: dict, redis: aioredis.Redis | None = None
+) -> None:
+    close_after = False
+    if redis is None:
+        redis = await _get_redis()
+        close_after = True
+
+    try:
+        key = f"{REDIS_USER_SETTINGS_PREFIX}:{user_id}"
+        mapping = {k: json.dumps(v) for k, v in settings_dict.items()}
+        await redis.hset(key, mapping=mapping)
+    finally:
+        if close_after:
+            await redis.aclose()
+
+
+async def settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    s = await get_user_settings(user_id)
     builder = InlineKeyboardBuilder()
 
     # Уведомления вкл/выкл
@@ -77,8 +132,8 @@ def settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def _format_settings(user_id: int) -> str:
-    s = get_user_settings(user_id)
+async def _format_settings(user_id: int) -> str:
+    s = await get_user_settings(user_id)
 
     alerts_em = "✅ ВКЛ" if s["alerts_enabled"] else "❌ ВЫКЛ"
     quiet_em = "🌙 ВКЛ" if s["quiet_mode"] else "💡 ВЫКЛ"
@@ -110,8 +165,8 @@ async def cmd_settings(msg: Message) -> None:
         return
     user_id = msg.from_user.id
     await msg.answer(
-        _format_settings(user_id),
-        reply_markup=settings_keyboard(user_id),
+        await _format_settings(user_id),
+        reply_markup=await settings_keyboard(user_id),
     )
 
 
@@ -127,16 +182,17 @@ async def cb_settings_toggle(query: CallbackQuery) -> None:
 
     user_id = query.from_user.id
     key = query.data.split(":")[-1]
-    s = get_user_settings(user_id)
+    s = await get_user_settings(user_id)
 
     if key in s:
         s[key] = not s[key]
+        await set_user_setting(user_id, key, s[key])
         logger.info("Setting toggled", user_id=user_id, key=key, value=s[key])
 
     try:
         await query.message.edit_text(
-            _format_settings(user_id),
-            reply_markup=settings_keyboard(user_id),
+            await _format_settings(user_id),
+            reply_markup=await settings_keyboard(user_id),
         )
     except Exception:
         pass
@@ -154,15 +210,14 @@ async def cb_settings_score(query: CallbackQuery) -> None:
 
     user_id = query.from_user.id
     score = int(query.data.split(":")[-1])
-    s = get_user_settings(user_id)
-    s["min_score"] = score
+    await set_user_setting(user_id, "min_score", score)
 
     logger.info("Min score changed", user_id=user_id, score=score)
 
     try:
         await query.message.edit_text(
-            _format_settings(user_id),
-            reply_markup=settings_keyboard(user_id),
+            await _format_settings(user_id),
+            reply_markup=await settings_keyboard(user_id),
         )
     except Exception:
         pass
@@ -179,12 +234,12 @@ async def cb_settings_reset(query: CallbackQuery) -> None:
         return
 
     user_id = query.from_user.id
-    USER_SETTINGS[user_id] = DEFAULT_SETTINGS.copy()
+    await save_all_settings(user_id, DEFAULT_SETTINGS)
 
     try:
         await query.message.edit_text(
-            _format_settings(user_id),
-            reply_markup=settings_keyboard(user_id),
+            await _format_settings(user_id),
+            reply_markup=await settings_keyboard(user_id),
         )
     except Exception:
         pass

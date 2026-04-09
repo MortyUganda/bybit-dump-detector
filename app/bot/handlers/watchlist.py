@@ -1,13 +1,18 @@
 """
 /watchlist, /add SYMBOL, /remove SYMBOL handlers.
-MVP: хранение watchlist в памяти процесса.
+Watchlist data is persisted in Redis.
 """
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
 from app.bot.keyboards import watchlist_keyboard
-from app.bot.handlers.watchlist_store import WATCHLISTS, normalize_symbol
+from app.bot.handlers.watchlist_store import (
+    add_to_watchlist,
+    get_watchlist,
+    normalize_symbol,
+    remove_from_watchlist,
+)
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -21,7 +26,7 @@ async def cmd_watchlist(msg: Message) -> None:
         return
 
     user_id = msg.from_user.id
-    symbols = sorted(WATCHLISTS.get(user_id, set()))
+    symbols = sorted(await get_watchlist(user_id))
 
     if not symbols:
         await msg.answer(
@@ -58,13 +63,13 @@ async def cmd_add(msg: Message) -> None:
     symbol = normalize_symbol(args[1])
     user_id = msg.from_user.id
 
-    WATCHLISTS.setdefault(user_id, set())
+    current = await get_watchlist(user_id)
 
-    if symbol in WATCHLISTS[user_id]:
+    if symbol in current:
         await msg.answer(f"ℹ️ <b>{symbol}</b> уже есть в вашем списке отслеживания.")
         return
 
-    WATCHLISTS[user_id].add(symbol)
+    await add_to_watchlist(user_id, symbol)
 
     await msg.answer(
         f"✅ <b>{symbol}</b> добавлена в список отслеживания.\n"
@@ -89,13 +94,12 @@ async def cmd_remove(msg: Message) -> None:
     symbol = normalize_symbol(args[1])
     user_id = msg.from_user.id
 
-    if user_id not in WATCHLISTS or symbol not in WATCHLISTS[user_id]:
+    current = await get_watchlist(user_id)
+
+    if symbol not in current:
         await msg.answer(f"ℹ️ <b>{symbol}</b> нет в вашем списке отслеживания.")
         return
 
-    WATCHLISTS[user_id].remove(symbol)
-
-    if not WATCHLISTS[user_id]:
-        WATCHLISTS.pop(user_id, None)
+    await remove_from_watchlist(user_id, symbol)
 
     await msg.answer(f"🗑 <b>{symbol}</b> удалена из списка отслеживания.")

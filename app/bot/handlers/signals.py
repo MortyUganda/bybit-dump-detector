@@ -1,6 +1,6 @@
 """
 /signals — показывает историю сигналов с ценой и временем.
-Хранение в памяти процесса (MVP).
+Хранение в Redis (LPUSH/LTRIM, cap 500).
 """
 from __future__ import annotations
 
@@ -22,35 +22,64 @@ router = Router()
 PAGE_SIZE = 5
 SCORE_MIN_THRESHOLD = 35  # ниже этого — удалять из истории
 
-# MVP: хранение сигналов в памяти
-SIGNALS_HISTORY: list[dict] = []
+REDIS_SIGNALS_KEY = "signals_history"
+MAX_SIGNALS = 500
 
 
-def add_signal(
+async def _get_redis() -> aioredis.Redis:
+    settings = get_settings()
+    return aioredis.from_url(
+        settings.redis_url,
+        encoding="utf-8",
+        decode_responses=True,
+    )
+
+
+async def add_signal(
     symbol: str,
     signal_type: str,
     score: float,
     price: float | None,
+    redis: aioredis.Redis | None = None,
 ) -> None:
     """
     Вызывается из AlertManager при каждом новом сигнале.
-    Добавляет запись в историю.
+    Добавляет запись в Redis-список.
     """
-    # Не добавляем дубликаты — если сигнал по этой монете уже есть, обновляем
-    for existing in SIGNALS_HISTORY:
-        if existing["symbol"] == symbol and existing["signal_type"] == signal_type:
-            existing["score"] = score
-            existing["price"] = price
-            existing["ts"] = datetime.now(timezone.utc).isoformat()
-            return
+    close_after = False
+    if redis is None:
+        redis = await _get_redis()
+        close_after = True
 
-    SIGNALS_HISTORY.append({
-        "symbol": symbol,
-        "signal_type": signal_type,
-        "score": score,
-        "price": price,
-        "ts": datetime.now(timezone.utc).isoformat(),
-    })
+    try:
+        # Проверяем дубликаты — если сигнал по этой монете уже есть, обновляем
+        raw_all = await redis.lrange(REDIS_SIGNALS_KEY, 0, -1)
+        for i, raw in enumerate(raw_all):
+            existing = json.loads(raw)
+            if existing["symbol"] == symbol and existing["signal_type"] == signal_type:
+                existing["score"] = score
+                existing["price"] = price
+                existing["ts"] = datetime.now(timezone.utc).isoformat()
+                await redis.lset(REDIS_SIGNALS_KEY, i, json.dumps(existing, default=str))
+                return
+
+        entry = {
+            "symbol": symbol,
+            "signal_type": signal_type,
+            "score": score,
+            "price": price,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        await redis.lpush(REDIS_SIGNALS_KEY, json.dumps(entry, default=str))
+        await redis.ltrim(REDIS_SIGNALS_KEY, 0, MAX_SIGNALS - 1)
+    finally:
+        if close_after:
+            await redis.aclose()
+
+
+async def get_signals(redis: aioredis.Redis, limit: int = 50) -> list[dict]:
+    raw = await redis.lrange(REDIS_SIGNALS_KEY, 0, limit - 1)
+    return [json.loads(r) for r in raw]
 
 
 async def _refresh_scores() -> None:
@@ -59,35 +88,39 @@ async def _refresh_scores() -> None:
     Удалить те у которых score упал ниже SCORE_MIN_THRESHOLD.
     """
     try:
-        settings = get_settings()
-        redis = aioredis.from_url(
-            settings.redis_url,
-            encoding="utf-8",
-            decode_responses=True,
-        )
+        redis = await _get_redis()
 
-        to_remove = []
-        for signal in SIGNALS_HISTORY:
+        raw_all = await redis.lrange(REDIS_SIGNALS_KEY, 0, -1)
+        signals = [json.loads(r) for r in raw_all]
+
+        to_remove_indices: list[int] = []
+        for i, signal in enumerate(signals):
             raw = await redis.get(f"score:{signal['symbol']}")
             if raw:
                 data = json.loads(raw)
                 current_score = data.get("score", 0)
                 signal["current_score"] = current_score
 
-                # Если score упал ниже порога — помечаем на удаление
                 if current_score < SCORE_MIN_THRESHOLD:
-                    to_remove.append(signal)
+                    to_remove_indices.append(i)
+                    logger.info(
+                        "Signal removed — score below threshold",
+                        symbol=signal["symbol"],
+                        score=current_score,
+                    )
+                else:
+                    await redis.lset(
+                        REDIS_SIGNALS_KEY, i, json.dumps(signal, default=str)
+                    )
             else:
                 signal["current_score"] = signal["score"]
 
-        # Удаляем просевшие сигналы
-        for s in to_remove:
-            SIGNALS_HISTORY.remove(s)
-            logger.info(
-                "Signal removed — score below threshold",
-                symbol=s["symbol"],
-                score=s.get("current_score", 0),
-            )
+        # Удаляем просевшие сигналы (от конца к началу чтобы индексы не сдвигались)
+        for idx in reversed(to_remove_indices):
+            sentinel = "__REMOVE__"
+            await redis.lset(REDIS_SIGNALS_KEY, idx, sentinel)
+        if to_remove_indices:
+            await redis.lrem(REDIS_SIGNALS_KEY, 0, "__REMOVE__")
 
         await redis.aclose()
 
@@ -104,25 +137,36 @@ def _signal_type_emoji(signal_type: str) -> str:
     }.get(signal_type, "📊")
 
 
-def _format_signals_page(page: int) -> tuple[str, bool]:
+async def _format_signals_page(page: int) -> tuple[str, bool]:
     """
     Возвращает (текст страницы, есть_ли_следующая).
-    Сигналы показываются от новых к старым.
+    Сигналы показываются от новых к старым (LPUSH = newest first).
     """
-    if not SIGNALS_HISTORY:
+    try:
+        redis = await _get_redis()
+        total = await redis.llen(REDIS_SIGNALS_KEY)
+        if total == 0:
+            await redis.aclose()
+            return (
+                "📡 <b>История сигналов</b>\n\n"
+                "<i>Пока сигналов нет — анализ ещё разогревается.</i>\n\n"
+                "Сигналы появятся здесь, когда риск ≥ 50 и срабатывает ≥ 2 фактора.",
+                False,
+            )
+
+        start = page * PAGE_SIZE
+        end = start + PAGE_SIZE - 1
+        raw_page = await redis.lrange(REDIS_SIGNALS_KEY, start, end)
+        await redis.aclose()
+    except Exception:
         return (
             "📡 <b>История сигналов</b>\n\n"
-            "<i>Пока сигналов нет — анализ ещё разогревается.</i>\n\n"
-            "Сигналы появятся здесь, когда риск ≥ 50 и срабатывает ≥ 2 фактора.",
+            "<i>Ошибка загрузки сигналов.</i>",
             False,
         )
 
-    reversed_signals = list(reversed(SIGNALS_HISTORY))
-    total = len(reversed_signals)
-    start = page * PAGE_SIZE
-    end = start + PAGE_SIZE
-    page_signals = reversed_signals[start:end]
-    has_next = end < total
+    page_signals = [json.loads(r) for r in raw_page]
+    has_next = (start + PAGE_SIZE) < total
 
     lines = [f"📡 <b>История сигналов</b> ({total} всего)\n"]
 
@@ -151,7 +195,6 @@ def _format_signals_page(page: int) -> tuple[str, bool]:
             score_str = f"<b>{s['score']:.0f}</b>"
 
         # Ссылка на Bybit
-        base = s["symbol"].replace("USDT", "")
         bybit_url = f"https://www.bybit.com/trade/usdt/{s['symbol']}"
 
         lines.append(
@@ -192,7 +235,7 @@ def signals_history_keyboard(page: int, has_next: bool) -> InlineKeyboardMarkup:
 
 @router.message(Command("signals"))
 async def cmd_signals(msg: Message) -> None:
-    text, has_next = _format_signals_page(page=0)
+    text, has_next = await _format_signals_page(page=0)
     await msg.answer(
         text,
         reply_markup=signals_history_keyboard(page=0, has_next=has_next),
@@ -206,7 +249,7 @@ async def cb_signals_page(query: CallbackQuery) -> None:
     except Exception:
         pass
     page = int(query.data.split(":")[-1])
-    text, has_next = _format_signals_page(page=page)
+    text, has_next = await _format_signals_page(page=page)
     try:
         await query.message.edit_text(
             text,
@@ -228,7 +271,7 @@ async def cb_signals_refresh(query: CallbackQuery) -> None:
     # Обновляем score из Redis и удаляем просевшие
     await _refresh_scores()
 
-    text, has_next = _format_signals_page(page=page)
+    text, has_next = await _format_signals_page(page=page)
     try:
         await query.message.edit_text(
             text,
@@ -244,7 +287,14 @@ async def cb_signals_clear(query: CallbackQuery) -> None:
         await query.answer("🗑 История очищена")
     except Exception:
         pass
-    SIGNALS_HISTORY.clear()
+
+    try:
+        redis = await _get_redis()
+        await redis.delete(REDIS_SIGNALS_KEY)
+        await redis.aclose()
+    except Exception:
+        pass
+
     try:
         await query.message.edit_text(
             "📡 <b>История сигналов</b>\n\n"
