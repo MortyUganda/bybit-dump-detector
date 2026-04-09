@@ -348,6 +348,11 @@ class ScoringEngine:
         if triggered_count < 2:
             total_score = min(total_score, 30.0)
 
+        # ── Multi-timeframe trend filter ─────────────────────────
+        if hasattr(features, 'trend_context') and features.trend_context:
+            if not features.trend_context.is_safe_to_short():
+                total_score = min(total_score, 30.0)
+
         level = _level_from_score(total_score)
 
         signal_type = self._classify_signal(features, total_score, factors)

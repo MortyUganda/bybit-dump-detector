@@ -23,6 +23,24 @@ from app.utils.time_utils import utcnow_ts
 logger = get_logger(__name__)
 
 
+# ─── Trend context ───────────────────────────────────────────────────────────
+
+@dataclass
+class TrendContext:
+    """1-hour trend context for multi-timeframe filtering."""
+    ema20_1h: float = 0.0
+    ema50_1h: float = 0.0
+    ema20_above_ema50_1h: bool = False
+    price_above_ema20_1h: bool = False
+    trend_strength: float = 0.0  # -1.0 (strong down) to +1.0 (strong up)
+
+    def is_safe_to_short(self) -> bool:
+        """Don't short when strong uptrend on 1h."""
+        if self.price_above_ema20_1h and self.ema20_above_ema50_1h:
+            return False  # strong uptrend — block short
+        return True
+
+
 # ─── Data containers ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -110,6 +128,9 @@ class CoinFeatures:
     oi_change_pct_1h: float | None = None  # % OI change in last hour
     funding_rate: float | None = None       # latest funding rate
 
+    # ── Trend context (multi-timeframe) ─────────────────────────
+    trend_context: TrendContext = field(default_factory=TrendContext)
+
     # ── Market context ──────────────────────────────────────────
     btc_change_15m: float = 0.0       # BTC 15m momentum at feature time
 
@@ -146,6 +167,7 @@ class FeatureCalculator:
         self._last_ob: dict | None = None
         self._volume_24h: float = 0.0
         self._last_price: float = 0.0
+        self._trend_context: TrendContext = TrendContext()
 
     def update_trade(self, tick: TradeTick) -> None:
         self._trades.append(tick)
@@ -166,10 +188,37 @@ class FeatureCalculator:
     def update_24h_volume(self, volume_usdt: float) -> None:
         self._volume_24h = volume_usdt
 
+    def update_trend(self, candles_1h: list[CandleData]) -> None:
+        """Update 1h trend context from hourly candles."""
+        if len(candles_1h) < 50:
+            return
+        closes = np.array([c.close for c in candles_1h])
+        ema20 = self._calc_ema(closes, 20)
+        ema50 = self._calc_ema(closes, 50)
+        price = closes[-1]
+
+        self._trend_context.ema20_1h = ema20
+        self._trend_context.ema50_1h = ema50
+        self._trend_context.ema20_above_ema50_1h = ema20 > ema50
+        self._trend_context.price_above_ema20_1h = price > ema20
+
+        # Trend strength: +1 if price > EMA20 > EMA50, -1 if price < EMA20 < EMA50
+        if price > ema20 > ema50:
+            self._trend_context.trend_strength = 1.0
+        elif price < ema20 < ema50:
+            self._trend_context.trend_strength = -1.0
+        elif ema20 > ema50:
+            self._trend_context.trend_strength = 0.3
+        elif ema20 < ema50:
+            self._trend_context.trend_strength = -0.3
+        else:
+            self._trend_context.trend_strength = 0.0
+
     def compute(self) -> CoinFeatures:
         now = utcnow_ts()
         features = CoinFeatures(symbol=self.symbol, ts=now, last_price=self._last_price)
         features.volume_24h_usdt = self._volume_24h
+        features.trend_context = self._trend_context
 
         self._compute_trade_features(features, now)
         self._compute_candle_features(features)
@@ -471,6 +520,16 @@ class FeatureCalculator:
             return 100.0
         rs = avg_gain / avg_loss
         return float(100 - (100 / (1 + rs)))
+
+    @staticmethod
+    def _calc_ema(closes: np.ndarray, period: int) -> float:
+        if len(closes) < period:
+            return float(closes[-1]) if len(closes) > 0 else 0.0
+        k = 2.0 / (period + 1)
+        ema = float(np.mean(closes[:period]))
+        for price in closes[period:]:
+            ema = price * k + ema * (1 - k)
+        return ema
 
     @staticmethod
     def _calc_atr(
