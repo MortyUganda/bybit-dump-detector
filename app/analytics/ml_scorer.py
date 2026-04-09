@@ -21,6 +21,7 @@ FEATURE_COLS = [
     "f_spread_expansion", "f_momentum_loss", "f_upper_wick", "f_funding_rate",
     "btc_change_15m", "funding_rate_at_signal", "oi_change_pct_at_signal",
     "trend_strength_1h",
+    "f_cvd_divergence", "f_liquidation_cascade", "realized_vol_1h",
 ]
 
 MODEL_PATH = Path("ml_model/lgbm_scorer.pkl")
@@ -84,7 +85,9 @@ class MLScorer:
                                f_price_acceleration, f_consecutive_greens, f_ob_bid_thinning,
                                f_spread_expansion, f_momentum_loss, f_upper_wick, f_funding_rate,
                                btc_change_15m, funding_rate_at_signal, oi_change_pct_at_signal,
-                               trend_strength_1h, ml_label
+                               trend_strength_1h,
+                               f_cvd_divergence, f_liquidation_cascade, realized_vol_1h,
+                               ml_label
                         FROM auto_shorts
                         WHERE ml_label IS NOT NULL AND status = 'closed'
                     """),
