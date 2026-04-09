@@ -1,6 +1,11 @@
 """
 /start, /help, /status handlers.
 """
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
@@ -10,6 +15,15 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 router = Router()
+
+# Store bot start time for uptime calculation
+_BOT_START_TS: datetime | None = None
+
+
+def mark_bot_started() -> None:
+    """Call once on bot startup to record start time."""
+    global _BOT_START_TS
+    _BOT_START_TS = datetime.now(timezone.utc)
 
 
 HELP_TEXT = """
@@ -113,14 +127,172 @@ async def cmd_help(msg: Message) -> None:
     await msg.answer(HELP_TEXT)
 
 
+async def _build_status_dashboard() -> str:
+    """Build a rich status dashboard from Redis + DB data."""
+    import redis.asyncio as aioredis
+    from app.config import get_settings
+
+    settings = get_settings()
+    lines = ["📊 <b>Dump Detector — Dashboard</b>\n"]
+
+    try:
+        redis = aioredis.from_url(
+            settings.redis_url, encoding="utf-8", decode_responses=True,
+        )
+
+        # ── Services status ──────────────────────────────────────────
+        try:
+            await redis.ping()
+            redis_ok = True
+        except Exception:
+            redis_ok = False
+
+        lines.append(
+            f"🔗 Сервисы: {'✅' if redis_ok else '❌'} Ingestion | "
+            f"{'✅' if redis_ok else '❌'} Analyzer | ✅ Bot"
+        )
+
+        # ── Monitored symbols count ─────────────────────────────────
+        symbol_count = 0
+        try:
+            keys = await redis.keys("score:*")
+            symbol_count = len(keys)
+        except Exception:
+            pass
+        lines.append(f"📡 Мониторинг: <b>{symbol_count}</b> монет\n")
+
+        # ── BTC context ──────────────────────────────────────────────
+        try:
+            btc_raw = await redis.get("score:BTCUSDT")
+            if btc_raw:
+                btc_data = json.loads(btc_raw)
+                btc_snap = btc_data.get("features_snapshot") or {}
+                btc_change = btc_snap.get("btc_change_15m", 0)
+            else:
+                btc_change = 0
+        except Exception:
+            btc_change = 0
+
+        btc_filter_active = abs(btc_change) > 1.0
+        btc_filter_label = (
+            "🚫 АКТИВЕН" if btc_filter_active else "🟢 неактивен"
+        )
+        lines.append(
+            f"📈 <b>BTC контекст:</b>\n"
+            f"  BTC 15m: <b>{btc_change:+.1f}%</b> | "
+            f"Шорт-фильтр: {btc_filter_label}\n"
+        )
+
+        # ── Active shorts ────────────────────────────────────────────
+        active_count = 0
+        try:
+            active_count = await redis.hlen("active_shorts")
+        except Exception:
+            pass
+
+        max_shorts = 5
+        lines.append(
+            f"📊 <b>Авто-шорты:</b>\n"
+            f"  Активных: <b>{active_count} / {max_shorts}</b>"
+        )
+
+        # ── Today's trade stats from DB ──────────────────────────────
+        today_opened = 0
+        today_closed_tp = 0
+        today_closed_total = 0
+        win_rate_24h = 0.0
+        wins_24h = 0
+        total_closed_24h = 0
+        avg_pnl_24h = 0.0
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.db.models.auto_short import AutoShort
+            from sqlalchemy import select
+
+            now = datetime.now(timezone.utc)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_ago = now - timedelta(hours=24)
+
+            async with AsyncSessionLocal() as session:
+                # Today's opens
+                res = await session.execute(
+                    select(AutoShort).where(AutoShort.entry_ts >= today_start)
+                )
+                today_trades = res.scalars().all()
+                today_opened = len(today_trades)
+                today_closed_total = sum(
+                    1 for t in today_trades if t.status != "open"
+                )
+                today_closed_tp = sum(
+                    1 for t in today_trades if t.status == "tp_hit"
+                )
+
+                # 24h closed trades for winrate
+                res24 = await session.execute(
+                    select(AutoShort).where(
+                        AutoShort.status != "open",
+                        AutoShort.exit_ts >= day_ago,
+                    )
+                )
+                closed_24h = res24.scalars().all()
+                total_closed_24h = len(closed_24h)
+                wins_24h = sum(1 for t in closed_24h if t.ml_label == 1)
+                pnls = [t.pnl_pct for t in closed_24h if t.pnl_pct is not None]
+                avg_pnl_24h = sum(pnls) / len(pnls) if pnls else 0
+                win_rate_24h = (
+                    wins_24h / total_closed_24h * 100
+                    if total_closed_24h
+                    else 0
+                )
+        except Exception:
+            pass
+
+        close_reason = f"TP" if today_closed_tp else ""
+        if today_closed_total > 0 and close_reason:
+            close_reason = f" ({close_reason})"
+        elif today_closed_total > 0:
+            close_reason = ""
+        else:
+            close_reason = ""
+
+        lines.append(
+            f"  Сегодня: {today_opened} открыто, "
+            f"{today_closed_total} закрыто{close_reason}\n"
+        )
+
+        # ── 24h stats ────────────────────────────────────────────────
+        win_em = "🟢" if win_rate_24h >= 50 else "🔴"
+        pnl_em = "🟢" if avg_pnl_24h > 0 else "🔴"
+        lines.append(
+            f"📈 <b>Статистика 24ч:</b>\n"
+            f"  Winrate: {win_em} <b>{win_rate_24h:.0f}%</b> "
+            f"({wins_24h}/{total_closed_24h})\n"
+            f"  Средний PnL: {pnl_em} <b>{avg_pnl_24h:+.1f}%</b>\n"
+        )
+
+        # ── Uptime ───────────────────────────────────────────────────
+        if _BOT_START_TS:
+            delta = datetime.now(timezone.utc) - _BOT_START_TS
+            days = delta.days
+            hours, rem = divmod(delta.seconds, 3600)
+            minutes = rem // 60
+            lines.append(f"⏱ Аптайм: <b>{days}д {hours}ч {minutes}м</b>")
+        else:
+            lines.append("⏱ Аптайм: <i>N/A</i>")
+
+        await redis.aclose()
+
+    except Exception as e:
+        logger.error("Status dashboard build failed", error=str(e))
+        lines.append("\n<i>Ошибка получения данных.</i>")
+
+    return "\n".join(lines)
+
+
 @router.message(Command("status"))
 async def cmd_status(msg: Message) -> None:
-    await msg.answer(
-        "⚙️ <b>Статус бота</b>\n\n"
-        "✅ Сбор данных: работает\n"
-        "✅ Анализ: работает\n"
-        "📊 Список монет: обновляется...",
-    )
+    text = await _build_status_dashboard()
+    await msg.answer(text)
 
 
 # ── Обработчики текстовых кнопок ─────────────────────────────────
@@ -193,12 +365,8 @@ async def btn_trades(msg: Message) -> None:
 
 @router.message(F.text == "⚙️ Статус")
 async def btn_status(msg: Message) -> None:
-    await msg.answer(
-        "⚙️ <b>Статус бота</b>\n\n"
-        "✅ Сбор данных: работает\n"
-        "✅ Анализ: работает\n"
-        "📊 Список монет: обновляется...",
-    )
+    text = await _build_status_dashboard()
+    await msg.answer(text)
 
 
 @router.message(F.text == "📋 История")

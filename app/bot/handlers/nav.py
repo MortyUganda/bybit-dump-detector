@@ -96,12 +96,9 @@ async def cb_nav_status(query: CallbackQuery) -> None:
         await query.answer()
     except Exception:
         pass
-    await query.message.answer(
-        "⚙️ <b>Статус бота</b>\n\n"
-        "✅ Сбор данных: работает\n"
-        "✅ Анализ: работает\n"
-        "📊 Список монет: обновляется...",
-    )
+    from app.bot.handlers.commands import _build_status_dashboard
+    text = await _build_status_dashboard()
+    await query.message.answer(text)
 
 
 @router.callback_query(F.data.startswith("watch:add:"))
