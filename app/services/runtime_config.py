@@ -12,6 +12,13 @@ import redis.asyncio as aioredis
 
 RUNTIME_STRATEGY_KEY = "runtime_config:auto_short"
 
+VALID_SIGNAL_TYPES = {
+    "early_warning",
+    "overheated",
+    "reversal_risk",
+    "dump_started",
+}
+
 DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "enabled": True,
     "allowed_signal_types": [
@@ -33,28 +40,69 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
 }
 
 
+def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    merged = DEFAULT_AUTO_SHORT_CONFIG.copy()
+    merged.update(config or {})
+
+    merged["enabled"] = bool(merged.get("enabled", True))
+
+    allowed_signal_types = merged.get("allowed_signal_types", [])
+    if not isinstance(allowed_signal_types, list):
+        allowed_signal_types = DEFAULT_AUTO_SHORT_CONFIG["allowed_signal_types"]
+
+    merged["allowed_signal_types"] = sorted(
+        s for s in allowed_signal_types if s in VALID_SIGNAL_TYPES
+    )
+
+    if not merged["allowed_signal_types"]:
+        merged["allowed_signal_types"] = DEFAULT_AUTO_SHORT_CONFIG["allowed_signal_types"][:]
+
+    merged["leverage"] = max(1, int(merged.get("leverage", 10)))
+    merged["target_pnl_pct"] = float(merged.get("target_pnl_pct", 20.0))
+    merged["target_sl_pct"] = float(merged.get("target_sl_pct", 10.0))
+    merged["entry_delay_sec"] = max(0, int(merged.get("entry_delay_sec", 60)))
+    merged["monitor_attempts"] = max(1, int(merged.get("monitor_attempts", 24)))
+    merged["monitor_interval_sec"] = max(1, int(merged.get("monitor_interval_sec", 5)))
+    merged["min_score_to_enter"] = max(0, min(100, int(merged.get("min_score_to_enter", 55))))
+    merged["stabilization_threshold_pct"] = float(
+        merged.get("stabilization_threshold_pct", 0.2)
+    )
+    merged["max_rise_pct"] = float(merged.get("max_rise_pct", 0.8))
+    merged["max_entry_drop_pct"] = float(merged.get("max_entry_drop_pct", -0.3))
+    merged["trade_monitor_interval"] = max(
+        1, int(merged.get("trade_monitor_interval", 5))
+    )
+    merged["max_trade_duration_sec"] = max(
+        60, int(merged.get("max_trade_duration_sec", 60 * 60 * 4))
+    )
+
+    return merged
+
+
 async def get_runtime_strategy_config(redis: aioredis.Redis) -> dict[str, Any]:
     raw = await redis.get(RUNTIME_STRATEGY_KEY)
     if not raw:
-        return DEFAULT_AUTO_SHORT_CONFIG.copy()
+        config = _normalize_config(DEFAULT_AUTO_SHORT_CONFIG)
+        await redis.set(RUNTIME_STRATEGY_KEY, json.dumps(config))
+        return config
 
     try:
         loaded = json.loads(raw)
-        merged = DEFAULT_AUTO_SHORT_CONFIG.copy()
-        merged.update(loaded or {})
-        return merged
+        config = _normalize_config(loaded)
+        return config
     except Exception:
-        return DEFAULT_AUTO_SHORT_CONFIG.copy()
+        config = _normalize_config(DEFAULT_AUTO_SHORT_CONFIG)
+        await redis.set(RUNTIME_STRATEGY_KEY, json.dumps(config))
+        return config
 
 
 async def save_runtime_strategy_config(
     redis: aioredis.Redis,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    merged = DEFAULT_AUTO_SHORT_CONFIG.copy()
-    merged.update(config or {})
-    await redis.set(RUNTIME_STRATEGY_KEY, json.dumps(merged))
-    return merged
+    normalized = _normalize_config(config)
+    await redis.set(RUNTIME_STRATEGY_KEY, json.dumps(normalized))
+    return normalized
 
 
 async def patch_runtime_strategy_config(
@@ -63,10 +111,12 @@ async def patch_runtime_strategy_config(
 ) -> dict[str, Any]:
     current = await get_runtime_strategy_config(redis)
     current.update(patch or {})
-    await redis.set(RUNTIME_STRATEGY_KEY, json.dumps(current))
-    return current
+    normalized = _normalize_config(current)
+    await redis.set(RUNTIME_STRATEGY_KEY, json.dumps(normalized))
+    return normalized
 
 
 async def reset_runtime_strategy_config(redis: aioredis.Redis) -> dict[str, Any]:
-    await redis.delete(RUNTIME_STRATEGY_KEY)
-    return DEFAULT_AUTO_SHORT_CONFIG.copy()
+    config = _normalize_config(DEFAULT_AUTO_SHORT_CONFIG)
+    await redis.set(RUNTIME_STRATEGY_KEY, json.dumps(config))
+    return config
