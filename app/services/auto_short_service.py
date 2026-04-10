@@ -14,41 +14,33 @@ import redis.asyncio as aioredis
 
 from app.config import get_settings
 from app.scoring.engine import RiskScore
+from app.services.runtime_config import get_runtime_strategy_config
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
 
-# ── Параметры шорта ───────────────────────────────────────────────
+# ── Fallback defaults ─────────────────────────────────────────────
 
 LEVERAGE = 10
 TARGET_PNL_PCT = 20.0
 TARGET_SL_PCT = 10.0
 
-TP_PRICE_MOVE = TARGET_PNL_PCT / LEVERAGE   # 2.25% движения цены вниз
-SL_PRICE_MOVE = TARGET_SL_PCT / LEVERAGE    # 1.25% движения цены вверх
+ENTRY_DELAY_SEC = 60
+MONITOR_ATTEMPTS = 24
+MONITOR_INTERVAL_SEC = 5
+MIN_SCORE_TO_ENTER = 55
+STABILIZATION_THRESHOLD_PCT = 0.2
+MAX_RISE_PCT = 0.8
+MAX_ENTRY_DROP_PCT = -0.3
 
-# ── Параметры отложенного входа ───────────────────────────────────
+TRADE_MONITOR_INTERVAL = 5
+MAX_TRADE_DURATION = 60 * 60 * 4
 
-ENTRY_DELAY_SEC = 60                    # задержка после сигнала перед первой проверкой
-MONITOR_ATTEMPTS = 24                   # макс. количество проверок при мониторинге входа
-MONITOR_INTERVAL_SEC = 5                # интервал между проверками входа (секунды)
-MIN_SCORE_TO_ENTER = 55                 # минимальный score для входа в сделку
-STABILIZATION_THRESHOLD_PCT = 0.2       # порог стабилизации — входим если рост ≤ этого значения
-MAX_RISE_PCT = 0.8                      # не входить если цена выросла >0.8% за задержку  
-MAX_ENTRY_DROP_PCT = -0.3         # отмена входа если цена уже упала от сигнала
-
-# ── Параметры мониторинга открытых сделок ─────────────────────────
-
-TRADE_MONITOR_INTERVAL = 5              # интервал проверки открытых сделок (секунды)
-MAX_TRADE_DURATION = 60 * 60 * 4        # макс. длительность сделки (4 часа)
-
-# ── Redis key for active shorts (shared across workers) ──────────
 REDIS_ACTIVE_SHORTS_KEY = "active_shorts"
 
 
 def _serialize_trade(trade: dict[str, Any]) -> str:
-    """Serialize trade dict to JSON for Redis storage."""
     data = dict(trade)
     if isinstance(data.get("entry_ts"), datetime):
         data["entry_ts"] = data["entry_ts"].isoformat()
@@ -56,7 +48,6 @@ def _serialize_trade(trade: dict[str, Any]) -> str:
 
 
 def _deserialize_trade(raw: str) -> dict[str, Any]:
-    """Deserialize trade dict from Redis JSON."""
     data = json.loads(raw)
     if isinstance(data.get("entry_ts"), str):
         data["entry_ts"] = datetime.fromisoformat(data["entry_ts"])
@@ -73,6 +64,83 @@ class AutoShortService:
         self._pending_symbols: set[str] = set()
         self._price_cache: dict[str, float] = {}
 
+    # ── Runtime strategy config ───────────────────────────────────
+
+    async def _get_strategy(self) -> dict[str, Any]:
+        return await get_runtime_strategy_config(self._redis)
+
+    async def _get_entry_delay_sec(self) -> int:
+        cfg = await self._get_strategy()
+        return int(cfg.get("entry_delay_sec", ENTRY_DELAY_SEC))
+
+    async def _get_monitor_attempts(self) -> int:
+        cfg = await self._get_strategy()
+        return int(cfg.get("monitor_attempts", MONITOR_ATTEMPTS))
+
+    async def _get_monitor_interval_sec(self) -> int:
+        cfg = await self._get_strategy()
+        return int(cfg.get("monitor_interval_sec", MONITOR_INTERVAL_SEC))
+
+    async def _get_min_score_to_enter(self) -> float:
+        cfg = await self._get_strategy()
+        return float(cfg.get("min_score_to_enter", MIN_SCORE_TO_ENTER))
+
+    async def _get_stabilization_threshold_pct(self) -> float:
+        cfg = await self._get_strategy()
+        return float(
+            cfg.get("stabilization_threshold_pct", STABILIZATION_THRESHOLD_PCT)
+        )
+
+    async def _get_max_rise_pct(self) -> float:
+        cfg = await self._get_strategy()
+        return float(cfg.get("max_rise_pct", MAX_RISE_PCT))
+
+    async def _get_max_entry_drop_pct(self) -> float:
+        cfg = await self._get_strategy()
+        return float(cfg.get("max_entry_drop_pct", MAX_ENTRY_DROP_PCT))
+
+    async def _get_leverage(self) -> float:
+        cfg = await self._get_strategy()
+        return float(cfg.get("leverage", LEVERAGE))
+
+    async def _get_target_pnl_pct(self) -> float:
+        cfg = await self._get_strategy()
+        return float(cfg.get("target_pnl_pct", TARGET_PNL_PCT))
+
+    async def _get_target_sl_pct(self) -> float:
+        cfg = await self._get_strategy()
+        return float(cfg.get("target_sl_pct", TARGET_SL_PCT))
+
+    async def _get_trade_monitor_interval(self) -> int:
+        cfg = await self._get_strategy()
+        return int(cfg.get("trade_monitor_interval", TRADE_MONITOR_INTERVAL))
+
+    async def _get_max_trade_duration(self) -> int:
+        cfg = await self._get_strategy()
+        return int(cfg.get("max_trade_duration_sec", MAX_TRADE_DURATION))
+
+    async def _get_tp_price_move_pct(self) -> float:
+        leverage = await self._get_leverage()
+        target_pnl_pct = await self._get_target_pnl_pct()
+        if leverage <= 0:
+            leverage = LEVERAGE
+        return target_pnl_pct / leverage
+
+    async def _get_sl_price_move_pct(self) -> float:
+        leverage = await self._get_leverage()
+        target_sl_pct = await self._get_target_sl_pct()
+        if leverage <= 0:
+            leverage = LEVERAGE
+        return target_sl_pct / leverage
+
+    async def _build_tp_price_runtime(self, entry_price: float) -> float:
+        tp_price_move = await self._get_tp_price_move_pct()
+        return entry_price * (1 - tp_price_move / 100)
+
+    async def _build_sl_price_runtime(self, entry_price: float) -> float:
+        sl_price_move = await self._get_sl_price_move_pct()
+        return entry_price * (1 + sl_price_move / 100)
+
     # ── Redis-backed active shorts ───────────────────────────────
 
     async def _get_active_short(self, trade_id: int) -> dict[str, Any] | None:
@@ -82,7 +150,11 @@ class AutoShortService:
         return None
 
     async def _set_active_short(self, trade_id: int, trade: dict[str, Any]) -> None:
-        await self._redis.hset(REDIS_ACTIVE_SHORTS_KEY, str(trade_id), _serialize_trade(trade))
+        await self._redis.hset(
+            REDIS_ACTIVE_SHORTS_KEY,
+            str(trade_id),
+            _serialize_trade(trade),
+        )
 
     async def _del_active_short(self, trade_id: int) -> None:
         await self._redis.hdel(REDIS_ACTIVE_SHORTS_KEY, str(trade_id))
@@ -114,15 +186,10 @@ class AutoShortService:
     def _calc_price_move_pct(self, from_price: float, to_price: float) -> float:
         return ((to_price - from_price) / from_price) * 100
 
-    def _calc_short_pnl_pct(self, entry_price: float, current_price: float) -> float:
+    async def _calc_short_pnl_pct(self, entry_price: float, current_price: float) -> float:
+        leverage = await self._get_leverage()
         price_move_pct = ((entry_price - current_price) / entry_price) * 100
-        return price_move_pct * LEVERAGE
-
-    def _build_tp_price(self, entry_price: float) -> float:
-        return entry_price * (1 - TP_PRICE_MOVE / 100)
-
-    def _build_sl_price(self, entry_price: float) -> float:
-        return entry_price * (1 + SL_PRICE_MOVE / 100)
+        return price_move_pct * leverage
 
     def _track_task(self, trade_id: int, task: asyncio.Task) -> None:
         self._trade_tasks[trade_id] = task
@@ -142,64 +209,60 @@ class AutoShortService:
 
         task.add_done_callback(_cleanup)
 
-    # ── Оценка условий входа ──────────────────────────────────────
+    # ── Entry conditions ──────────────────────────────────────────
 
-    def _evaluate_entry_conditions(
+    async def _evaluate_entry_conditions(
         self,
         price_change_pct: float,
         current_score: float,
         symbol: str,
     ) -> str:
-        """
-        Проверяет условия входа и возвращает решение:
-        - "enter"        — можно открывать шорт
-        - "monitor"      — цена ещё растёт, нужен мониторинг
-        - "cancel_score" — score упал ниже минимума
-        - "cancel_drop"  — цена уже упала слишком сильно
-        - "cancel_rise"  — цена улетела слишком высоко
-        """
-        if current_score < MIN_SCORE_TO_ENTER:
+        min_score_to_enter = await self._get_min_score_to_enter()
+        max_entry_drop_pct = await self._get_max_entry_drop_pct()
+        max_rise_pct = await self._get_max_rise_pct()
+        stabilization_threshold_pct = await self._get_stabilization_threshold_pct()
+
+        if current_score < min_score_to_enter:
             logger.debug(
                 "Entry check: score below minimum",
                 symbol=symbol,
                 score=round(current_score, 1),
-                min_score=MIN_SCORE_TO_ENTER,
+                min_score=min_score_to_enter,
             )
             return "cancel_score"
 
-        if price_change_pct < MAX_ENTRY_DROP_PCT:
+        if price_change_pct < max_entry_drop_pct:
             logger.debug(
                 "Entry check: price dropped too much",
                 symbol=symbol,
                 change_pct=round(price_change_pct, 3),
-                threshold=MAX_ENTRY_DROP_PCT,
+                threshold=max_entry_drop_pct,
             )
             return "cancel_drop"
 
-        if price_change_pct > MAX_RISE_PCT:
+        if price_change_pct > max_rise_pct:
             logger.debug(
                 "Entry check: price rose too much",
                 symbol=symbol,
                 change_pct=round(price_change_pct, 3),
-                max_rise=MAX_RISE_PCT,
+                max_rise=max_rise_pct,
             )
             return "cancel_rise"
 
-        if price_change_pct > STABILIZATION_THRESHOLD_PCT:
+        if price_change_pct > stabilization_threshold_pct:
             logger.debug(
                 "Entry check: price still rising above stabilization threshold",
                 symbol=symbol,
                 change_pct=round(price_change_pct, 3),
-                threshold=STABILIZATION_THRESHOLD_PCT,
+                threshold=stabilization_threshold_pct,
             )
             return "monitor"
 
         return "enter"
 
-    # ── Получение текущего score из Redis ─────────────────────────
+    # ── Current score ─────────────────────────────────────────────
 
     async def _get_current_score(self, symbol: str) -> float | None:
-        """Получает актуальный score символа из Redis."""
         try:
             raw = await self._redis.get(f"score:{symbol}")
             if raw:
@@ -211,7 +274,7 @@ class AutoShortService:
             logger.debug("Redis score fetch failed", symbol=symbol, error=str(e))
         return None
 
-    # ── Мониторинг входа (ожидание стабилизации) ──────────────────
+    # ── Entry monitoring ──────────────────────────────────────────
 
     async def _monitor_entry(
         self,
@@ -219,20 +282,18 @@ class AutoShortService:
         signal_price: float,
         initial_score: float,
     ) -> tuple[float, float] | None:
-        """
-        Мониторинг входа: до MONITOR_ATTEMPTS проверок каждые MONITOR_INTERVAL_SEC.
-        На каждой проверке заново получает price и score.
-        Возвращает (entry_price, price_change_pct) при стабилизации или None при отмене.
-        """
+        monitor_attempts = await self._get_monitor_attempts()
+        monitor_interval_sec = await self._get_monitor_interval_sec()
+
         logger.info(
             "Price still rising — monitoring for entry",
             symbol=symbol,
-            max_attempts=MONITOR_ATTEMPTS,
-            interval_sec=MONITOR_INTERVAL_SEC,
+            max_attempts=monitor_attempts,
+            interval_sec=monitor_interval_sec,
         )
 
-        for attempt in range(MONITOR_ATTEMPTS):
-            await asyncio.sleep(MONITOR_INTERVAL_SEC)
+        for attempt in range(monitor_attempts):
+            await asyncio.sleep(monitor_interval_sec)
 
             current_price = await self._get_price(symbol)
             if not current_price:
@@ -248,14 +309,14 @@ class AutoShortService:
                 "Monitoring entry",
                 symbol=symbol,
                 attempt=attempt + 1,
-                max_attempts=MONITOR_ATTEMPTS,
+                max_attempts=monitor_attempts,
                 signal_price=signal_price,
                 current_price=current_price,
                 change_pct=round(price_change_pct, 3),
                 current_score=round(current_score, 1),
             )
 
-            decision = self._evaluate_entry_conditions(
+            decision = await self._evaluate_entry_conditions(
                 price_change_pct=price_change_pct,
                 current_score=current_score,
                 symbol=symbol,
@@ -277,7 +338,7 @@ class AutoShortService:
                     symbol=symbol,
                     attempt=attempt + 1,
                     score=round(current_score, 1),
-                    min_score=MIN_SCORE_TO_ENTER,
+                    min_score=await self._get_min_score_to_enter(),
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -312,7 +373,7 @@ class AutoShortService:
                     symbol=symbol,
                     attempt=attempt + 1,
                     change_pct=round(price_change_pct, 3),
-                    max_rise=MAX_RISE_PCT,
+                    max_rise=await self._get_max_rise_pct(),
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -324,14 +385,12 @@ class AutoShortService:
                 )
                 return None
 
-            # decision == "monitor" → продолжаем цикл
-
-        # ── Таймаут мониторинга ───────────────────────────────────
+        total_sec = monitor_attempts * monitor_interval_sec
         logger.info(
             "Canceled because monitoring timeout",
             symbol=symbol,
-            attempts=MONITOR_ATTEMPTS,
-            total_sec=MONITOR_ATTEMPTS * MONITOR_INTERVAL_SEC,
+            attempts=monitor_attempts,
+            total_sec=total_sec,
         )
 
         last_price = await self._get_price(symbol)
@@ -352,7 +411,7 @@ class AutoShortService:
         )
         return None
 
-    # ── Уведомление об отмене входа ───────────────────────────────
+    # ── Notify canceled entry ─────────────────────────────────────
 
     async def _notify_entry_canceled(
         self,
@@ -363,7 +422,6 @@ class AutoShortService:
         score: float,
         reason: str,
     ) -> None:
-        """Отправляет уведомление об отмене входа с указанием причины."""
         if not self._bot:
             return
 
@@ -375,26 +433,31 @@ class AutoShortService:
                 return
 
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
+            min_score_to_enter = await self._get_min_score_to_enter()
+            max_entry_drop_pct = await self._get_max_entry_drop_pct()
+            max_rise_pct = await self._get_max_rise_pct()
+            monitor_attempts = await self._get_monitor_attempts()
+            monitor_interval_sec = await self._get_monitor_interval_sec()
 
             reason_details = {
                 "score_dropped": (
-                    f"⚠️ Score: <b>{score:.0f}</b> (мин. {MIN_SCORE_TO_ENTER})\n\n"
-                    f"<i>Score упал ниже порога — вход отменён</i>"
+                    f"⚠️ Score: <b>{score:.0f}</b> (мин. {min_score_to_enter})\n\n"
+                    f"<i>Score упал ниже порога входа — вход отменён</i>"
                 ),
                 "price_dropped": (
                     f"📉 Изменение: <b>{price_change_pct:+.2f}%</b> "
-                    f"(порог {MAX_ENTRY_DROP_PCT}%)\n\n"
+                    f"(порог {max_entry_drop_pct}%)\n\n"
                     f"<i>Цена уже упала — движение произошло без нас</i>"
                 ),
                 "price_too_high": (
                     f"📈 Рост: <b>+{abs(price_change_pct):.2f}%</b> "
-                    f"(порог +{MAX_RISE_PCT}%)\n\n"
+                    f"(порог +{max_rise_pct}%)\n\n"
                     f"<i>Памп слишком сильный — вход отменён во избежание риска</i>"
                 ),
                 "timeout": (
                     f"📈 Изменение: <b>{price_change_pct:+.2f}%</b>\n"
-                    f"⏱ Мониторинг: {MONITOR_ATTEMPTS} × {MONITOR_INTERVAL_SEC}с "
-                    f"({MONITOR_ATTEMPTS * MONITOR_INTERVAL_SEC}с)\n\n"
+                    f"⏱ Мониторинг: {monitor_attempts} × {monitor_interval_sec}с "
+                    f"({monitor_attempts * monitor_interval_sec}с)\n\n"
                     f"<i>Стабилизация не наступила — вход отменён по таймауту</i>"
                 ),
             }
@@ -434,7 +497,7 @@ class AutoShortService:
         except Exception as e:
             logger.error("Entry cancel notification error", error=str(e))
 
-    # ── Восстановление активных сделок ────────────────────────────
+    # ── Restore open trades ───────────────────────────────────────
 
     async def restore_active_trades(self) -> None:
         try:
@@ -442,7 +505,6 @@ class AutoShortService:
             from app.db.models.auto_short import AutoShort
             from app.db.session import AsyncSessionLocal
 
-            # Clear stale Redis entries before restoring from DB
             await self._redis.delete(REDIS_ACTIVE_SHORTS_KEY)
 
             async with AsyncSessionLocal() as session:
@@ -457,15 +519,19 @@ class AutoShortService:
 
             logger.info("Restoring open trades", count=len(open_trades))
             restored_count = 0
+            max_trade_duration = await self._get_max_trade_duration()
 
             for trade in open_trades:
                 now = datetime.now(timezone.utc)
                 elapsed = (now - trade.entry_ts).total_seconds()
 
-                if elapsed >= MAX_TRADE_DURATION:
+                if elapsed >= max_trade_duration:
                     current_price = await self._get_price(trade.symbol)
                     if current_price:
-                        pnl = self._calc_short_pnl_pct(trade.entry_price, current_price)
+                        pnl = await self._calc_short_pnl_pct(
+                            trade.entry_price,
+                            current_price,
+                        )
                         await self._update_db(
                             trade_id=trade.id,
                             exit_price=current_price,
@@ -519,13 +585,12 @@ class AutoShortService:
         except Exception as e:
             logger.exception("Failed to restore trades", error=str(e))
 
-    # ── Открытие шорта (основной flow) ────────────────────────────
+    # ── Open short ────────────────────────────────────────────────
 
     async def open_short(self, risk_score: RiskScore) -> None:
         symbol = risk_score.symbol
         lock = self._get_symbol_lock(symbol)
 
-        # Phase 1: Acquire lock, check duplicates, mark pending, release lock
         async with lock:
             if await self._is_symbol_already_open(symbol):
                 logger.info(
@@ -541,22 +606,32 @@ class AutoShortService:
                 return
             self._pending_symbols.add(symbol)
 
-        # Phase 2: Sleep and monitor entry WITHOUT holding the lock
         try:
+            strategy = await self._get_strategy()
+            if not strategy.get("enabled", True):
+                logger.info("Skipping short — strategy disabled", symbol=symbol)
+                return
+
             signal_price = await self._get_price(symbol)
             if not signal_price:
                 logger.warning("Cannot open short — no price at signal", symbol=symbol)
                 return
 
+            entry_delay_sec = await self._get_entry_delay_sec()
+
             logger.info(
                 "Short signal received — waiting before entry",
                 symbol=symbol,
+                signal_type=(
+                    risk_score.signal_type.value if risk_score.signal_type else None
+                ),
                 signal_price=signal_price,
-                delay_sec=ENTRY_DELAY_SEC,
+                delay_sec=entry_delay_sec,
                 score=risk_score.score,
+                min_score_to_enter=await self._get_min_score_to_enter(),
             )
 
-            await asyncio.sleep(ENTRY_DELAY_SEC)
+            await asyncio.sleep(entry_delay_sec)
 
             entry_price = await self._get_price(symbol)
             if not entry_price:
@@ -577,9 +652,9 @@ class AutoShortService:
                 entry_price=entry_price,
                 change_pct=round(price_change_pct, 3),
                 current_score=round(effective_score, 1),
+                min_score_to_enter=await self._get_min_score_to_enter(),
             )
 
-            # ── Трендовый фильтр ──────────────────────────────────
             trend_ok = await self._check_trend_filter(risk_score)
             if not trend_ok:
                 logger.info(
@@ -589,8 +664,7 @@ class AutoShortService:
                 )
                 return
 
-            # ── Оценка условий входа ──────────────────────────────
-            decision = self._evaluate_entry_conditions(
+            decision = await self._evaluate_entry_conditions(
                 price_change_pct=price_change_pct,
                 current_score=effective_score,
                 symbol=symbol,
@@ -601,7 +675,7 @@ class AutoShortService:
                     "Canceled because score dropped",
                     symbol=symbol,
                     score=round(effective_score, 1),
-                    min_score=MIN_SCORE_TO_ENTER,
+                    min_score=await self._get_min_score_to_enter(),
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -636,7 +710,7 @@ class AutoShortService:
                     "Canceled because price rose too much after delay",
                     symbol=symbol,
                     change_pct=round(price_change_pct, 3),
-                    max_rise=MAX_RISE_PCT,
+                    max_rise=await self._get_max_rise_pct(),
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -655,13 +729,9 @@ class AutoShortService:
                     initial_score=effective_score,
                 )
                 if entry_result is None:
-                    # Мониторинг завершился отменой — уведомление уже отправлено
                     return
                 entry_price, price_change_pct = entry_result
 
-            # decision == "enter" или успешный выход из мониторинга
-
-            # Phase 3: Re-acquire lock for final check and trade creation
             async with lock:
                 if await self._is_symbol_already_open(symbol):
                     logger.info(
@@ -670,12 +740,12 @@ class AutoShortService:
                     )
                     return
 
-                tp_price = self._build_tp_price(entry_price)  # type: ignore
-                sl_price = self._build_sl_price(entry_price)  # type: ignore
+                tp_price = await self._build_tp_price_runtime(entry_price)
+                sl_price = await self._build_sl_price_runtime(entry_price)
 
                 trade_id = await self._save_to_db(
                     risk_score=risk_score,
-                    entry_price=entry_price,  # type: ignore
+                    entry_price=entry_price,
                     signal_price=signal_price,
                     price_change_at_entry=price_change_pct,
                     tp_price=tp_price,
@@ -713,13 +783,16 @@ class AutoShortService:
                 "Auto short opened",
                 trade_id=trade_id,
                 symbol=symbol,
+                signal_type=(
+                    risk_score.signal_type.value if risk_score.signal_type else None
+                ),
                 signal_price=signal_price,
                 entry_price=entry_price,
                 change_pct=round(price_change_pct, 3),
                 tp_price=tp_price,
                 sl_price=sl_price,
-                tp_pct=TP_PRICE_MOVE,
-                sl_pct=SL_PRICE_MOVE,
+                tp_pct=await self._get_target_pnl_pct(),
+                sl_pct=await self._get_target_sl_pct(),
                 score=risk_score.score,
             )
 
@@ -727,7 +800,7 @@ class AutoShortService:
                 trade_id=trade_id,
                 symbol=symbol,
                 signal_price=signal_price,
-                entry_price=entry_price,  # type: ignore
+                entry_price=entry_price,
                 price_change_pct=price_change_pct,
                 tp_price=tp_price,
                 sl_price=sl_price,
@@ -740,25 +813,17 @@ class AutoShortService:
         finally:
             self._pending_symbols.discard(symbol)
 
-    async def _check_trend_filter(self, risk_score: RiskScore) -> bool:
-        """
-        Возвращает True если можно открывать шорт.
-        Возвращает False если обнаружен сильный восходящий тренд.
+    # ── Trend filter ──────────────────────────────────────────────
 
-        Признаки сильного тренда (все три = блокируем вход):
-        1. price_change_15m > +3% — цена выросла более чем на 3% за 15 минут
-        2. consecutive_green_candles >= 7 — 7+ зелёных свечей подряд
-        3. rsi_14_1m > 85 — RSI в экстремальной зоне (памп ещё в разгаре)
-        """
+    async def _check_trend_filter(self, risk_score: RiskScore) -> bool:
         features = risk_score.features_snapshot
         if not features:
-            return True  # нет данных — не блокируем
+            return True
 
         price_change_15m = features.price_change_15m
         green_candles = features.consecutive_green_candles
         rsi = features.rsi_14_1m
 
-        # Считаем сколько признаков тренда сработало
         trend_signals = 0
 
         if price_change_15m > 3.0:
@@ -785,7 +850,6 @@ class AutoShortService:
                 value=round(rsi, 1),
             )
 
-        # Блокируем если 2 или более признаков тренда
         if trend_signals >= 2:
             logger.info(
                 "Strong uptrend detected — blocking short entry",
@@ -799,7 +863,7 @@ class AutoShortService:
 
         return True
 
-    # ── Мониторинг открытой сделки (TP / SL / время) ──────────────
+    # ── Monitor trade ─────────────────────────────────────────────
 
     async def _monitor_trade(self, trade_id: int) -> None:
         trade = await self._get_active_short(trade_id)
@@ -810,14 +874,17 @@ class AutoShortService:
         entry_price = trade["entry_price"]
         entry_ts = trade["entry_ts"]
 
-        TRAILING_ACTIVATE_PCT = 10.0   # активировать при +10% P&L
-        BREAKEVEN_BUFFER_PCT = 0.1     # SL на 0.1% выше входа
-        MAX_LOSS_PCT = -50.0           # аварийный стоп
+        TRAILING_ACTIVATE_PCT = 10.0
+        BREAKEVEN_BUFFER_PCT = 0.1
+        MAX_LOSS_PCT = -50.0
 
         trailing_activated = False
 
         while trade["status"] == "open":
-            await asyncio.sleep(TRADE_MONITOR_INTERVAL)
+            trade_monitor_interval = await self._get_trade_monitor_interval()
+            max_trade_duration = await self._get_max_trade_duration()
+
+            await asyncio.sleep(trade_monitor_interval)
 
             current_price = await self._get_price(symbol)
             if not current_price:
@@ -828,9 +895,8 @@ class AutoShortService:
 
             await self._save_price_snapshot(trade_id, trade, current_price, elapsed, now)
 
-            pnl = self._calc_short_pnl_pct(entry_price, current_price)
+            pnl = await self._calc_short_pnl_pct(entry_price, current_price)
 
-            # ── Аварийный стоп ────────────────────────────────────
             if pnl <= MAX_LOSS_PCT:
                 logger.warning(
                     "Max loss reached — emergency stop",
@@ -841,7 +907,6 @@ class AutoShortService:
                 await self._close_trade(trade_id, current_price, "sl_hit", pnl)
                 return
 
-            # ── Трейлинг = перенос SL на безубыток ───────────────
             if pnl >= TRAILING_ACTIVATE_PCT and not trailing_activated:
                 breakeven_sl = entry_price * (1 + BREAKEVEN_BUFFER_PCT / 100)
                 if breakeven_sl < trade["sl_price"]:
@@ -858,21 +923,20 @@ class AutoShortService:
                         pnl=f"{pnl:+.2f}%",
                     )
 
-            # ── Проверяем TP ──────────────────────────────────────
             if current_price <= trade["tp_price"]:
                 await self._close_trade(trade_id, current_price, "tp_hit", pnl)
                 return
 
-            # ── Проверяем SL ──────────────────────────────────────
             if current_price >= trade["sl_price"]:
                 reason = "trailing_sl" if trailing_activated else "sl_hit"
                 await self._close_trade(trade_id, current_price, reason, pnl)
                 return
 
-            # ── Истечение времени ─────────────────────────────────
-            if elapsed >= MAX_TRADE_DURATION:
+            if elapsed >= max_trade_duration:
                 await self._close_trade(trade_id, current_price, "expired", pnl)
                 return
+
+    # ── Close trade ───────────────────────────────────────────────
 
     async def _close_trade(
         self,
@@ -885,7 +949,14 @@ class AutoShortService:
         if not trade:
             return
 
-        allowed_reasons = {"tp_hit", "sl_hit", "trailing_sl", "manual", "expired", "closed_manual"}
+        allowed_reasons = {
+            "tp_hit",
+            "sl_hit",
+            "trailing_sl",
+            "manual",
+            "expired",
+            "closed_manual",
+        }
         if reason not in allowed_reasons:
             logger.warning(
                 "Unknown close reason, fallback applied",
@@ -917,12 +988,14 @@ class AutoShortService:
             status="closed",
             close_reason=reason,
             pnl=f"{pnl:+.2f}%",
-            leverage=LEVERAGE,
+            leverage=await self._get_leverage(),
             ml_label=ml_label,
         )
 
         await self._notify_closed(trade_id, trade["symbol"], exit_price, pnl, reason)
         await self._del_active_short(trade_id)
+
+    # ── Save price snapshots ──────────────────────────────────────
 
     async def _save_price_snapshot(
         self,
@@ -972,6 +1045,8 @@ class AutoShortService:
                 error=str(e),
             )
 
+    # ── Save trade to DB ──────────────────────────────────────────
+
     async def _save_to_db(
         self,
         risk_score: RiskScore,
@@ -988,6 +1063,11 @@ class AutoShortService:
             features = risk_score.features_snapshot
             factor_map = {f.name: f.raw_value for f in risk_score.factors}
 
+            leverage = await self._get_leverage()
+            target_pnl_pct = await self._get_target_pnl_pct()
+            target_sl_pct = await self._get_target_sl_pct()
+            entry_delay_sec = await self._get_entry_delay_sec()
+
             trade = AutoShort(
                 symbol=risk_score.symbol,
                 signal_type=(
@@ -998,10 +1078,10 @@ class AutoShortService:
                 signal_price=signal_price,
                 entry_price=entry_price,
                 price_change_at_entry=price_change_at_entry,
-                entry_delay_sec=ENTRY_DELAY_SEC,
-                leverage=LEVERAGE,
-                tp_pct=TARGET_PNL_PCT,
-                sl_pct=TARGET_SL_PCT,
+                entry_delay_sec=entry_delay_sec,
+                leverage=leverage,
+                tp_pct=target_pnl_pct,
+                sl_pct=target_sl_pct,
                 tp_price=tp_price,
                 sl_price=sl_price,
                 status="open",
@@ -1028,7 +1108,6 @@ class AutoShortService:
                 price_change_5m=features.price_change_5m if features else None,
                 spread_pct=features.spread_pct if features else None,
                 bid_depth_change_5m=features.bid_depth_change_5m if features else None,
-                # ML enrichment columns
                 btc_change_15m=features.btc_change_15m if features else None,
                 funding_rate_at_signal=features.funding_rate if features else None,
                 oi_change_pct_at_signal=features.oi_change_pct if features else None,
@@ -1047,6 +1126,8 @@ class AutoShortService:
         except Exception as e:
             logger.exception("Auto short DB save failed", error=str(e))
             return None
+
+    # ── Update trade in DB ────────────────────────────────────────
 
     async def _update_db(
         self,
@@ -1096,8 +1177,9 @@ class AutoShortService:
             )
             raise
 
+    # ── Price fetch ───────────────────────────────────────────────
+
     async def _get_price(self, symbol: str) -> float | None:
-        # Try 1: Redis features key (real-time WS data, written by ingestion)
         try:
             raw = await self._redis.get(f"features:{symbol}")
             if raw:
@@ -1109,7 +1191,6 @@ class AutoShortService:
         except Exception as e:
             logger.debug("Redis features price fetch failed", symbol=symbol, error=str(e))
 
-        # Try 2: Redis score key (scoring cycle snapshot, up to 30s stale)
         try:
             raw = await self._redis.get(f"score:{symbol}")
             if raw:
@@ -1122,7 +1203,6 @@ class AutoShortService:
         except Exception as e:
             logger.debug("Redis score price fetch failed", symbol=symbol, error=str(e))
 
-        # Try 3: Shared REST client (reuses persistent session)
         if self._rest_client:
             try:
                 ticker = await self._rest_client.get_ticker(symbol, category="linear")
@@ -1134,13 +1214,14 @@ class AutoShortService:
             except Exception as e:
                 logger.debug("REST client price fetch failed", symbol=symbol, error=str(e))
 
-        # Try 4: Fallback to in-memory cache
         cached = self._price_cache.get(symbol)
         if cached:
             logger.debug("Using cached price", symbol=symbol, price=cached)
             return cached
 
         return None
+
+    # ── Notify opened ─────────────────────────────────────────────
 
     async def _notify_opened(
         self,
@@ -1158,6 +1239,7 @@ class AutoShortService:
 
         try:
             from app.bot.user_store import get_active_users
+            from app.bot.keyboards import trade_action_keyboard
 
             user_ids = await get_active_users(self._redis)
             if not user_ids:
@@ -1165,6 +1247,12 @@ class AutoShortService:
 
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
             change_em = "🔴" if price_change_pct > 0 else "🟢"
+            entry_delay_sec = await self._get_entry_delay_sec()
+            tp_price_move = await self._get_tp_price_move_pct()
+            sl_price_move = await self._get_sl_price_move_pct()
+            target_pnl_pct = await self._get_target_pnl_pct()
+            target_sl_pct = await self._get_target_sl_pct()
+            leverage = await self._get_leverage()
 
             text = (
                 f"🤖 <b>Авто-шорт открыт</b>\n\n"
@@ -1172,14 +1260,13 @@ class AutoShortService:
                 f"📊 Score: <b>{score:.0f}</b>\n\n"
                 f"📍 Цена сигнала: <b>${signal_price:.6g}</b>\n"
                 f"{change_em} Цена входа: <b>${entry_price:.6g}</b> "
-                f"({price_change_pct:+.2f}% за {ENTRY_DELAY_SEC}с)\n\n"
-                f"🎯 TP: ${tp_price:.6g} (-{TP_PRICE_MOVE:.2f}% = +{TARGET_PNL_PCT:.0f}% P&L)\n"
-                f"🛑 SL: ${sl_price:.6g} (+{SL_PRICE_MOVE:.2f}% = -{TARGET_SL_PCT:.0f}% P&L)\n"
-                f"⚡ Плечо: {LEVERAGE}x\n\n"
+                f"({price_change_pct:+.2f}% за {entry_delay_sec}с)\n\n"
+                f"🎯 TP: ${tp_price:.6g} (-{tp_price_move:.2f}% = +{target_pnl_pct:.0f}% P&L)\n"
+                f"🛑 SL: ${sl_price:.6g} (+{sl_price_move:.2f}% = -{target_sl_pct:.0f}% P&L)\n"
+                f"⚡ Плечо: {leverage:.0f}x\n\n"
                 f"<i>Сделка #{trade_id} | Бот следит автоматически</i>"
             )
 
-            from app.bot.keyboards import trade_action_keyboard
             keyboard = trade_action_keyboard(symbol, trade_id)
 
             for user_id in user_ids:
@@ -1196,6 +1283,8 @@ class AutoShortService:
         except Exception as e:
             logger.error("Open notification failed", error=str(e))
 
+    # ── Notify closed ─────────────────────────────────────────────
+
     async def _notify_closed(
         self,
         trade_id: int,
@@ -1210,6 +1299,7 @@ class AutoShortService:
 
         try:
             from app.bot.user_store import get_active_users
+            from app.bot.keyboards import trade_action_keyboard
 
             user_ids = await get_active_users(self._redis)
             if not user_ids:
@@ -1228,6 +1318,7 @@ class AutoShortService:
             pnl_em = "🟢" if pnl > 0 else "🔴"
             result_em = "✅" if pnl > 0 else "❌"
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
+            leverage = await self._get_leverage()
 
             text = (
                 f"{result_em} <b>Авто-шорт закрыт</b>\n\n"
@@ -1235,11 +1326,10 @@ class AutoShortService:
                 f"{reason_text}\n\n"
                 f"💰 Выход: <b>${exit_price:.6g}</b>\n"
                 f"P&L: {pnl_em} <b>{pnl:+.2f}%</b>\n"
-                f"⚡ Плечо: {LEVERAGE}x\n\n"
+                f"⚡ Плечо: {leverage:.0f}x\n\n"
                 f"<i>Сделка #{trade_id} | /stats для статистики</i>"
             )
 
-            from app.bot.keyboards import trade_action_keyboard
             keyboard = trade_action_keyboard(symbol, trade_id)
 
             for user_id in user_ids:
@@ -1250,18 +1340,8 @@ class AutoShortService:
                         parse_mode="HTML",
                         reply_markup=keyboard,
                     )
-                    logger.info(
-                        "Close notification sent",
-                        trade_id=trade_id,
-                        user_id=user_id,
-                        pnl=f"{pnl:+.2f}%",
-                    )
                 except Exception as e:
-                    logger.warning(
-                        "Close notification failed",
-                        user_id=user_id,
-                        error=str(e),
-                    )
+                    logger.warning("Notify close failed", user_id=user_id, error=str(e))
 
         except Exception as e:
-            logger.error("Close notification error", error=str(e))
+            logger.error("Close notification failed", error=str(e))

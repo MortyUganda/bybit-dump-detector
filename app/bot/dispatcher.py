@@ -19,9 +19,8 @@ from app.bot.handlers import (
     settings_router,
     watchlist_router,
     nav_router,
+    strategy_router,
 )
-
-
 
 settings = get_settings()
 
@@ -37,19 +36,18 @@ def create_dispatcher(redis_url: str) -> Dispatcher:
     storage = RedisStorage.from_url(redis_url)
     dp = Dispatcher(storage=storage)
 
-    # Middleware — access control
     dp.message.middleware(AccessMiddleware(allowed_ids=settings.allowed_user_ids))
     dp.callback_query.middleware(AccessMiddleware(allowed_ids=settings.allowed_user_ids))
 
-    # Register routers
     dp.include_router(commands_router)
     dp.include_router(nav_router)
     dp.include_router(signals_router)
     dp.include_router(overvalued_router)
     dp.include_router(coin_router)
     dp.include_router(settings_router)
+    dp.include_router(strategy_router)
     dp.include_router(watchlist_router)
     dp.include_router(history_router)
     dp.include_router(auto_shorts_router)
-    
+
     return dp

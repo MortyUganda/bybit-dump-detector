@@ -15,11 +15,11 @@ from app.bot.handlers.signals import add_signal
 from app.bot.keyboards import alert_action_keyboard
 from app.config import get_settings
 from app.scoring.engine import RiskScore
+from app.services.runtime_config import get_runtime_strategy_config
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
-
 
 SIGNAL_TYPE_PREFS = {
     "early_warning": "notify_early_warning",
@@ -28,11 +28,6 @@ SIGNAL_TYPE_PREFS = {
     "dump_started": "notify_dump_started",
 }
 
-AUTO_SHORT_ALLOWED_SIGNAL_TYPES = {
-    "overheated",
-    "reversal_risk",
-    "dump_started",
-}
 
 class AlertManager:
     def __init__(
@@ -92,6 +87,20 @@ class AlertManager:
             return
 
         signal_type = risk_score.signal_type.value if risk_score.signal_type else None
+        redis = await self._get_redis()
+        if redis is None:
+            return
+
+        strategy = await get_runtime_strategy_config(redis)
+
+        if not strategy.get("enabled", True):
+            logger.info(
+                "Auto short skipped — strategy disabled",
+                symbol=symbol,
+                score=risk_score.score,
+                signal_type=signal_type,
+            )
+            return
 
         if not risk_score.is_actionable:
             logger.debug(
@@ -102,13 +111,14 @@ class AlertManager:
             )
             return
 
-        if signal_type not in AUTO_SHORT_ALLOWED_SIGNAL_TYPES:
+        allowed_signal_types = set(strategy.get("allowed_signal_types", []))
+        if signal_type not in allowed_signal_types:
             logger.info(
-                "Auto short skipped — signal type is alert-only",
+                "Auto short skipped — signal type disabled in runtime config",
                 symbol=symbol,
                 score=risk_score.score,
                 signal_type=signal_type,
-                allowed_signal_types=sorted(AUTO_SHORT_ALLOWED_SIGNAL_TYPES),
+                allowed_signal_types=sorted(allowed_signal_types),
             )
             return
 
@@ -153,7 +163,7 @@ class AlertManager:
         if not user_settings.get("alerts_enabled", True):
             return False
 
-        if risk_score.score < user_settings.get("min_score", 50):  # было 45
+        if risk_score.score < user_settings.get("min_score", 50):
             return False
 
         signal_type = risk_score.signal_type.value if risk_score.signal_type else ""
@@ -217,7 +227,6 @@ class AlertManager:
                 )
 
     async def send_broadcast(self, text: str) -> None:
-        """Send a plain text broadcast to all admin users."""
         for user_id in settings.allowed_user_ids:
             try:
                 await self._bot.send_message(

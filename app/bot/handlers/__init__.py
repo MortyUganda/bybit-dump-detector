@@ -5,6 +5,7 @@ from app.bot.handlers.coin import router as coin_router
 from app.bot.handlers.settings import router as settings_router
 from app.bot.handlers.watchlist import router as watchlist_router
 from app.bot.handlers.nav import router as nav_router
+from app.bot.handlers.strategy import router as strategy_router
 
 __all__ = [
     "commands_router",
@@ -14,4 +15,5 @@ __all__ = [
     "settings_router",
     "watchlist_router",
     "nav_router",
+    "strategy_router",
 ]
