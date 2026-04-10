@@ -1,10 +1,11 @@
 """
 Entry point for all services.
+
 Usage:
-  python -m app.main bot        — Start Telegram bot
-  python -m app.main ingestion  — Start data ingestion service
-  python -m app.main analyzer   — Start analyzer + scoring service
-  python -m app.main all        — Start everything in one process (dev mode)
+    python -m app.main bot        — Start Telegram bot
+    python -m app.main ingestion  — Start data ingestion service
+    python -m app.main analyzer   — Start analyzer + scoring service
+    python -m app.main all        — Start everything in one process (dev mode)
 """
 from __future__ import annotations
 
@@ -35,11 +36,13 @@ async def run_bot() -> None:
 async def run_ingestion() -> None:
     """Start market data ingestion from Bybit."""
     import redis.asyncio as aioredis
+
     from app.bybit.rest_client import BybitRestClient
     from app.bybit.universe import UniverseManager
     from app.services.ingestion import IngestionService
 
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+
     rest = BybitRestClient()
     await rest.start()
 
@@ -68,13 +71,14 @@ async def run_analyzer() -> None:
 
     from app.bybit.rest_client import BybitRestClient
     from app.bybit.universe import UniverseManager
-    from app.services.ingestion import IngestionService
-    from app.services.analyzer import AnalyzerService
     from app.services.alert_manager import AlertManager
+    from app.services.analyzer import AnalyzerService
     from app.services.auto_short_service import AutoShortService
+    from app.services.ingestion import IngestionService
     from app.services.monitor_service import MonitorService
 
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+
     rest = BybitRestClient()
     await rest.start()
 
@@ -87,18 +91,22 @@ async def run_analyzer() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # Создаём AutoShortService и восстанавливаем активные сделки
-    auto_short = AutoShortService(redis=redis_client, bot=bot, rest_client=rest)
+    auto_short = AutoShortService(
+        redis=redis_client,
+        bot=bot,
+        rest_client=rest,
+    )
     await auto_short.restore_active_trades()
 
-    # Создаём MonitorService
     monitor = MonitorService(redis=redis_client, bot=bot)
     await monitor.start()
 
-    # Создаём AlertManager
-    alert_mgr = AlertManager(bot=bot, auto_short_service=auto_short)
+    alert_mgr = AlertManager(
+        bot=bot,
+        auto_short_service=auto_short,
+        redis=redis_client,
+    )
 
-    # Создаём AnalyzerService
     analyzer = AnalyzerService(
         ingestion=ingestion,
         redis=redis_client,
@@ -116,6 +124,7 @@ async def run_analyzer() -> None:
     finally:
         await monitor.stop()
         await analyzer.stop()
+        await alert_mgr.close()
         await ingestion.stop()
         await rest.stop()
         await bot.session.close()
