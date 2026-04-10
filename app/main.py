@@ -106,7 +106,6 @@ async def run_analyzer() -> None:
         auto_short_service=auto_short,
         redis=redis_client,
     )
-
     analyzer = AnalyzerService(
         ingestion=ingestion,
         redis=redis_client,
