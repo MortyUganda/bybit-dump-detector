@@ -29,10 +29,10 @@ SIGNAL_TYPE_PREFS = {
 }
 
 AUTO_SHORT_ALLOWED_SIGNAL_TYPES = {
+    "overheated",
     "reversal_risk",
     "dump_started",
 }
-
 
 class AlertManager:
     def __init__(
@@ -153,7 +153,7 @@ class AlertManager:
         if not user_settings.get("alerts_enabled", True):
             return False
 
-        if risk_score.score < user_settings.get("min_score", 45):
+        if risk_score.score < user_settings.get("min_score", 50):  # было 45
             return False
 
         signal_type = risk_score.signal_type.value if risk_score.signal_type else ""

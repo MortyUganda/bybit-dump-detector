@@ -87,7 +87,7 @@ class RiskScore:
 
     @property
     def is_actionable(self) -> bool:
-        return self.score >= 45 and self.triggered_count >= 2
+        return self.score >= 50 and self.triggered_count >= 2  # было 45
 
     def to_dict(self) -> dict:
         return {

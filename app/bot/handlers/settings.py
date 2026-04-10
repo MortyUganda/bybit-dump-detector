@@ -22,7 +22,7 @@ REDIS_USER_SETTINGS_PREFIX = "user_settings"
 
 DEFAULT_SETTINGS = {
     "alerts_enabled": True,
-    "min_score": 45,
+    "min_score": 50,
     "notify_early_warning": False,
     "notify_overheated": True,
     "notify_reversal_risk": True,
