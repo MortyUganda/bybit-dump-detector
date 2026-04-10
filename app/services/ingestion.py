@@ -269,11 +269,19 @@ class IngestionService:
         try:
             features = calc.compute()
             key = REDIS_FEATURES_KEY.format(symbol=symbol)
-            await self._redis.setex(key, REDIS_FEATURES_TTL, json.dumps(features.__dict__))
+
+            # Сериализуем вручную — исключаем несериализуемые объекты
+            features_dict = {
+                k: v for k, v in features.__dict__.items()
+                if isinstance(v, (int, float, bool, str, type(None)))
+            }
+
+            await self._redis.setex(key, REDIS_FEATURES_TTL, json.dumps(features_dict))
             return features
         except Exception as e:
             logger.debug("Feature publish error", symbol=symbol, error=str(e))
             return None
+        
 
     async def get_all_features(self) -> list[CoinFeatures]:
         """Compute and return features for all active symbols."""

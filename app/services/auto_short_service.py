@@ -2,11 +2,6 @@
 AutoShortService — автоматически открывает paper short при сигнале,
 мониторит цену и закрывает по TP / SL / времени,
 сохраняет метрики в БД для дальнейшего обучения.
-
-Плечо: 20x
-TP: 45% PnL  -> движение цены -2.25%
-SL: 25% PnL  -> движение цены +1.25%
-Risk/Reward: 1:1.8
 """
 from __future__ import annotations
 
@@ -26,9 +21,9 @@ settings = get_settings()
 
 # ── Параметры шорта ───────────────────────────────────────────────
 
-LEVERAGE = 20
-TARGET_PNL_PCT = 45.0
-TARGET_SL_PCT = 25.0
+LEVERAGE = 10
+TARGET_PNL_PCT = 20.0
+TARGET_SL_PCT = 10.0
 
 TP_PRICE_MOVE = TARGET_PNL_PCT / LEVERAGE   # 2.25% движения цены вниз
 SL_PRICE_MOVE = TARGET_SL_PCT / LEVERAGE    # 1.25% движения цены вверх
@@ -38,10 +33,10 @@ SL_PRICE_MOVE = TARGET_SL_PCT / LEVERAGE    # 1.25% движения цены в
 ENTRY_DELAY_SEC = 60                    # задержка после сигнала перед первой проверкой
 MONITOR_ATTEMPTS = 24                   # макс. количество проверок при мониторинге входа
 MONITOR_INTERVAL_SEC = 5                # интервал между проверками входа (секунды)
-MIN_SCORE_TO_ENTER = 40                 # минимальный score для входа в сделку
-STABILIZATION_THRESHOLD_PCT = 0.3       # порог стабилизации — входим если рост ≤ этого значения
-MAX_RISE_PCT = 1.5                      # отмена входа если рост превышает этот порог
-MAX_ENTRY_DROP_PCT = -0.30              # отмена входа если цена уже упала от сигнала
+MIN_SCORE_TO_ENTER = 55                 # минимальный score для входа в сделку
+STABILIZATION_THRESHOLD_PCT = 0.2       # порог стабилизации — входим если рост ≤ этого значения
+MAX_RISE_PCT = 0.8                      # не входить если цена выросла >0.8% за задержку  
+MAX_ENTRY_DROP_PCT = -0.3         # отмена входа если цена уже упала от сигнала
 
 # ── Параметры мониторинга открытых сделок ─────────────────────────
 
