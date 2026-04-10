@@ -28,6 +28,11 @@ SIGNAL_TYPE_PREFS = {
     "dump_started": "notify_dump_started",
 }
 
+AUTO_SHORT_ALLOWED_SIGNAL_TYPES = {
+    "reversal_risk",
+    "dump_started",
+}
+
 
 class AlertManager:
     def __init__(
@@ -86,11 +91,24 @@ class AlertManager:
         if not self._auto_short:
             return
 
+        signal_type = risk_score.signal_type.value if risk_score.signal_type else None
+
         if not risk_score.is_actionable:
             logger.debug(
                 "Auto short skipped — score is not actionable",
                 symbol=symbol,
                 score=risk_score.score,
+                signal_type=signal_type,
+            )
+            return
+
+        if signal_type not in AUTO_SHORT_ALLOWED_SIGNAL_TYPES:
+            logger.info(
+                "Auto short skipped — signal type is alert-only",
+                symbol=symbol,
+                score=risk_score.score,
+                signal_type=signal_type,
+                allowed_signal_types=sorted(AUTO_SHORT_ALLOWED_SIGNAL_TYPES),
             )
             return
 
@@ -101,15 +119,14 @@ class AlertManager:
                 "Auto short triggered",
                 symbol=symbol,
                 score=risk_score.score,
-                signal_type=(
-                    risk_score.signal_type.value if risk_score.signal_type else "unknown"
-                ),
+                signal_type=signal_type,
             )
         except Exception as e:
             logger.exception(
                 "Failed to trigger auto short",
                 symbol=symbol,
                 score=risk_score.score,
+                signal_type=signal_type,
                 error=str(e),
             )
 
