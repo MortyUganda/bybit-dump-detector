@@ -39,6 +39,7 @@ class AlertManager:
         self._bot = bot
         self._auto_short = auto_short_service
         self._redis = redis
+        self._owns_redis = redis is None
         self._alert_tasks: set[asyncio.Task] = set()
 
     async def _get_redis(self) -> aioredis.Redis | None:
@@ -51,6 +52,7 @@ class AlertManager:
                 encoding="utf-8",
                 decode_responses=True,
             )
+            self._owns_redis = True
             return self._redis
         except Exception as e:
             logger.warning("Redis init failed in AlertManager", error=str(e))
@@ -214,7 +216,7 @@ class AlertManager:
             if not task.done():
                 task.cancel()
 
-        if self._redis is not None:
+        if self._redis is not None and self._owns_redis:
             try:
                 await self._redis.aclose()
             except Exception as e:
