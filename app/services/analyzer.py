@@ -80,7 +80,7 @@ class AnalyzerService:
                 await self._run_scoring_cycle()
             except Exception as e:
                 logger.error("Scoring cycle error", error=str(e))
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)
 
     async def _run_scoring_cycle(self) -> None:
         self._cycle_count += 1
