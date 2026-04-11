@@ -682,6 +682,14 @@ class AutoShortService:
                 min_score_to_enter=min_score_to_enter,
             )
 
+            if getattr(risk_score, "trend_blocks_short", False):
+                logger.info(
+                    "Auto-short blocked by 1h trend filter",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                )
+                return
+
             trend_ok = await self._check_trend_filter(risk_score)
             if not trend_ok:
                 logger.info(

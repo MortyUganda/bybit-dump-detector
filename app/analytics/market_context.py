@@ -14,7 +14,8 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 # Suppress all alt short signals if BTC 15m change exceeds this %
-BTC_PUMP_THRESHOLD = 1.0
+# 2.0% — only suppress during strong BTC rallies, not minor moves
+BTC_PUMP_THRESHOLD = 2.0
 
 
 class MarketContext:
