@@ -2,20 +2,27 @@
 
 Telegram bot that monitors speculative coins on Bybit for overheating and dump risk.
 
-Not a price prediction tool. An overheating detector that combines 12 analytical factors into a risk score 0–100.
+Not a price prediction tool. It is an anomaly detector that combines multiple analytical factors into a composite risk score from 0 to 100.
 
----
+***
 
 ## What It Does
 
-- Monitors 100–400 shitcoins on Bybit spot in real-time via WebSocket
-- Computes 12 risk factors per coin: RSI, VWAP extension, volume z-score, trade imbalance, large buy clusters, price acceleration, consecutive green candles, orderbook bid thinning, spread expansion, momentum loss, wick patterns, funding rate
-- Produces a composite Risk Score 0–100 with anti-noise protection
-- Fires 4 signal types to Telegram: Early Warning / Overheated / Reversal Risk / Dump Started
-- Maintains a ranked "Overvalued Coins" list, updated every 5 minutes
-- Per-user watchlists and alert preferences
+- Monitors speculative Bybit markets using live market data
+- Computes a multi-factor overheating and dump-risk profile per coin
+- Produces a composite Risk Score from 0 to 100
+- Sends Telegram alerts for Early Warning, Overheated, Reversal Risk, and Dump Started scenarios
+- Maintains ranked overvalued coin lists
+- Supports per-user settings, watchlists, and signal filtering
+- Includes strategy runtime controls and auto-short related flows
 
----
+***
+
+## Project Status
+
+Active development. The core detection pipeline, scoring engine, bot commands, user settings, and alert delivery are already implemented. The current focus is calibration, reliability, observability, and preparing a production-quality dataset for ML-assisted scoring.
+
+***
 
 ## Quick Start (Docker)
 
@@ -23,7 +30,7 @@ Not a price prediction tool. An overheating detector that combines 12 analytical
 
 - Docker + Docker Compose
 - Telegram Bot Token (from @BotFather)
-- Bybit API Key (read-only, public data doesn't strictly require auth but is rate-limited without it)
+- Bybit API Key (optional for some public data flows, but recommended for more stable access)
 
 ### 2. Configure
 
@@ -32,8 +39,8 @@ cp .env.example .env
 # Edit .env:
 #   TELEGRAM_BOT_TOKEN=...
 #   TELEGRAM_ALLOWED_USERS=your_telegram_user_id
-#   BYBIT_API_KEY=...        # optional but recommended
-#   BYBIT_API_SECRET=...     # optional but recommended
+#   BYBIT_API_KEY=...
+#   BYBIT_API_SECRET=...
 ```
 
 Get your Telegram user ID: send any message to @userinfobot
@@ -53,7 +60,7 @@ docker-compose logs -f bot
 ### 4. Database Migration
 
 ```bash
-# Runs automatically via the 'migrate' service
+# Runs automatically via the migrate service
 # Or manually:
 docker-compose run --rm migrate
 ```
@@ -62,7 +69,7 @@ docker-compose run --rm migrate
 
 Open Telegram, find your bot, send `/start`
 
----
+***
 
 ## Local Development
 
@@ -75,13 +82,12 @@ cd docker && docker-compose up -d postgres redis
 
 # Run all services in one process (dev mode)
 cp .env.example .env
-# Fill in .env values
 python -m app.main all
 
 # Or run services separately:
-python -m app.main ingestion   # terminal 1
-python -m app.main analyzer    # terminal 2
-python -m app.main bot         # terminal 3
+python -m app.main ingestion
+python -m app.main analyzer
+python -m app.main bot
 ```
 
 ### Run Tests
@@ -93,218 +99,233 @@ pytest tests/ -v
 pytest tests/ --cov=app --cov-report=html
 ```
 
----
+***
 
 ## Bot Commands
 
 | Command | Description |
 |---|---|
-| `/start` | Welcome message + menu |
-| `/help` | All commands explained |
-| `/signals` | Recent risk alerts (paginated) |
+| `/start` | Welcome message and main menu |
+| `/help` | Help and command reference |
+| `/signals` | Recent risk alerts |
 | `/overvalued` | Top overvalued coins right now |
-| `/coin SYMBOL` | Full diagnostics for one coin (e.g. `/coin DOGEUSDT`) |
+| `/coin SYMBOL` | Full diagnostics for one coin |
 | `/watchlist` | Your personal watchlist |
 | `/add SYMBOL` | Add coin to watchlist |
-| `/remove SYMBOL` | Remove from watchlist |
+| `/remove SYMBOL` | Remove coin from watchlist |
 | `/settings` | Configure alert preferences |
-| `/status` | Bot health and universe size |
+| `/status` | Bot and service health snapshot |
 
----
+***
 
-## Risk Score Explained
+## Detection Model
 
+The current engine is rule-based and combines multiple market structure signals into one score.
+
+### Implemented feature groups
+
+- Trade-flow features: buy/sell imbalance, large trade clustering, CVD, liquidation cascade detection
+- Candle features: RSI, ATR, VWAP extension, price acceleration, consecutive green candles, wick analysis, momentum loss
+- Order book features: bid/ask depth, imbalance, spread expansion, bid thinning
+- Context features: trend filter, OI change metrics, funding data where available
+
+### Risk levels
+
+```text
+Score   Level
+0–24    LOW
+25–49   MODERATE
+50–74   HIGH
+75–100  CRITICAL
 ```
-Score   Level     Action
-0–24    🟢 LOW      No alert
-25–49   🟡 MODERATE  No alert (unless in watchlist)
-50–74   🟠 HIGH      Alert sent
-75–100  🔴 CRITICAL  Urgent alert
-```
 
-**Alert fires only when**: score ≥ 50 AND ≥ 3 factors triggered (anti-noise).
+### Signal types
 
-**Cooldown**: same symbol + signal type will not re-alert for 60 minutes (configurable).
+- Early Warning
+- Overheated
+- Reversal Risk
+- Dump Started
 
----
+The model currently uses heuristic thresholds and adaptive normalization. Threshold calibration on collected live data is still in progress.
 
-## Signal Types
+***
 
-| Signal | Trigger | Description |
-|---|---|---|
-| ⚠️ Early Warning | Score 30–49, 2+ factors | Early signs of overheating |
-| 🔥 Overheated | RSI + VWAP + Volume all high | Classic pump top pattern |
-| ⬇️ Reversal Risk | Momentum stall + wick + OB thinning | About to reverse |
-| 💥 Dump Started | Price -3%+ + OB collapse | Dump in progress |
+## Alert Logic
 
----
+Alerts are filtered per user.
+
+Supported controls include:
+- Alerts enabled/disabled
+- Quiet mode
+- Minimum score threshold
+- Signal-type specific preferences
+
+The system also supports runtime strategy configuration and auto-short related flows for actionable signal types.
+
+***
 
 ## Universe Filter
 
-The bot only tracks coins passing all these filters:
+The tracked market universe is filtered to avoid major coins and low-quality symbols.
 
-| Filter | Default | Notes |
-|---|---|---|
-| Quote currency | USDT only | — |
-| Exchange status | Trading | Skip suspended |
-| Excluded majors | BTC ETH BNB SOL XRP ADA DOGE AVAX DOT MATIC LTC LINK UNI ATOM TRX | Configurable |
-| Min 24h volume | $500k USDT | TODO: recalibrate |
-| Min listing age | 14 days | Skip brand-new tokens |
+Typical filters include:
+- USDT quote symbols
+- Trading status only
+- Excluded majors
+- Minimum 24h volume threshold
+- Minimum listing age threshold
 
-Universe is refreshed every 5 minutes.
+Universe refresh and exact thresholds are configurable.
 
----
+***
 
 ## Architecture
 
-```
-Bybit WS  →  IngestionService  →  Redis (features)
-                                       ↓
-                             AnalyzerService (scoring loop, 30s)
-                                       ↓
-                             AlertManager  →  Telegram Bot
-                                       ↓
-                             PostgreSQL (signals, overvalued, users)
+```text
+Bybit WS / REST  →  IngestionService  →  Redis / in-memory state
+                                         ↓
+                               AnalyzerService / ScoringEngine
+                                         ↓
+                              AlertManager  →  Telegram Bot
+                                         ↓
+                             PostgreSQL / signal persistence
 ```
 
-See `docs/architecture.md` for full diagram.
+Main runtime parts:
+- `IngestionService` collects and updates market state
+- `FeatureCalculator` builds per-symbol analytical features
+- `ScoringEngine` converts features into a risk score and signal type
+- `AlertManager` saves and broadcasts alerts
+- Telegram bot handlers provide command UX, settings, watchlists, and navigation
 
----
+***
 
 ## Project Structure
 
-```
+```text
 bybit-dump-detector/
 ├── app/
-│   ├── main.py              — entry point (bot | ingestion | analyzer | all)
-│   ├── config/
-│   │   └── settings.py      — Pydantic settings from .env
-│   ├── bybit/
-│   │   ├── rest_client.py   — REST API client (instruments, klines, OB)
-│   │   ├── ws_client.py     — WebSocket client (trades, tickers, OB)
-│   │   └── universe.py      — Symbol universe manager
+│   ├── main.py
 │   ├── analytics/
-│   │   ├── features.py      — Feature calculator (12 signals)
-│   │   └── orderbook.py     — OB mirror + delta/snapshot handling
-│   ├── scoring/
-│   │   └── engine.py        — Rule-based risk scoring (0–100)
-│   ├── services/
-│   │   ├── ingestion.py     — WS + REST data pipeline
-│   │   ├── analyzer.py      — Scoring loop + overvalued ranking
-│   │   └── alert_manager.py — Telegram broadcast
+│   │   ├── features.py
+│   │   └── orderbook.py
 │   ├── bot/
-│   │   ├── dispatcher.py    — aiogram bot + routers
-│   │   ├── middleware.py    — Access control
-│   │   ├── formatters.py    — Telegram message templates
-│   │   ├── keyboards.py     — Inline keyboards
-│   │   └── handlers/        — /start /signals /overvalued /coin etc.
+│   │   ├── dispatcher.py
+│   │   ├── formatters.py
+│   │   ├── middleware.py
+│   │   ├── user_store.py
+│   │   ├── keyboards/
+│   │   └── handlers/
+│   │       ├── commands.py
+│   │       ├── signals.py
+│   │       ├── overvalued.py
+│   │       ├── coin.py
+│   │       ├── settings.py
+│   │       ├── watchlist.py
+│   │       ├── history.py
+│   │       ├── strategy.py
+│   │       └── auto_shorts.py
+│   ├── bybit/
+│   ├── config/
 │   ├── db/
-│   │   ├── session.py       — SQLAlchemy async session factory
-│   │   ├── models/          — ORM models (symbols, signals, users, ...)
-│   │   └── migrations/      — DB migration runner
+│   ├── scoring/
+│   │   └── engine.py
+│   ├── services/
+│   │   ├── ingestion.py
+│   │   ├── analyzer.py
+│   │   ├── alert_manager.py
+│   │   └── runtime_config.py
 │   └── utils/
-│       ├── logging.py       — Structured JSON logging (structlog)
-│       └── time_utils.py    — UTC helpers
-├── tests/
-│   └── unit/
-│       ├── test_scoring.py  — Scoring engine tests
-│       └── test_features.py — Feature calculator tests
 ├── docker/
-│   ├── Dockerfile
-│   └── docker-compose.yml
-├── scripts/
-│   └── init_db.sql          — PostgreSQL schema
 ├── docs/
-│   ├── architecture.md      — System diagram + data source matrix
-│   └── json_examples.md     — Signal / overvalued JSON schemas
+├── scripts/
+├── tests/
 ├── .env.example
 ├── pyproject.toml
 └── README.md
 ```
 
----
+***
 
 ## Configuration Reference
 
-All config via `.env` file. See `.env.example` for full list.
+All config is provided through `.env`. See `.env.example` for the full list.
 
-| Variable | Default | Description |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | required | From @BotFather |
-| `TELEGRAM_ALLOWED_USERS` | (empty = all) | Comma-separated Telegram IDs |
-| `BYBIT_NETWORK` | mainnet | mainnet or testnet |
-| `UNIVERSE_MIN_24H_VOLUME_USDT` | 500000 | Min daily volume |
-| `UNIVERSE_MIN_LISTING_AGE_DAYS` | 14 | Skip new listings |
-| `SCORE_ALERT_THRESHOLD` | 50 | Min score to alert |
-| `ALERT_COOLDOWN_MINUTES` | 60 | Per-symbol cooldown |
-| `OVERVALUED_TOP_N` | 20 | Size of overvalued list |
+Common options include:
 
----
+| Variable | Description |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
+| `TELEGRAM_ALLOWED_USERS` | Comma-separated allowed Telegram user IDs |
+| `BYBIT_NETWORK` | `mainnet` or `testnet` |
+| `UNIVERSE_MIN_24H_VOLUME_USDT` | Minimum daily volume |
+| `UNIVERSE_MIN_LISTING_AGE_DAYS` | Minimum listing age |
+| `SCORE_ALERT_THRESHOLD` | Minimum score for alerts |
+| `ALERT_COOLDOWN_MINUTES` | Per-symbol cooldown |
+| `OVERVALUED_TOP_N` | Ranked overvalued list size |
 
-## MVP Roadmap
+***
 
-### Week 1 — Foundation
-- [x] Project scaffold, Docker, config
-- [ ] REST client: instruments, klines, tickers, orderbook
-- [ ] WebSocket client: trades, tickers, OB
-- [ ] Universe manager with filters
-- [ ] Basic IngestionService: WS → FeatureCalculator → Redis
-- [ ] Bot skeleton: /start /help /status
-- [ ] Database schema created
+## Roadmap
 
-### Week 2 — Features + Scoring + Signals
-- [ ] Full FeatureCalculator: 12 factors (RSI, VWAP, ATR, volume z-score, OB imbalance, etc.)
-- [ ] ScoringEngine: rule-based 0–100 with anti-noise
-- [ ] AnalyzerService: scoring loop 30s
-- [ ] AlertManager: Telegram broadcast with cooldown
-- [ ] /signals command: real data from DB
-- [ ] /overvalued command: real Redis data
+### Done
+- [x] Project scaffold, Docker setup, configuration system, and environment template
+- [x] FeatureCalculator with real trade, candle, order book, OI, CVD, liquidation, and trend-context features
+- [x] Rule-based ScoringEngine with 17 weighted factors, adaptive thresholds, anti-noise logic, and signal classification
+- [x] Telegram bot dispatcher, middleware, formatters, keyboards, and command handlers
+- [x] Commands for `/start`, `/help`, `/status`, `/signals`, `/overvalued`, `/coin`, `/watchlist`, `/add`, `/remove`, and `/settings`
+- [x] Per-user alert filtering with quiet mode, minimum score threshold, and signal-type preferences
+- [x] Signal persistence hooks, Redis integration, and candle restore after restart
+- [x] Runtime strategy configuration and auto-short related handlers
 
-### Week 3 — UX + Settings + Stability
-- [ ] /coin SYMBOL: full live diagnostics
-- [ ] /watchlist, /add, /remove: DB-backed
-- [ ] /settings: inline keyboard settings editor
-- [ ] Per-user alert preferences in DB
-- [ ] Retention cleanup jobs (purge old signals)
-- [ ] Reconnect stability testing
-- [ ] Logging + error alerts to admin
+### In Progress
+- [ ] Calibrate scoring thresholds on real collected market data
+- [ ] Expand automated test coverage and validate end-to-end production scenarios
+- [ ] Improve reconnect behavior, recovery flow, and long-running service stability
+- [ ] Measure false-positive rate and tune signal quality in live conditions
+- [ ] Validate spot-to-perpetual mapping quality for OI and funding-based signals
 
-### Week 4 — Tuning + Deployment Hardening
-- [ ] Collect 7 days of scored features + post-signal price changes
-- [ ] Calibrate scoring thresholds (reduce FP rate)
-- [ ] Add Alembic migrations
-- [ ] Health check endpoint
-- [ ] Prometheus metrics (scoring cycles, alert counts, WS status)
-- [ ] Production deployment docs (VPS, systemd or Docker Swarm)
-- [ ] ML evolution plan: logistic regression on collected feature dataset
+### Next
+- [ ] Add proper Alembic migrations
+- [ ] Add health checks and operational observability
+- [ ] Add Prometheus metrics for scoring cycles, alerts, and WS health
+- [ ] Add retention and cleanup jobs for old signals and temporary analytics data
+- [ ] Write production deployment documentation for VPS and container-based setups
+- [ ] Build a dataset collection pipeline for ML training from live signals and post-signal outcomes
 
----
+### Later
+- [ ] Train and compare first ML models, such as Logistic Regression and LightGBM
+- [ ] Introduce retraining and evaluation workflows with precision/recall monitoring
+- [ ] Revisit universe filters and scoring weights after enough live history is collected
+- [ ] Split roadmap and changelog responsibilities so README stays concise and current
 
-## ML Evolution Path (Week 4+)
+***
 
-After collecting ~1 week of live data:
+## ML Evolution Path
 
-```
-features_at_signal_time  +  price_change_1h_after  →  label (dump? Y/N)
+After enough live data is collected, the next step is to build a supervised dataset:
+
+```text
+features_at_signal_time + post_signal_price_change → label (dump? yes/no)
 ```
 
-- Train: LogisticRegression or LightGBM on collected data
-- Replace rule-based weight table with learned coefficients
-- Evaluate: precision/recall at 0.5 threshold
-- Monitor: daily retraining job
+Planned direction:
+- Train Logistic Regression or LightGBM on collected signal snapshots
+- Compare ML probability against the current rule-based score
+- Evaluate precision, recall, and threshold sensitivity
+- Add retraining and monitoring only after the baseline dataset is stable
 
-See `docs/architecture.md` for full details.
-
----
+***
 
 ## Limitations & Caveats
 
-1. **Spot only by default** — Open Interest and Funding Rate are only available for Bybit linear perpetuals. OI signals require parallel monitoring of USDT perpetual counterpart.
+1. Spot and perp signals are not equally available for all symbols.
+2. Thresholds are still being calibrated on live market behavior.
+3. Very new listings or ultra-fast pumps can still be missed depending on universe refresh timing.
+4. This is a risk-monitoring and anomaly-detection tool, not financial advice and not guaranteed prediction.
 
-2. **No order book tick data** — Bybit WS provides 25-level OB snapshots. For microsecond trade clustering analysis you'd need institutional data feeds.
+***
 
-3. **Universe latency** — Universe refresh every 5 min. A coin listed and pumped within 5 minutes will be missed (min listing age filter also excludes very new coins by design).
+## License
 
-4. **Thresholds need calibration** — All scoring thresholds are reasonable defaults based on general shitcoin patterns. They must be recalibrated after 1 week of live data for your specific target universe.
-
-5. **Not financial advice** — Risk score is a statistical anomaly detector, not a guaranteed prediction. Use for informational monitoring only.
+Add your preferred license here.

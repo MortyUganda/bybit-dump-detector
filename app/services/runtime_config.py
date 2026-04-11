@@ -31,7 +31,7 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "entry_delay_sec": 60,
     "monitor_attempts": 24,
     "monitor_interval_sec": 5,
-    "min_score_to_enter": 55,
+    "min_score_to_enter": 50,
     "stabilization_threshold_pct": 0.2,
     "max_rise_pct": 0.8,
     "max_entry_drop_pct": -0.3,

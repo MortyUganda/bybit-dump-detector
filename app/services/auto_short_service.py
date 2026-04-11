@@ -229,37 +229,48 @@ class AutoShortService:
                 score=round(current_score, 1),
                 min_score=min_score_to_enter,
             )
-            return "cancel_score"
-
-        if price_change_pct < max_entry_drop_pct:
+            decision = "cancel_score"
+        elif price_change_pct < max_entry_drop_pct:
             logger.debug(
                 "Entry check: price dropped too much",
                 symbol=symbol,
                 change_pct=round(price_change_pct, 3),
                 threshold=max_entry_drop_pct,
             )
-            return "cancel_drop"
-
-        if price_change_pct > max_rise_pct:
+            decision = "cancel_drop"
+        elif price_change_pct > max_rise_pct:
             logger.debug(
                 "Entry check: price rose too much",
                 symbol=symbol,
                 change_pct=round(price_change_pct, 3),
                 max_rise=max_rise_pct,
             )
-            return "cancel_rise"
-
-        if price_change_pct > stabilization_threshold_pct:
+            decision = "cancel_rise"
+        elif price_change_pct > stabilization_threshold_pct:
             logger.debug(
                 "Entry check: price still rising above stabilization threshold",
                 symbol=symbol,
                 change_pct=round(price_change_pct, 3),
                 threshold=stabilization_threshold_pct,
             )
-            return "monitor"
+            decision = "monitor"
+        else:
+            decision = "enter"
 
-        return "enter"
+        logger.info(
+            "Auto-short entry decision",
+            symbol=symbol,
+            decision=decision,
+            price_change_pct=round(price_change_pct, 3),
+            score=round(current_score, 1),
+            min_score=min_score_to_enter,
+            max_entry_drop_pct=max_entry_drop_pct,
+            max_rise_pct=max_rise_pct,
+            stabilization_threshold_pct=stabilization_threshold_pct,
+        )
+        return decision    
 
+    
     # ── Current score ─────────────────────────────────────────────
 
     async def _get_current_score(self, symbol: str) -> float | None:
@@ -590,77 +601,104 @@ class AutoShortService:
     async def open_short(self, risk_score: RiskScore) -> None:
         symbol = risk_score.symbol
         lock = self._get_symbol_lock(symbol)
+        signal_type = risk_score.signal_type.value if risk_score.signal_type else None
 
         async with lock:
             if await self._is_symbol_already_open(symbol):
                 logger.info(
                     "Skipping short — already have open trade for symbol",
                     symbol=symbol,
+                    signal_type=signal_type,
                 )
                 return
+
             if symbol in self._pending_symbols:
                 logger.info(
                     "Skipping short — symbol already pending entry",
                     symbol=symbol,
+                    signal_type=signal_type,
                 )
                 return
+
             self._pending_symbols.add(symbol)
 
         try:
             strategy = await self._get_strategy()
             if not strategy.get("enabled", True):
-                logger.info("Skipping short — strategy disabled", symbol=symbol)
+                logger.info(
+                    "Skipping short — strategy disabled",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                )
                 return
 
             signal_price = await self._get_price(symbol)
             if not signal_price:
-                logger.warning("Cannot open short — no price at signal", symbol=symbol)
+                logger.warning(
+                    "Cannot open short — no price at signal",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                )
                 return
 
             entry_delay_sec = await self._get_entry_delay_sec()
+            min_score_to_enter = await self._get_min_score_to_enter()
 
             logger.info(
                 "Short signal received — waiting before entry",
                 symbol=symbol,
-                signal_type=(
-                    risk_score.signal_type.value if risk_score.signal_type else None
-                ),
+                signal_type=signal_type,
                 signal_price=signal_price,
                 delay_sec=entry_delay_sec,
-                score=risk_score.score,
-                min_score_to_enter=await self._get_min_score_to_enter(),
+                score=round(risk_score.score, 1),
+                min_score_to_enter=min_score_to_enter,
             )
 
             await asyncio.sleep(entry_delay_sec)
 
             entry_price = await self._get_price(symbol)
             if not entry_price:
-                logger.warning("Cannot open short — no price after delay", symbol=symbol)
+                logger.warning(
+                    "Cannot open short — no price after delay",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                )
                 return
 
             current_score = await self._get_current_score(symbol)
             effective_score = (
-                current_score if current_score is not None else risk_score.score
+                float(current_score) if current_score is not None else float(risk_score.score)
             )
-
             price_change_pct = self._calc_price_move_pct(signal_price, entry_price)
 
             logger.info(
                 "Price check after delay",
                 symbol=symbol,
+                signal_type=signal_type,
                 signal_price=signal_price,
                 entry_price=entry_price,
                 change_pct=round(price_change_pct, 3),
                 current_score=round(effective_score, 1),
-                min_score_to_enter=await self._get_min_score_to_enter(),
+                min_score_to_enter=min_score_to_enter,
             )
 
             trend_ok = await self._check_trend_filter(risk_score)
             if not trend_ok:
                 logger.info(
+                    "Auto-short entry decision",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    decision="cancel_trend",
+                    signal_price=signal_price,
+                    entry_price=entry_price,
+                    change_pct=round(price_change_pct, 3),
+                    score=round(effective_score, 1),
+                )
+                logger.info(
                     "Skipping short — strong uptrend detected",
                     symbol=symbol,
-                    score=risk_score.score,
+                    signal_type=signal_type,
+                    score=round(effective_score, 1),
                 )
                 return
 
@@ -670,12 +708,25 @@ class AutoShortService:
                 symbol=symbol,
             )
 
+            logger.info(
+                "Auto-short entry decision after delay",
+                symbol=symbol,
+                signal_type=signal_type,
+                decision=decision,
+                signal_price=signal_price,
+                entry_price=entry_price,
+                change_pct=round(price_change_pct, 3),
+                score=round(effective_score, 1),
+                min_score_to_enter=min_score_to_enter,
+            )
+
             if decision == "cancel_score":
                 logger.info(
                     "Canceled because score dropped",
                     symbol=symbol,
+                    signal_type=signal_type,
                     score=round(effective_score, 1),
-                    min_score=await self._get_min_score_to_enter(),
+                    min_score=min_score_to_enter,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -691,6 +742,7 @@ class AutoShortService:
                 logger.info(
                     "Skipping short — price already dropped too much from signal",
                     symbol=symbol,
+                    signal_type=signal_type,
                     signal_price=signal_price,
                     entry_price=entry_price,
                     change_pct=round(price_change_pct, 3),
@@ -706,11 +758,13 @@ class AutoShortService:
                 return
 
             if decision == "cancel_rise":
+                max_rise_pct = await self._get_max_rise_pct()
                 logger.info(
                     "Canceled because price rose too much after delay",
                     symbol=symbol,
+                    signal_type=signal_type,
                     change_pct=round(price_change_pct, 3),
-                    max_rise=await self._get_max_rise_pct(),
+                    max_rise=max_rise_pct,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -723,20 +777,47 @@ class AutoShortService:
                 return
 
             if decision == "monitor":
+                logger.info(
+                    "Auto-short entering monitoring mode",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    signal_price=signal_price,
+                    entry_price=entry_price,
+                    change_pct=round(price_change_pct, 3),
+                    score=round(effective_score, 1),
+                )
                 entry_result = await self._monitor_entry(
                     symbol=symbol,
                     signal_price=signal_price,
                     initial_score=effective_score,
                 )
                 if entry_result is None:
+                    logger.info(
+                        "Auto-short entry finished with no trade after monitoring",
+                        symbol=symbol,
+                        signal_type=signal_type,
+                    )
                     return
+
                 entry_price, price_change_pct = entry_result
+
+                logger.info(
+                    "Auto-short monitoring result",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    decision="enter_after_monitor",
+                    signal_price=signal_price,
+                    entry_price=entry_price,
+                    change_pct=round(price_change_pct, 3),
+                    score=round(effective_score, 1),
+                )
 
             async with lock:
                 if await self._is_symbol_already_open(symbol):
                     logger.info(
                         "Skipping short after monitoring — trade already opened in parallel",
                         symbol=symbol,
+                        signal_type=signal_type,
                     )
                     return
 
@@ -756,6 +837,7 @@ class AutoShortService:
                     logger.warning(
                         "Failed to persist short trade",
                         symbol=symbol,
+                        signal_type=signal_type,
                         entry_price=entry_price,
                     )
                     return
@@ -783,9 +865,7 @@ class AutoShortService:
                 "Auto short opened",
                 trade_id=trade_id,
                 symbol=symbol,
-                signal_type=(
-                    risk_score.signal_type.value if risk_score.signal_type else None
-                ),
+                signal_type=signal_type,
                 signal_price=signal_price,
                 entry_price=entry_price,
                 change_pct=round(price_change_pct, 3),
@@ -793,7 +873,7 @@ class AutoShortService:
                 sl_price=sl_price,
                 tp_pct=await self._get_target_pnl_pct(),
                 sl_pct=await self._get_target_sl_pct(),
-                score=risk_score.score,
+                score=round(risk_score.score, 1),
             )
 
             await self._notify_opened(
@@ -812,6 +892,7 @@ class AutoShortService:
 
         finally:
             self._pending_symbols.discard(symbol)
+
 
     # ── Trend filter ──────────────────────────────────────────────
 
