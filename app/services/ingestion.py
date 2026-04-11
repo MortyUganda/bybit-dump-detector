@@ -158,7 +158,7 @@ class IngestionService:
                         await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error("Candle refresh loop error", error=str(e))
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
 
     async def _refresh_candles(self, symbol: str) -> None:
