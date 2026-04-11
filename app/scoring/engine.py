@@ -393,6 +393,13 @@ class ScoringEngine:
         if 25 <= score < 50 and sum(1 for fr in factors if fr.triggered) >= 2:
             return SignalType.EARLY_WARNING
 
+        # Universal fallback: any combination of 2+ factors with score >= 45
+        # Catches cases where new features (CVD, OI, liquidation, funding) drive
+        # the score high without RSI/VWAP specifically triggering.
+        all_triggered = sum(1 for fr in factors if fr.triggered)
+        if score >= 45 and all_triggered >= 2:
+            return SignalType.OVERHEATED
+
         return None
 
     def _factor(
