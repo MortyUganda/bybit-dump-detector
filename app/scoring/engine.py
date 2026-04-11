@@ -85,6 +85,7 @@ class RiskScore:
     top_reasons: list[str]
     features_snapshot: Optional[CoinFeatures] = None
     ml_probability: Optional[float] = None
+    trend_blocks_short: bool = False
 
     @property
     def is_actionable(self) -> bool:
@@ -105,6 +106,7 @@ class RiskScore:
             "level": self.level.value,
             "signal_type": self.signal_type.value if self.signal_type else None,
             "triggered_count": self.triggered_count,
+            "trend_blocks_short": self.trend_blocks_short,
             "top_reasons": self.top_reasons,
             "factors": [
                 {
@@ -315,9 +317,14 @@ class ScoringEngine:
         if triggered_count < 2:
             total_score = min(total_score, 30.0)
 
-        if hasattr(features, "trend_context") and features.trend_context:
-            if not features.trend_context.is_safe_to_short():
-                total_score = min(total_score, 30.0)
+        # ── Multi-timeframe trend context (informational only) ───
+        # AutoShortService has its own _check_trend_filter — do not cap score here.
+        # Just record the flag so AutoShortService can use it.
+        trend_blocks_short = (
+            hasattr(features, "trend_context")
+            and features.trend_context is not None
+            and not features.trend_context.is_safe_to_short()
+        )
 
         level = _level_from_score(total_score)
         signal_type = self._classify_signal(features, total_score, factors)
@@ -338,6 +345,7 @@ class ScoringEngine:
             triggered_count=triggered_count,
             top_reasons=top_reasons,
             features_snapshot=features,
+            trend_blocks_short=trend_blocks_short,
         )
 
     def _classify_signal(
