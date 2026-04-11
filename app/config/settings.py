@@ -82,7 +82,7 @@ class Settings(BaseSettings):
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
     # ── Universe Filters ─────────────────────────────────────────
-    universe_min_24h_volume_usdt: float = 500_000.0
+    universe_min_24h_volume_usdt: float = 1_500_000.0
     universe_min_trades_per_hour: int = 50
     universe_min_listing_age_days: int = 14
     universe_exclude_symbols: str = "BTC,ETH,BNB,SOL,XRP,ADA,DOGE,AVAX,DOT,MATIC,LTC,LINK,UNI,ATOM,TRX"
