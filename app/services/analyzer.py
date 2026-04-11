@@ -82,86 +82,142 @@ class AnalyzerService:
                 logger.error("Scoring cycle error", error=str(e))
             await asyncio.sleep(10)
 
-    async def _run_scoring_cycle(self) -> None:
-        self._cycle_count += 1
+async def _run_scoring_cycle(self) -> None:
+    self._cycle_count += 1
 
-        # Refresh BTC market context for correlation filter
-        await self._market_context.refresh()
-        btc_suppressing = self._market_context.should_suppress_shorts()
-        if btc_suppressing:
-            logger.info(
-                "BTC rally detected — suppressing alt short signals",
-                btc_change_15m=round(self._market_context.btc_change_15m, 2),
-            )
-
-        features_list = await self._ingestion.get_all_features()
-
-        if not features_list:
-            logger.debug("No features available yet")
-            return
-
-        scored = []
-        for features in features_list:
-            try:
-                # Populate BTC context on each feature
-                features.btc_change_15m = self._market_context.btc_change_15m
-
-                risk_score = self._scoring.score(features)
-
-                # ML blending (when model is trained)
-                if self._ml_scorer.is_ready():
-                    factor_map = {f.name: f.raw_value for f in risk_score.factors}
-                    ml_features = {
-                        **factor_map,
-                        "btc_change_15m": features.btc_change_15m,
-                        "funding_rate_at_signal": features.funding_rate or 0,
-                        "oi_change_pct_at_signal": features.oi_change_pct,
-                        "trend_strength_1h": (
-                            features.trend_context.trend_strength
-                            if features.trend_context else 0
-                        ),
-                    }
-                    ml_prob = self._ml_scorer.predict_probability(ml_features)
-                    risk_score.ml_probability = ml_prob
-                    # Blend: 70% rule-based + 30% ML
-                    rule_score = risk_score.score
-                    risk_score.score = 0.7 * rule_score + 0.3 * (ml_prob * 100)
-                    risk_score.score = max(0.0, min(100.0, risk_score.score))
-
-                scored.append(risk_score)
-
-                # Persist score to Redis
-                key = REDIS_SCORE_KEY.format(symbol=features.symbol)
-                await self._redis.setex(key, REDIS_SCORE_TTL, json.dumps(risk_score.to_dict()))
-
-                # Check if alert should fire (suppress during BTC rally or ML veto)
-                if risk_score.is_actionable and risk_score.signal_type:
-                    if btc_suppressing:
-                        logger.debug(
-                            "Alert suppressed by BTC correlation filter",
-                            symbol=features.symbol,
-                            score=risk_score.score,
-                        )
-                    elif (risk_score.ml_probability is not None
-                          and risk_score.ml_probability < 0.35):
-                        logger.debug(
-                            "Alert suppressed by ML scorer — pattern historically loses",
-                            symbol=features.symbol,
-                            ml_prob=round(risk_score.ml_probability, 3),
-                        )
-                    else:
-                        await self._maybe_alert(risk_score)
-
-            except Exception as e:
-                logger.debug("Scoring error", symbol=features.symbol, error=str(e))
-
+    await self._market_context.refresh()
+    btc_suppressing = self._market_context.should_suppress_shorts()
+    if btc_suppressing:
         logger.info(
-            "Scoring cycle complete",
-            cycle=self._cycle_count,
-            scored=len(scored),
-            high_risk=sum(1 for s in scored if s.score >= settings.score_alert_threshold),
+            "BTC rally detected — suppressing alt short signals",
+            btc_change_15m=round(self._market_context.btc_change_15m, 2),
         )
 
+    features_list = await self._ingestion.get_all_features()
+
+    if not features_list:
+        logger.debug("No features available yet")
+        return
+
+    scored: list[RiskScore] = []
+    alerted = 0
+    actionable_count = 0
+
+    for features in features_list:
+        try:
+            features.btc_change_15m = self._market_context.btc_change_15m
+            risk_score = self._scoring.score(features)
+
+            if self._ml_scorer.is_ready():
+                factor_map = {f.name: f.raw_value for f in risk_score.factors}
+                ml_features = {
+                    **factor_map,
+                    "btc_change_15m": features.btc_change_15m,
+                    "funding_rate_at_signal": features.funding_rate or 0,
+                    "oi_change_pct_at_signal": features.oi_change_pct,
+                    "trend_strength_1h": (
+                        features.trend_context.trend_strength
+                        if features.trend_context else 0
+                    ),
+                }
+                ml_prob = self._ml_scorer.predict_probability(ml_features)
+                risk_score.ml_probability = ml_prob
+                rule_score = risk_score.score
+                risk_score.score = 0.7 * rule_score + 0.3 * (ml_prob * 100)
+                risk_score.score = max(0.0, min(100.0, risk_score.score))
+
+            scored.append(risk_score)
+
+            key = REDIS_SCORE_KEY.format(symbol=features.symbol)
+            await self._redis.setex(
+                key,
+                REDIS_SCORE_TTL,
+                json.dumps(risk_score.to_dict()),
+            )
+
+            is_high_score = risk_score.score >= settings.score_alert_threshold
+            has_signal = risk_score.signal_type is not None
+            is_actionable = risk_score.is_actionable
+
+            if is_actionable:
+                actionable_count += 1
+
+            if not is_high_score:
+                continue
+
+            if not has_signal:
+                logger.warning(
+                    "High score without signal_type",
+                    symbol=features.symbol,
+                    score=round(risk_score.score, 1),
+                    actionable=is_actionable,
+                    triggered_count=risk_score.triggered_count,
+                    top_reasons=risk_score.top_reasons[:3],
+                )
+                continue
+
+            if not is_actionable:
+                logger.warning(
+                    "High score but not actionable",
+                    symbol=features.symbol,
+                    score=round(risk_score.score, 1),
+                    signal_type=risk_score.signal_type.value,
+                    triggered_count=risk_score.triggered_count,
+                    top_reasons=risk_score.top_reasons[:3],
+                )
+                continue
+
+            if btc_suppressing:
+                logger.info(
+                    "Alert suppressed by BTC correlation filter",
+                    symbol=features.symbol,
+                    score=round(risk_score.score, 1),
+                    signal_type=risk_score.signal_type.value,
+                )
+                continue
+
+            if (
+                risk_score.ml_probability is not None
+                and risk_score.ml_probability < 0.35
+            ):
+                logger.info(
+                    "Alert suppressed by ML scorer",
+                    symbol=features.symbol,
+                    score=round(risk_score.score, 1),
+                    signal_type=risk_score.signal_type.value,
+                    ml_prob=round(risk_score.ml_probability, 3),
+                )
+                continue
+
+            await self._maybe_alert(risk_score)
+            alerted += 1
+
+        except Exception as e:
+            logger.debug("Scoring error", symbol=features.symbol, error=str(e))
+
+    high_risk_scores = [s for s in scored if s.score >= settings.score_alert_threshold]
+    high_risk_scores.sort(key=lambda s: -s.score)
+
+    logger.info(
+        "Scoring cycle complete",
+        cycle=self._cycle_count,
+        scored=len(scored),
+        high_risk=len(high_risk_scores),
+        actionable=actionable_count,
+        alerted=alerted,
+    )
+
+    for risk_score in high_risk_scores[:5]:
+        logger.info(
+            "High-risk candidate",
+            symbol=risk_score.symbol,
+            score=round(risk_score.score, 1),
+            signal_type=risk_score.signal_type.value if risk_score.signal_type else None,
+            actionable=risk_score.is_actionable,
+            triggered_count=risk_score.triggered_count,
+            top_reasons=risk_score.top_reasons[:3],
+        )
+    
     # ── Alert dispatch with cooldown ──────────────────────────────
 
     async def _maybe_alert(self, risk_score: RiskScore) -> None:
