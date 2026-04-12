@@ -292,7 +292,7 @@ class AutoShortService:
         symbol: str,
         signal_price: float,
         initial_score: float,
-    ) -> tuple[float, float] | None:
+    ) -> tuple[float, float, float] | None:
         monitor_attempts = await self._get_monitor_attempts()
         monitor_interval_sec = await self._get_monitor_interval_sec()
 
@@ -341,7 +341,7 @@ class AutoShortService:
                     change_pct=round(price_change_pct, 3),
                     score=round(current_score, 1),
                 )
-                return current_price, price_change_pct
+                return current_price, price_change_pct, float(current_score)
 
             if decision == "cancel_score":
                 logger.info(
@@ -421,7 +421,6 @@ class AutoShortService:
             reason="timeout",
         )
         return None
-
     # ── Notify canceled entry ─────────────────────────────────────
 
     async def _notify_entry_canceled(
@@ -839,7 +838,7 @@ class AutoShortService:
                     price_change_at_entry=price_change_pct,
                     tp_price=tp_price,
                     sl_price=sl_price,
-                    min_score_at_entry=min_score_to_enter,
+                    entry_score=effective_score,   # вот тут ключевой момент
                 )
 
                 if not trade_id:
@@ -1199,7 +1198,7 @@ class AutoShortService:
         price_change_at_entry: float,
         tp_price: float,
         sl_price: float,
-        min_score_at_entry: float | None = None,
+        entry_score: float,
     ) -> int | None:
         try:
             from app.db.models.auto_short import AutoShort
@@ -1212,6 +1211,7 @@ class AutoShortService:
             target_pnl_pct = await self._get_target_pnl_pct()
             target_sl_pct = await self._get_target_sl_pct()
             entry_delay_sec = await self._get_entry_delay_sec()
+            min_score_to_enter = await self._get_min_score_to_enter()
 
             trade = AutoShort(
                 symbol=risk_score.symbol,
@@ -1230,7 +1230,9 @@ class AutoShortService:
                 tp_price=tp_price,
                 sl_price=sl_price,
                 status="open",
-                score=risk_score.score,
+                score=float(risk_score.score),
+                entry_score=float(entry_score),
+                min_score_at_entry=float(min_score_to_enter),
                 triggered_count=risk_score.triggered_count,
                 f_rsi=factor_map.get("rsi_1m") or factor_map.get("rsi"),
                 f_vwap_extension=factor_map.get("vwap_extension"),
@@ -1256,12 +1258,11 @@ class AutoShortService:
                 bid_depth_change_5m=features.bid_depth_change_5m if features else None,
                 btc_change_15m=features.btc_change_15m if features else None,
                 funding_rate_at_signal=features.funding_rate if features else None,
-                oi_change_pct_at_signal=features.oi_change_pct if (features and features.oi_change_pct != 0.0) else None,
+                oi_change_pct_at_signal=features.oi_change_pct if features else None,
                 trend_strength_1h=(
                     features.trend_context.trend_strength
                     if features and features.trend_context else None
                 ),
-                min_score_at_entry=min_score_at_entry,
             )
 
             async with AsyncSessionLocal() as session:
@@ -1273,7 +1274,6 @@ class AutoShortService:
         except Exception as e:
             logger.exception("Auto short DB save failed", error=str(e))
             return None
-
     # ── Update trade in DB ────────────────────────────────────────
 
     async def _update_db(
