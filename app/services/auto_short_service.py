@@ -1249,11 +1249,12 @@ class AutoShortService:
                 realized_vol_1h=features.realized_vol_1h if features else None,
                 volume_24h_usdt=features.volume_24h_usdt if features else None,
                 price_change_5m=features.price_change_5m if features else None,
+                price_change_1h=features.price_change_1h if features else None,
                 spread_pct=features.spread_pct if features else None,
                 bid_depth_change_5m=features.bid_depth_change_5m if features else None,
                 btc_change_15m=features.btc_change_15m if features else None,
                 funding_rate_at_signal=features.funding_rate if features else None,
-                oi_change_pct_at_signal=features.oi_change_pct if features else None,
+                oi_change_pct_at_signal=features.oi_change_pct if (features and features.oi_change_pct != 0.0) else None,
                 trend_strength_1h=(
                     features.trend_context.trend_strength
                     if features and features.trend_context else None

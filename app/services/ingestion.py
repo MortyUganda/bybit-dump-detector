@@ -91,6 +91,7 @@ class IngestionService:
         asyncio.create_task(self._universe_sync_loop())
         asyncio.create_task(self._trend_refresh_loop())
         asyncio.create_task(self._oi_refresh_loop())
+        asyncio.create_task(self._funding_rate_refresh_loop())
 
     async def stop(self) -> None:
         self._running = False
@@ -221,6 +222,36 @@ class IngestionService:
                     calc.update_oi(latest_oi)
         except Exception as e:
             logger.debug("OI refresh failed", symbol=symbol, error=str(e))
+
+    async def _funding_rate_refresh_loop(self) -> None:
+        """Fetch funding rate for all symbols every 5 minutes."""
+        while self._running:
+            try:
+                symbols = list(self._universe.symbols)
+                batch_size = 20
+                for i in range(0, len(symbols), batch_size):
+                    if not self._running:
+                        break
+                    batch = symbols[i: i + batch_size]
+                    tasks = [self._refresh_funding_rate(sym) for sym in batch]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.error("Funding rate refresh loop error", error=str(e))
+            await asyncio.sleep(300)
+
+    async def _refresh_funding_rate(self, symbol: str) -> None:
+        """Fetch latest funding rate for a symbol and update calculator."""
+        calc = self._calculators.get(symbol)
+        if not calc:
+            return
+        try:
+            fr_data = await self._rest.get_funding_rate(symbol, limit=1)
+            if fr_data:
+                rate = float(fr_data[0].get("fundingRate", 0))
+                calc.update_funding_rate(rate)
+        except Exception as e:
+            logger.debug("Funding rate refresh failed", symbol=symbol, error=str(e))
 
     async def _refresh_trend(self, symbol: str) -> None:
         """Fetch 1h candles for a symbol and update trend context."""

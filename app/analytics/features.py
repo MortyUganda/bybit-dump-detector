@@ -94,6 +94,7 @@ class CoinFeatures:
     price_change_1m: float = 0.0      # % price change last 1m
     price_change_5m: float = 0.0      # % price change last 5m
     price_change_15m: float = 0.0     # % price change last 15m
+    price_change_1h: float = 0.0      # % price change last 1h
     price_acceleration: float = 0.0   # 1m change - avg 1m change (speed-up signal)
 
     # ── VWAP extension ────────────────────────────────────────────
@@ -238,6 +239,7 @@ class FeatureCalculator:
         self._last_price: float = 0.0
         self._trend_context: TrendContext = TrendContext()
         self._oi_history: Deque[float] = deque(maxlen=12)  # 12 * 5min = 1 hour
+        self._funding_rate: float | None = None
 
     def update_trade(self, tick: TradeTick) -> None:
         self._trades.append(tick)
@@ -261,6 +263,10 @@ class FeatureCalculator:
     def update_oi(self, oi_value: float) -> None:
         """Append latest open interest value."""
         self._oi_history.append(oi_value)
+
+    def update_funding_rate(self, rate: float) -> None:
+        """Store latest funding rate."""
+        self._funding_rate = rate
 
     def update_trend(self, candles_1h: list[CandleData]) -> None:
         """Update 1h trend context from hourly candles."""
@@ -293,6 +299,7 @@ class FeatureCalculator:
         features = CoinFeatures(symbol=self.symbol, ts=now, last_price=self._last_price)
         features.volume_24h_usdt = self._volume_24h
         features.trend_context = self._trend_context
+        features.funding_rate = self._funding_rate
 
         self._compute_trade_features(features, now)
         self._compute_candle_features(features)
@@ -477,6 +484,10 @@ class FeatureCalculator:
         # --- Price change 15m ---
         if len(closes) >= 15:
             f.price_change_15m = (closes[-1] - closes[-15]) / closes[-15] * 100
+
+        # --- Price change 1h ---
+        if len(closes) >= 60:
+            f.price_change_1h = (closes[-1] - closes[-60]) / closes[-60] * 100
 
         # --- RSI 1m ---
         f.rsi_14_1m = self._calc_rsi(closes, 14)
