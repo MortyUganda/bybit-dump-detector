@@ -839,6 +839,7 @@ class AutoShortService:
                     price_change_at_entry=price_change_pct,
                     tp_price=tp_price,
                     sl_price=sl_price,
+                    min_score_at_entry=min_score_to_enter,
                 )
 
                 if not trade_id:
@@ -1198,6 +1199,7 @@ class AutoShortService:
         price_change_at_entry: float,
         tp_price: float,
         sl_price: float,
+        min_score_at_entry: float | None = None,
     ) -> int | None:
         try:
             from app.db.models.auto_short import AutoShort
@@ -1259,6 +1261,7 @@ class AutoShortService:
                     features.trend_context.trend_strength
                     if features and features.trend_context else None
                 ),
+                min_score_at_entry=min_score_at_entry,
             )
 
             async with AsyncSessionLocal() as session:

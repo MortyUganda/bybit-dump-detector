@@ -94,3 +94,6 @@ class AutoShort(Base):
     f_cvd_divergence: Mapped[float] = mapped_column(Float, nullable=True)
     f_liquidation_cascade: Mapped[float] = mapped_column(Float, nullable=True)
     realized_vol_1h: Mapped[float] = mapped_column(Float, nullable=True)
+
+    # ── Strategy config at entry ─────────────────────────────────
+    min_score_at_entry: Mapped[float] = mapped_column(Float, nullable=True)
