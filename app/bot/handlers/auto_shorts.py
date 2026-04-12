@@ -18,29 +18,24 @@ logger = get_logger(__name__)
 router = Router()
 
 
+import redis.asyncio as aioredis
+from app.config import get_settings
+from app.services.auto_short_service import AutoShortService
+
 async def _get_current_price(symbol: str) -> float | None:
     try:
-        rest = BybitRestClient()
-        await rest.start()
-        try:
-            ticker = await rest.get_ticker(symbol)
-        finally:
-            await rest.stop()
+        settings = get_settings()
+        redis = aioredis.from_url(settings.redis_url, decode_responses=True)
 
-        if not ticker:
-            return None
-
-        price = (
-            ticker.get("lastPrice")
-            or ticker.get("markPrice")
-            or ticker.get("indexPrice")
-        )
+        service = AutoShortService(redis=redis)
+        # используем единый источник истины
+        price = await service._get_price(symbol)  # внутренний метод, но наш код
         return float(price) if price is not None else None
 
     except Exception as e:
         logger.error("Failed to fetch current price", symbol=symbol, error=str(e))
         return None
-
+    
 
 def _calc_short_pnl_pct(
     entry_price: float,
@@ -247,10 +242,12 @@ async def _format_stats() -> str:
 
 async def _manual_close_trade(trade_id: int) -> tuple[bool, str]:
     try:
-        from app.bot.dependencies import get_redis
+        import redis.asyncio as aioredis
+        from app.config import get_settings
         from app.services.auto_short_service import AutoShortService
 
-        redis = await get_redis()
+        settings = get_settings()
+        redis = aioredis.from_url(settings.redis_url, decode_responses=True)
         service = AutoShortService(redis=redis)
         result = await service.close_trade_manually(trade_id)
 
@@ -262,7 +259,6 @@ async def _manual_close_trade(trade_id: int) -> tuple[bool, str]:
     except Exception as e:
         logger.error("Manual close failed", trade_id=trade_id, error=str(e))
         return False, "Ошибка при ручном закрытии сделки."
-
 
 @router.message(Command("auto_shorts"))
 async def cmd_auto_shorts(msg: Message) -> None:

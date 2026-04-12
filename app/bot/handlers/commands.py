@@ -10,6 +10,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
+from app.bot.handlers.auto_shorts import _format_active_shorts, auto_shorts_keyboard
 from app.bot.keyboards import main_menu_keyboard
 from app.utils.logging import get_logger
 
@@ -384,10 +385,8 @@ async def btn_help(msg: Message) -> None:
 
 @router.message(F.text == "🤖 Авто-шорты")
 async def btn_auto_shorts(msg: Message) -> None:
-    from app.bot.handlers.auto_shorts import _format_active_shorts, auto_shorts_keyboard
-    text = _format_active_shorts()
-    await msg.answer(await text, reply_markup=auto_shorts_keyboard())
-
+    text, trade_ids = await _format_active_shorts()
+    await msg.answer(text, reply_markup=auto_shorts_keyboard(trade_ids))
 
 @router.message(F.text == "📊 Статистика")
 async def btn_stats(msg: Message) -> None:
