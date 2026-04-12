@@ -144,7 +144,7 @@ class AutoShortService:
     # ── Redis-backed active shorts ───────────────────────────────
 
     async def _get_active_short(self, trade_id: int) -> dict[str, Any] | None:
-        raw = await self._redis.hget(REDIS_ACTIVE_SHORTS_KEY, str(trade_id))
+        raw = await self._redis.hget(REDIS_ACTIVE_SHORTS_KEY, str(trade_id)) # type: ignore
         if raw:
             return _deserialize_trade(raw)
         return None
@@ -154,13 +154,13 @@ class AutoShortService:
             REDIS_ACTIVE_SHORTS_KEY,
             str(trade_id),
             _serialize_trade(trade),
-        )
+        ) # type: ignore
 
     async def _del_active_short(self, trade_id: int) -> None:
-        await self._redis.hdel(REDIS_ACTIVE_SHORTS_KEY, str(trade_id))
+        await self._redis.hdel(REDIS_ACTIVE_SHORTS_KEY, str(trade_id)) # type: ignore
 
     async def _get_all_active_shorts(self) -> dict[int, dict[str, Any]]:
-        raw_all = await self._redis.hgetall(REDIS_ACTIVE_SHORTS_KEY)
+        raw_all = await self._redis.hgetall(REDIS_ACTIVE_SHORTS_KEY) # type: ignore
         result: dict[int, dict[str, Any]] = {}
         for k, v in raw_all.items():
             result[int(k)] = _deserialize_trade(v)
@@ -289,6 +289,7 @@ class AutoShortService:
 
     async def _monitor_entry(
         self,
+        risk_score: RiskScore,
         symbol: str,
         signal_price: float,
         initial_score: float,
@@ -351,6 +352,15 @@ class AutoShortService:
                     score=round(current_score, 1),
                     min_score=await self._get_min_score_to_enter(),
                 )
+                await self._save_canceled_signal(
+                    risk_score=risk_score,
+                    signal_price=signal_price,
+                    final_price=current_price,
+                    price_change_pct=price_change_pct,
+                    final_score=current_score,
+                    cancel_reason="score_dropped",
+                    entry_mode_candidate="after_monitor",
+                )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
@@ -368,13 +378,22 @@ class AutoShortService:
                     attempt=attempt + 1,
                     change_pct=round(price_change_pct, 3),
                 )
+                await self._save_canceled_signal(
+                    risk_score=risk_score,
+                    signal_price=signal_price,
+                    final_price=current_price,
+                    price_change_pct=price_change_pct,
+                    final_score=current_score,
+                    cancel_reason="score_dropped",
+                    entry_mode_candidate="after_monitor",
+                )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
                     current_price=current_price,
                     price_change_pct=price_change_pct,
                     score=current_score,
-                    reason="price_dropped",
+                    reason="score_dropped",
                 )
                 return None
 
@@ -386,13 +405,22 @@ class AutoShortService:
                     change_pct=round(price_change_pct, 3),
                     max_rise=await self._get_max_rise_pct(),
                 )
+                await self._save_canceled_signal(
+                    risk_score=risk_score,
+                    signal_price=signal_price,
+                    final_price=current_price,
+                    price_change_pct=price_change_pct,
+                    final_score=current_score,
+                    cancel_reason="score_dropped",
+                    entry_mode_candidate="after_monitor",
+                )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
                     current_price=current_price,
                     price_change_pct=price_change_pct,
                     score=current_score,
-                    reason="price_too_high",
+                    reason="score_dropped",
                 )
                 return None
 
@@ -412,13 +440,22 @@ class AutoShortService:
             else 0.0
         )
 
+        await self._save_canceled_signal(
+            risk_score=risk_score,
+            signal_price=signal_price,
+            final_price=current_price,
+            price_change_pct=price_change_pct,
+            final_score=current_score,
+            cancel_reason="score_dropped",
+            entry_mode_candidate="after_monitor",
+        )
         await self._notify_entry_canceled(
             symbol=symbol,
             signal_price=signal_price,
-            current_price=last_price or signal_price,
-            price_change_pct=last_change,
-            score=last_score,
-            reason="timeout",
+            current_price=current_price,
+            price_change_pct=price_change_pct,
+            score=current_score,
+            reason="score_dropped",
         )
         return None
     # ── Notify canceled entry ─────────────────────────────────────
@@ -595,6 +632,191 @@ class AutoShortService:
         except Exception as e:
             logger.exception("Failed to restore trades", error=str(e))
 
+
+    async def _save_canceled_signal(
+        self,
+        risk_score: RiskScore,
+        signal_price: float,
+        final_price: float,
+        price_change_pct: float,
+        final_score: float,
+        cancel_reason: str,
+        entry_mode_candidate: str = "direct",
+    ) -> int | None:
+        try:
+            from app.db.models.canceled_signal import CanceledSignal
+            from app.db.session import AsyncSessionLocal
+
+            features = risk_score.features_snapshot
+            factor_map = {f.name: f.raw_value for f in risk_score.factors}
+
+            entry_delay_sec = await self._get_entry_delay_sec()
+            monitor_attempts = await self._get_monitor_attempts()
+            monitor_interval_sec = await self._get_monitor_interval_sec()
+            min_score_to_enter = await self._get_min_score_to_enter()
+            stabilization_threshold_pct = await self._get_stabilization_threshold_pct()
+            max_rise_pct = await self._get_max_rise_pct()
+            max_entry_drop_pct = await self._get_max_entry_drop_pct()
+
+            row = CanceledSignal(
+                symbol=risk_score.symbol,
+                signal_type=(
+                    risk_score.signal_type.value
+                    if risk_score.signal_type
+                    else "unknown"
+                ),
+                cancel_reason=cancel_reason,
+                signal_price=signal_price,
+                final_price=final_price,
+                price_change_pct=price_change_pct,
+                score=float(risk_score.score),
+                final_score=float(final_score),
+                min_score_at_entry=float(min_score_to_enter),
+                entry_mode_candidate=entry_mode_candidate,
+                triggered_count=risk_score.triggered_count,
+                entry_delay_sec=entry_delay_sec,
+                monitor_attempts=monitor_attempts,
+                monitor_interval_sec=monitor_interval_sec,
+                stabilization_threshold_pct=stabilization_threshold_pct,
+                max_rise_pct=max_rise_pct,
+                max_entry_drop_pct=max_entry_drop_pct,
+                f_rsi=factor_map.get("rsi_1m") or factor_map.get("rsi"),
+                f_vwap_extension=factor_map.get("vwap_extension"),
+                f_volume_zscore=factor_map.get("volume_zscore"),
+                f_trade_imbalance=factor_map.get("trade_imbalance"),
+                f_large_buy_cluster=factor_map.get("large_buy_cluster"),
+                f_price_acceleration=factor_map.get("price_acceleration"),
+                f_consecutive_greens=factor_map.get("consecutive_greens"),
+                f_ob_bid_thinning=factor_map.get("ob_bid_thinning"),
+                f_spread_expansion=factor_map.get("spread_expansion"),
+                f_momentum_loss=factor_map.get("momentum_loss"),
+                f_upper_wick=factor_map.get("upper_wick"),
+                f_funding_rate=factor_map.get("funding_rate"),
+                f_rsi_5m=factor_map.get("rsi_5m"),
+                f_large_sell_cluster=factor_map.get("large_sell_cluster"),
+                f_cvd_divergence=factor_map.get("cvd_divergence"),
+                f_liquidation_cascade=factor_map.get("liquidation_cascade"),
+                realized_vol_1h=features.realized_vol_1h if features else None,
+                volume_24h_usdt=features.volume_24h_usdt if features else None,
+                price_change_5m=features.price_change_5m if features else None,
+                price_change_1h=features.price_change_1h if features else None,
+                spread_pct=features.spread_pct if features else None,
+                bid_depth_change_5m=features.bid_depth_change_5m if features else None,
+                btc_change_15m=features.btc_change_15m if features else None,
+                funding_rate_at_signal=features.funding_rate if features else None,
+                oi_change_pct_at_signal=features.oi_change_pct if features else None,
+                trend_strength_1h=(
+                    features.trend_context.trend_strength
+                    if features and features.trend_context
+                    else None
+                ),
+            )
+
+            async with AsyncSessionLocal() as session:
+                session.add(row)
+                await session.commit()
+                await session.refresh(row)
+                return row.id
+
+        except Exception as e:
+            logger.exception(
+                "Canceled signal DB save failed",
+                symbol=risk_score.symbol,
+                reason=cancel_reason,
+                error=str(e),
+            )
+            return None
+        
+
+    async def save_to_db(
+            self,
+            risk_score: RiskScore,
+            entry_price: float,
+            signal_price: float,
+            price_change_at_entry: float,
+            tp_price: float,
+            sl_price: float,
+            entry_score: float,
+            entry_mode: str = "direct",
+        ) -> int | None:
+            try:
+                from app.db.models.auto_short import AutoShort
+                from app.db.session import AsyncSessionLocal
+
+                features = risk_score.features_snapshot
+                factor_map = {f.name: f.raw_value for f in risk_score.factors}
+
+                leverage = await self._get_leverage()
+                target_pnl_pct = await self._get_target_pnl_pct()
+                target_sl_pct = await self._get_target_sl_pct()
+                entry_delay_sec = await self._get_entry_delay_sec()
+                min_score_to_enter = await self._get_min_score_to_enter()
+
+                trade = AutoShort(
+                    symbol=risk_score.symbol,
+                    signal_type=(
+                        risk_score.signal_type.value
+                        if risk_score.signal_type
+                        else "unknown"
+                    ),
+                    signal_price=signal_price,
+                    entry_price=entry_price,
+                    price_change_at_entry=price_change_at_entry,
+                    entry_delay_sec=entry_delay_sec,
+                    leverage=leverage,
+                    tp_pct=target_pnl_pct,
+                    sl_pct=target_sl_pct,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    status="open",
+                    score=float(risk_score.score),
+                    entry_score=float(entry_score),
+                    min_score_at_entry=float(min_score_to_enter),
+                    entry_mode=entry_mode,
+                    triggered_count=risk_score.triggered_count,
+                    f_rsi=factor_map.get("rsi_1m") or factor_map.get("rsi"),
+                    f_vwap_extension=factor_map.get("vwap_extension"),
+                    f_volume_zscore=factor_map.get("volume_zscore"),
+                    f_trade_imbalance=factor_map.get("trade_imbalance"),
+                    f_large_buy_cluster=factor_map.get("large_buy_cluster"),
+                    f_price_acceleration=factor_map.get("price_acceleration"),
+                    f_consecutive_greens=factor_map.get("consecutive_greens"),
+                    f_ob_bid_thinning=factor_map.get("ob_bid_thinning"),
+                    f_spread_expansion=factor_map.get("spread_expansion"),
+                    f_momentum_loss=factor_map.get("momentum_loss"),
+                    f_upper_wick=factor_map.get("upper_wick"),
+                    f_funding_rate=factor_map.get("funding_rate"),
+                    f_rsi_5m=factor_map.get("rsi_5m"),
+                    f_large_sell_cluster=factor_map.get("large_sell_cluster"),
+                    f_cvd_divergence=factor_map.get("cvd_divergence"),
+                    f_liquidation_cascade=factor_map.get("liquidation_cascade"),
+                    realized_vol_1h=features.realized_vol_1h if features else None,
+                    volume_24h_usdt=features.volume_24h_usdt if features else None,
+                    price_change_5m=features.price_change_5m if features else None,
+                    price_change_1h=features.price_change_1h if features else None,
+                    spread_pct=features.spread_pct if features else None,
+                    bid_depth_change_5m=features.bid_depth_change_5m if features else None,
+                    btc_change_15m=features.btc_change_15m if features else None,
+                    funding_rate_at_signal=features.funding_rate if features else None,
+                    oi_change_pct_at_signal=features.oi_change_pct if features else None,
+                    trend_strength_1h=(
+                        features.trend_context.trend_strength
+                        if features and features.trend_context
+                        else None
+                    ),
+                )
+
+                async with AsyncSessionLocal() as session:
+                    session.add(trade)
+                    await session.commit()
+                    await session.refresh(trade)
+                    return trade.id
+
+            except Exception as e:
+                logger.exception("Auto short DB save failed", error=str(e))
+                return None
+
+
     # ── Open short ────────────────────────────────────────────────
 
     async def open_short(self, risk_score: RiskScore) -> None:
@@ -694,12 +916,21 @@ class AutoShortService:
                     score=round(effective_score, 1),
                     min_score=min_score_to_enter,
                 )
+                await self._save_canceled_signal(
+                    risk_score=risk_score,
+                    signal_price=signal_price,
+                    final_price=current_price,
+                    price_change_pct=price_change_pct,
+                    final_score=current_score,
+                    cancel_reason="score_dropped",
+                    entry_mode_candidate="after_monitor",
+                )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=entry_price,
+                    current_price=current_price,
                     price_change_pct=price_change_pct,
-                    score=effective_score,
+                    score=current_score,
                     reason="score_dropped",
                 )
                 return
@@ -711,13 +942,22 @@ class AutoShortService:
                     signal_type=signal_type,
                     change_pct=round(price_change_pct, 3),
                 )
+                await self._save_canceled_signal(
+                    risk_score=risk_score,
+                    signal_price=signal_price,
+                    final_price=current_price,
+                    price_change_pct=price_change_pct,
+                    final_score=current_score,
+                    cancel_reason="score_dropped",
+                    entry_mode_candidate="after_monitor",
+                )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=entry_price,
+                    current_price=current_price,
                     price_change_pct=price_change_pct,
-                    score=effective_score,
-                    reason="price_dropped",
+                    score=current_score,
+                    reason="score_dropped",
                 )
                 return
 
@@ -728,13 +968,22 @@ class AutoShortService:
                     signal_type=signal_type,
                     change_pct=round(price_change_pct, 3),
                 )
+                await self._save_canceled_signal(
+                    risk_score=risk_score,
+                    signal_price=signal_price,
+                    final_price=current_price,
+                    price_change_pct=price_change_pct,
+                    final_score=current_score,
+                    cancel_reason="score_dropped",
+                    entry_mode_candidate="after_monitor",
+                )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=entry_price,
+                    current_price=current_price,
                     price_change_pct=price_change_pct,
-                    score=effective_score,
-                    reason="price_too_high",
+                    score=current_score,
+                    reason="score_dropped",
                 )
                 return
 
@@ -752,11 +1001,11 @@ class AutoShortService:
                 )
 
                 entry_result = await self._monitor_entry(
+                    risk_score=risk_score,
                     symbol=symbol,
                     signal_price=signal_price,
                     initial_score=effective_score,
                 )
-
                 if entry_result is None:
                     logger.info(
                         "Auto-short entry finished with no trade after monitoring",
