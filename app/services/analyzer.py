@@ -150,10 +150,19 @@ class AnalyzerService:
                             ml_prob=round(risk_score.ml_probability, 3),
                         )
                     else:
+                        if risk_score.score >= 50:
+                            logger.info(
+                                "Pre-alert check",
+                                symbol=features.symbol,
+                                score=round(risk_score.score, 2),
+                                signal_type=str(risk_score.signal_type),
+                                is_actionable=risk_score.is_actionable,
+                                triggered_count=risk_score.triggered_count,
+                            )
                         await self._maybe_alert(risk_score)
 
             except Exception as e:
-                logger.debug("Scoring error", symbol=features.symbol, error=str(e))
+                logger.error("Scoring error", symbol=features.symbol, error=str(e), exc_info=True)
 
         logger.info(
             "Scoring cycle complete",
@@ -173,7 +182,7 @@ class AnalyzerService:
         # Check cooldown
         existing = await self._redis.get(cooldown_key)
         if existing:
-            logger.debug("Alert suppressed by cooldown", symbol=symbol, signal=signal_type)
+            logger.info("Alert suppressed by cooldown", symbol=symbol, score=risk_score.score, signal_type=signal_type)
             return
 
         # Set cooldown
