@@ -135,7 +135,7 @@ class AnalyzerService:
                 await self._redis.setex(key, REDIS_SCORE_TTL, json.dumps(risk_score.to_dict()))
 
                 # Check if alert should fire (suppress during BTC rally or ML veto)
-                if risk_score.is_actionable and risk_score.signal_type:
+                if risk_score.is_alertable and risk_score.signal_type:
                     if btc_suppressing:
                         logger.debug(
                             "Alert suppressed by BTC correlation filter",
@@ -156,7 +156,7 @@ class AnalyzerService:
                                 symbol=features.symbol,
                                 score=round(risk_score.score, 2),
                                 signal_type=str(risk_score.signal_type),
-                                is_actionable=risk_score.is_actionable,
+                                is_alertable=risk_score.is_alertable,
                                 triggered_count=risk_score.triggered_count,
                             )
                         await self._maybe_alert(risk_score)
