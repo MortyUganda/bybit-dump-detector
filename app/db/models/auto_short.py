@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
-
+from sqlalchemy import Column, String, Float
 from app.db.models.base import Base
 
 
@@ -44,6 +44,7 @@ class AutoShort(Base):
     score: Mapped[float] = mapped_column(Float, nullable=False)
     entry_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     min_score_at_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_mode = Column(String(32), nullable=False, default="direct")
     triggered_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
     # ── Результат ─────────────────────────────────────────────────

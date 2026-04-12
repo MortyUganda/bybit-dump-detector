@@ -678,36 +678,7 @@ class AutoShortService:
                 entry_price=entry_price,
                 change_pct=round(price_change_pct, 3),
                 current_score=round(effective_score, 1),
-                min_score_to_enter=min_score_to_enter,
             )
-
-            if getattr(risk_score, "trend_blocks_short", False):
-                logger.info(
-                    "Auto-short blocked by 1h trend filter",
-                    symbol=symbol,
-                    signal_type=signal_type,
-                )
-                return
-
-            trend_ok = await self._check_trend_filter(risk_score)
-            if not trend_ok:
-                logger.info(
-                    "Auto-short entry decision",
-                    symbol=symbol,
-                    signal_type=signal_type,
-                    decision="cancel_trend",
-                    signal_price=signal_price,
-                    entry_price=entry_price,
-                    change_pct=round(price_change_pct, 3),
-                    score=round(effective_score, 1),
-                )
-                logger.info(
-                    "Skipping short — strong uptrend detected",
-                    symbol=symbol,
-                    signal_type=signal_type,
-                    score=round(effective_score, 1),
-                )
-                return
 
             decision = await self._evaluate_entry_conditions(
                 price_change_pct=price_change_pct,
@@ -715,21 +686,9 @@ class AutoShortService:
                 symbol=symbol,
             )
 
-            logger.info(
-                "Auto-short entry decision after delay",
-                symbol=symbol,
-                signal_type=signal_type,
-                decision=decision,
-                signal_price=signal_price,
-                entry_price=entry_price,
-                change_pct=round(price_change_pct, 3),
-                score=round(effective_score, 1),
-                min_score_to_enter=min_score_to_enter,
-            )
-
             if decision == "cancel_score":
                 logger.info(
-                    "Canceled because score dropped",
+                    "Canceled because score dropped before entry",
                     symbol=symbol,
                     signal_type=signal_type,
                     score=round(effective_score, 1),
@@ -747,11 +706,9 @@ class AutoShortService:
 
             if decision == "cancel_drop":
                 logger.info(
-                    "Skipping short — price already dropped too much from signal",
+                    "Canceled because price dropped too much before entry",
                     symbol=symbol,
                     signal_type=signal_type,
-                    signal_price=signal_price,
-                    entry_price=entry_price,
                     change_pct=round(price_change_pct, 3),
                 )
                 await self._notify_entry_canceled(
@@ -765,13 +722,11 @@ class AutoShortService:
                 return
 
             if decision == "cancel_rise":
-                max_rise_pct = await self._get_max_rise_pct()
                 logger.info(
-                    "Canceled because price rose too much after delay",
+                    "Canceled because price rose too much before entry",
                     symbol=symbol,
                     signal_type=signal_type,
                     change_pct=round(price_change_pct, 3),
-                    max_rise=max_rise_pct,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -783,6 +738,8 @@ class AutoShortService:
                 )
                 return
 
+            entry_mode = "direct"
+
             if decision == "monitor":
                 logger.info(
                     "Auto-short entering monitoring mode",
@@ -793,11 +750,13 @@ class AutoShortService:
                     change_pct=round(price_change_pct, 3),
                     score=round(effective_score, 1),
                 )
+
                 entry_result = await self._monitor_entry(
                     symbol=symbol,
                     signal_price=signal_price,
                     initial_score=effective_score,
                 )
+
                 if entry_result is None:
                     logger.info(
                         "Auto-short entry finished with no trade after monitoring",
@@ -806,17 +765,17 @@ class AutoShortService:
                     )
                     return
 
-                entry_price, price_change_pct = entry_result
+                entry_price, price_change_pct, effective_score = entry_result
+                entry_mode = "after_monitor"
 
                 logger.info(
                     "Auto-short monitoring result",
                     symbol=symbol,
                     signal_type=signal_type,
-                    decision="enter_after_monitor",
-                    signal_price=signal_price,
                     entry_price=entry_price,
                     change_pct=round(price_change_pct, 3),
-                    score=round(effective_score, 1),
+                    effective_score=round(effective_score, 1),
+                    entry_mode=entry_mode,
                 )
 
             async with lock:
@@ -831,14 +790,15 @@ class AutoShortService:
                 tp_price = await self._build_tp_price_runtime(entry_price)
                 sl_price = await self._build_sl_price_runtime(entry_price)
 
-                trade_id = await self._save_to_db(
+                trade_id = await self.save_to_db(
                     risk_score=risk_score,
                     entry_price=entry_price,
                     signal_price=signal_price,
                     price_change_at_entry=price_change_pct,
                     tp_price=tp_price,
                     sl_price=sl_price,
-                    entry_score=effective_score,   # вот тут ключевой момент
+                    entry_score=effective_score,
+                    entry_mode=entry_mode,
                 )
 
                 if not trade_id:
@@ -860,8 +820,9 @@ class AutoShortService:
                     "price_change_at_entry": price_change_pct,
                     "tp_price": tp_price,
                     "sl_price": sl_price,
-                    "score": risk_score.score,
+                    "score": effective_score,
                     "entry_ts": datetime.now(timezone.utc),
+                    "entry_mode": entry_mode,
                     "price_15m_saved": False,
                     "price_30m_saved": False,
                     "price_60m_saved": False,
@@ -869,38 +830,43 @@ class AutoShortService:
 
                 await self._set_active_short(trade_id, trade_payload)
 
-            logger.info(
-                "Auto short opened",
-                trade_id=trade_id,
+                logger.info(
+                    "Auto short opened",
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    signal_price=signal_price,
+                    entry_price=entry_price,
+                    change_pct=round(price_change_pct, 3),
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    score=round(effective_score, 1),
+                    entry_mode=entry_mode,
+                )
+
+                await self._notify_opened(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    entry_price=entry_price,
+                    price_change_pct=price_change_pct,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    score=effective_score,
+                )
+
+                task = asyncio.create_task(self._monitor_trade(trade_id))
+                self._track_task(trade_id, task)
+
+        except Exception as e:
+            logger.exception(
+                "Open short failed",
                 symbol=symbol,
                 signal_type=signal_type,
-                signal_price=signal_price,
-                entry_price=entry_price,
-                change_pct=round(price_change_pct, 3),
-                tp_price=tp_price,
-                sl_price=sl_price,
-                tp_pct=await self._get_target_pnl_pct(),
-                sl_pct=await self._get_target_sl_pct(),
-                score=round(risk_score.score, 1),
+                error=str(e),
             )
-
-            await self._notify_opened(
-                trade_id=trade_id,
-                symbol=symbol,
-                signal_price=signal_price,
-                entry_price=entry_price,
-                price_change_pct=price_change_pct,
-                tp_price=tp_price,
-                sl_price=sl_price,
-                score=risk_score.score,
-            )
-
-            task = asyncio.create_task(self._monitor_trade(trade_id))
-            self._track_task(trade_id, task)
-
         finally:
             self._pending_symbols.discard(symbol)
-
 
     # ── Trend filter ──────────────────────────────────────────────
 
@@ -1189,93 +1155,7 @@ class AutoShortService:
             )
 
     # ── Save trade to DB ──────────────────────────────────────────
-
-    async def _save_to_db(
-        self,
-        risk_score: RiskScore,
-        entry_price: float,
-        signal_price: float,
-        price_change_at_entry: float,
-        tp_price: float,
-        sl_price: float,
-        entry_score: float,
-    ) -> int | None:
-        try:
-            from app.db.models.auto_short import AutoShort
-            from app.db.session import AsyncSessionLocal
-
-            features = risk_score.features_snapshot
-            factor_map = {f.name: f.raw_value for f in risk_score.factors}
-
-            leverage = await self._get_leverage()
-            target_pnl_pct = await self._get_target_pnl_pct()
-            target_sl_pct = await self._get_target_sl_pct()
-            entry_delay_sec = await self._get_entry_delay_sec()
-            min_score_to_enter = await self._get_min_score_to_enter()
-
-            trade = AutoShort(
-                symbol=risk_score.symbol,
-                signal_type=(
-                    risk_score.signal_type.value
-                    if risk_score.signal_type
-                    else "unknown"
-                ),
-                signal_price=signal_price,
-                entry_price=entry_price,
-                price_change_at_entry=price_change_at_entry,
-                entry_delay_sec=entry_delay_sec,
-                leverage=leverage,
-                tp_pct=target_pnl_pct,
-                sl_pct=target_sl_pct,
-                tp_price=tp_price,
-                sl_price=sl_price,
-                status="open",
-                score=float(risk_score.score),
-                entry_score=float(entry_score),
-                min_score_at_entry=float(min_score_to_enter),
-                triggered_count=risk_score.triggered_count,
-                f_rsi=factor_map.get("rsi_1m") or factor_map.get("rsi"),
-                f_vwap_extension=factor_map.get("vwap_extension"),
-                f_volume_zscore=factor_map.get("volume_zscore"),
-                f_trade_imbalance=factor_map.get("trade_imbalance"),
-                f_large_buy_cluster=factor_map.get("large_buy_cluster"),
-                f_price_acceleration=factor_map.get("price_acceleration"),
-                f_consecutive_greens=factor_map.get("consecutive_greens"),
-                f_ob_bid_thinning=factor_map.get("ob_bid_thinning"),
-                f_spread_expansion=factor_map.get("spread_expansion"),
-                f_momentum_loss=factor_map.get("momentum_loss"),
-                f_upper_wick=factor_map.get("upper_wick"),
-                f_funding_rate=factor_map.get("funding_rate"),
-                f_rsi_5m=factor_map.get("rsi_5m"),
-                f_large_sell_cluster=factor_map.get("large_sell_cluster"),
-                f_cvd_divergence=factor_map.get("cvd_divergence"),
-                f_liquidation_cascade=factor_map.get("liquidation_cascade"),
-                realized_vol_1h=features.realized_vol_1h if features else None,
-                volume_24h_usdt=features.volume_24h_usdt if features else None,
-                price_change_5m=features.price_change_5m if features else None,
-                price_change_1h=features.price_change_1h if features else None,
-                spread_pct=features.spread_pct if features else None,
-                bid_depth_change_5m=features.bid_depth_change_5m if features else None,
-                btc_change_15m=features.btc_change_15m if features else None,
-                funding_rate_at_signal=features.funding_rate if features else None,
-                oi_change_pct_at_signal=features.oi_change_pct if features else None,
-                trend_strength_1h=(
-                    features.trend_context.trend_strength
-                    if features and features.trend_context else None
-                ),
-            )
-
-            async with AsyncSessionLocal() as session:
-                session.add(trade)
-                await session.commit()
-                await session.refresh(trade)
-                return trade.id
-
-        except Exception as e:
-            logger.exception("Auto short DB save failed", error=str(e))
-            return None
-    # ── Update trade in DB ────────────────────────────────────────
-
+ 
     async def _update_db(
         self,
         trade_id: int,
