@@ -6,6 +6,7 @@ from app.bot.handlers.settings import router as settings_router
 from app.bot.handlers.watchlist import router as watchlist_router
 from app.bot.handlers.nav import router as nav_router
 from app.bot.handlers.strategy import router as strategy_router
+from app.bot.handlers.auto_shorts import router as auto_shorts_router
 
 __all__ = [
     "commands_router",
@@ -16,4 +17,5 @@ __all__ = [
     "watchlist_router",
     "nav_router",
     "strategy_router",
+    "auto_shorts_router",
 ]

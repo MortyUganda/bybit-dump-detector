@@ -1084,6 +1084,60 @@ class AutoShortService:
         await self._notify_closed(trade_id, trade["symbol"], exit_price, pnl, reason)
         await self._del_active_short(trade_id)
 
+
+    async def close_trade_manually(self, trade_id: int) -> str | None:
+        trade = await self._get_active_short(trade_id)
+        if not trade:
+            logger.info("Manual close skipped — trade not active in redis", trade_id=trade_id)
+            return None
+
+        if trade.get("status") != "open":
+            logger.info(
+                "Manual close skipped — trade already not open",
+                trade_id=trade_id,
+                status=trade.get("status"),
+            )
+            return None
+
+        task = self._trade_tasks.pop(trade_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.info("Trade monitor cancelled before manual close", trade_id=trade_id)
+            except Exception as e:
+                logger.warning(
+                    "Trade monitor cancel raised during manual close",
+                    trade_id=trade_id,
+                    error=str(e),
+                )
+
+        trade = await self._get_active_short(trade_id)
+        if not trade or trade.get("status") != "open":
+            return None
+
+        symbol = trade["symbol"]
+        current_price = await self._get_price(symbol)
+        if not current_price:
+            logger.warning(
+                "Manual close failed — no current price",
+                trade_id=trade_id,
+                symbol=symbol,
+            )
+            return None
+
+        pnl = await self._calc_short_pnl_pct(trade["entry_price"], current_price)
+        await self._close_trade(trade_id, current_price, "closed_manual", pnl)
+
+        return (
+            f"✋ <b>Сделка закрыта вручную</b>\n\n"
+            f"📌 #{trade_id} {symbol}\n"
+            f"💰 Вход: <b>${float(trade['entry_price']):.6g}</b>\n"
+            f"💹 Выход: <b>${float(current_price):.6g}</b>\n"
+            f"📊 Результат: <b>{pnl:+.2f}%</b>"
+        )
+
     # ── Save price snapshots ──────────────────────────────────────
 
     async def _save_price_snapshot(
