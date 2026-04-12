@@ -102,7 +102,7 @@ class AlertManager:
             )
             return
 
-        if not risk_score.is_actionable:
+        if not risk_score.is_alertable:
             logger.debug(
                 "Auto short skipped — score is not actionable",
                 symbol=symbol,
