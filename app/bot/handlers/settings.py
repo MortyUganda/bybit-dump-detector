@@ -99,7 +99,7 @@ async def settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder.button(text=alerts_label, callback_data="settings:toggle:alerts_enabled")
 
     # Минимальный score
-    score_options = [30, 45, 60, 75]
+    score_options = [45, 50, 55, 60]
     for score in score_options:
         marker = "✅ " if s["min_score"] == score else ""
         builder.button(
