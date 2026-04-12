@@ -22,6 +22,7 @@ VALID_SIGNAL_TYPES = {
 DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "enabled": True,
     "allowed_signal_types": [
+        "overheated",
         "reversal_risk",
         "dump_started",
     ],
