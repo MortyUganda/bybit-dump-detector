@@ -85,15 +85,24 @@ class AnalyzerService:
         while self._running:
             try:
                 await self._run_scoring_cycle()
-            except Exception as e:
-                logger.error("Scoring cycle error", error=str(e))
+            except asyncio.CancelledError:
+                logger.info("Scoring loop cancelled")
+                return
+            except Exception:
+                logger.exception("Scoring loop error — will retry in 10s")
+                await asyncio.sleep(10)
+                continue
             await asyncio.sleep(10)
 
     async def _run_scoring_cycle(self) -> None:
         self._cycle_count += 1
 
         # Refresh BTC market context for correlation filter
-        await self._market_context.refresh()
+        try:
+            await self._market_context.refresh()
+        except Exception:
+            logger.exception("Market context refresh failed — using stale data")
+
         btc_suppressing = self._market_context.should_suppress_shorts()
         if btc_suppressing:
             logger.info(
@@ -248,8 +257,13 @@ class AnalyzerService:
         while self._running:
             try:
                 await self._rebuild_overvalued()
-            except Exception as e:
-                logger.error("Overvalued rebuild error", error=str(e))
+            except asyncio.CancelledError:
+                logger.info("Overvalued loop cancelled")
+                return
+            except Exception:
+                logger.exception("Overvalued loop error — will retry in 60s")
+                await asyncio.sleep(60)
+                continue
             await asyncio.sleep(300)
 
     async def _rebuild_overvalued(self) -> None:
