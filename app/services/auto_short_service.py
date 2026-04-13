@@ -12,6 +12,7 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
+from app.analytics.market_context import MarketContext
 from app.config import get_settings
 from app.scoring.engine import RiskScore
 from app.services.runtime_config import get_runtime_strategy_config
@@ -39,6 +40,9 @@ MAX_TRADE_DURATION = 60 * 60 * 4
 
 REDIS_ACTIVE_SHORTS_KEY = "active_shorts"
 
+# Block auto-short entry if BTC pumped >1% in 15m
+BTC_ENTRY_FILTER_THRESHOLD = 1.0
+
 
 def _serialize_trade(trade: dict[str, Any]) -> str:
     data = dict(trade)
@@ -59,6 +63,7 @@ class AutoShortService:
         self._redis = redis
         self._bot = bot
         self._rest_client = rest_client
+        self._market_context = MarketContext(rest_client) if rest_client else None
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._trade_tasks: dict[int, asyncio.Task] = {}
         self._canceled_price_tasks: set[asyncio.Task] = set()
@@ -974,6 +979,40 @@ class AutoShortService:
                     signal_type=signal_type,
                 )
                 return
+
+            # ── Max concurrent shorts limit ───────────────────────
+            all_trades = await self._get_all_active_shorts()
+            open_count = sum(
+                1 for t in all_trades.values() if t.get("status") == "open"
+            )
+            if open_count >= settings.max_concurrent_shorts:
+                logger.info(
+                    "Max concurrent shorts reached",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    open_count=open_count,
+                    limit=settings.max_concurrent_shorts,
+                )
+                return
+
+            # ── BTC rally filter at entry ─────────────────────────
+            if self._market_context:
+                try:
+                    await self._market_context.refresh()
+                    if self._market_context.btc_change_15m > BTC_ENTRY_FILTER_THRESHOLD:
+                        logger.info(
+                            "Short blocked by BTC rally filter at entry",
+                            symbol=symbol,
+                            signal_type=signal_type,
+                            btc_change_15m=round(self._market_context.btc_change_15m, 2),
+                            threshold=BTC_ENTRY_FILTER_THRESHOLD,
+                        )
+                        return
+                except Exception as e:
+                    logger.warning(
+                        "BTC entry filter check failed — proceeding",
+                        error=str(e),
+                    )
 
             if not await self._check_trend_filter(risk_score):
                 logger.info(

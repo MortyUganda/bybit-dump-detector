@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     def excluded_base_assets(self) -> set[str]:
         return {s.strip().upper() for s in self.universe_exclude_symbols.split(",") if s.strip()}
 
+    # ── Auto Short ──────────────────────────────────────────────
+    max_concurrent_shorts: int = 5
+
     # ── Scoring ───────────────────────────────────────────────────
     score_alert_threshold: int = 50
     score_critical_threshold: int = 75

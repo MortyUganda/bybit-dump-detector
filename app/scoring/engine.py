@@ -313,14 +313,23 @@ class ScoringEngine:
         if triggered_count < 2:
             total_score = min(total_score, 30.0)
 
-        # ── Multi-timeframe trend context (informational only) ───
-        # AutoShortService has its own _check_trend_filter — do not cap score here.
-        # Just record the flag so AutoShortService can use it.
+        # ── Multi-timeframe trend context ─────────────────────────
         trend_blocks_short = (
             hasattr(features, "trend_context")
             and features.trend_context is not None
             and not features.trend_context.is_safe_to_short()
         )
+
+        if trend_blocks_short:
+            pre_penalty = total_score
+            total_score = max(0.0, total_score - 10.0)
+            logger.info(
+                "Trend penalty applied",
+                symbol=features.symbol,
+                penalty=-10,
+                score_before=round(pre_penalty, 1),
+                score_after=round(total_score, 1),
+            )
 
         level = _level_from_score(total_score)
         signal_type = self._classify_signal(features, total_score, factors)
@@ -354,11 +363,11 @@ class ScoringEngine:
 
         large_sell_f = factor_map.get("large_sell_cluster")
         if (
-            f.price_change_5m < -3.0
+            f.price_change_5m < -1.5
             and f.bid_depth_change_5m < -40.0
             and f.trade_imbalance_5m < -0.3
         ) or (
-            f.price_change_5m < -2.0
+            f.price_change_5m < -1.0
             and large_sell_f and large_sell_f.triggered
             and f.bid_depth_change_5m < -30.0
         ):
