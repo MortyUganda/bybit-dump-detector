@@ -3,14 +3,13 @@
 import pandas as pd
 import lightgbm as lgb
 from sklearn.metrics import roc_auc_score, accuracy_score
-from sklearn.model_selection import train_test_split
 
 def load_data(conn_str: str) -> pd.DataFrame:
     # тут лучше сразу SQL по auto_shorts
     query = """
     SELECT
         id,
-        entryts,
+        entry_ts,
         ml_label,
         score AS signal_score,
         -- market/volatility features
@@ -44,12 +43,12 @@ def load_data(conn_str: str) -> pd.DataFrame:
     FROM auto_shorts
     WHERE status = 'closed'
       AND ml_label IS NOT NULL
-    ORDER BY entryts
+    ORDER BY entry_ts
     """
     df = pd.read_sql(query, conn_str)
     return df
 
-def filter_and_prepare(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+def filter_and_prepare(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     # ключевые фичи — без них выбрасываем строку
     key_cols = [
         "signal_score",
@@ -72,15 +71,15 @@ def filter_and_prepare(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     # таргет
     y = df["ml_label"].astype(int)
 
-    # список фичей: все числовые, кроме id, entryts, ml_label
-    drop_cols = ["id", "entryts", "ml_label"]
+    # список фичей: все числовые, кроме id, entry_ts, ml_label
+    drop_cols = ["id", "entry_ts", "ml_label"]
     feature_cols = [c for c in df.columns if c not in drop_cols]
 
     # оставшиеся NaN (в основном в f_*) заменяем на 0
     df[feature_cols] = df[feature_cols].fillna(0.0)
 
     X = df[feature_cols]
-    return X, y, df[["id", "entryts"]]
+    return X, y, df[["id", "entry_ts"]]
 
 def time_based_split(X, y, meta, test_fraction: float = 0.2):
     n = len(X)
@@ -114,7 +113,6 @@ def train_lgbm(X_train, y_train):
         num_boost_round=200,
         valid_sets=[train_data],
         valid_names=["train"],
-        verbose_eval=False,
     )
     return model
 
@@ -131,7 +129,8 @@ def evaluate(model, X_test, y_test, threshold: float = 0.5):
     }
 
 def main():
-    conn_str = "postgresql+psycopg2://user:pass@host:port/dbname"
+    import os
+    conn_str = os.environ.get("DATABASE_URL", "postgresql+psycopg2://dumpuser:dumppass@localhost:5433/dumpdetector")
 
     df = load_data(conn_str)
     X, y, meta = filter_and_prepare(df)

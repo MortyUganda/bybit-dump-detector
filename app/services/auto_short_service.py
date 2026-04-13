@@ -1249,16 +1249,16 @@ class AutoShortService:
         trailing_activated = False
         max_pnl_seen = 0.0
 
-        # Берём актуальные TP/SL из рантайма (в PnL%, а не в движении цены)
-        target_pnl_pct = await self._get_target_pnl_pct()  # например, 20.0
-        target_sl_pct = await self._get_target_sl_pct()    # например, 10.0
-
-        trailing_activate_pnl = target_pnl_pct * TRAILING_FROM_TP_FRACTION
-        lock_in_pnl = target_pnl_pct * LOCK_IN_FROM_TP_FRACTION
-
         while trade["status"] == "open":
             trade_monitor_interval = await self._get_trade_monitor_interval()
             max_trade_duration = await self._get_max_trade_duration()
+
+            # Берём актуальные TP/SL из рантайма (в PnL%, а не в движении цены)
+            target_pnl_pct = await self._get_target_pnl_pct()  # например, 20.0
+            target_sl_pct = await self._get_target_sl_pct()    # например, 10.0
+
+            trailing_activate_pnl = target_pnl_pct * TRAILING_FROM_TP_FRACTION
+            lock_in_pnl = target_pnl_pct * LOCK_IN_FROM_TP_FRACTION
 
             await asyncio.sleep(trade_monitor_interval)
 
