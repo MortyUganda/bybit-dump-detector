@@ -17,8 +17,7 @@ from app.utils.logging import get_logger, setup_logging
 setup_logging("INFO")
 logger = get_logger(__name__)
 
-CREATE_VIEWS_SQL = """
--- ── ml_opened_vs_canceled ────────────────────────────────────
+CREATE_VIEW_OPENED_VS_CANCELED_SQL = """
 CREATE OR REPLACE VIEW ml_opened_vs_canceled AS
 
 SELECT
@@ -137,9 +136,10 @@ SELECT
     NULL::DOUBLE PRECISION      AS pnl_pct,
     NULL::INTEGER               AS ml_label,
     NULL::VARCHAR(20)           AS close_reason
-FROM canceled_signals c;
+FROM canceled_signals c
+"""
 
--- ── ml_opened_only_profitable ────────────────────────────────
+CREATE_VIEW_OPENED_PROFITABLE_SQL = """
 CREATE OR REPLACE VIEW ml_opened_only_profitable AS
 SELECT
     a.id,
@@ -199,7 +199,7 @@ SELECT
     a.price_30m_ts,
     a.price_60m_ts
 FROM auto_shorts a
-WHERE a.status = 'closed';
+WHERE a.status = 'closed'
 """
 
 
@@ -207,8 +207,11 @@ async def run_migration() -> None:
     from sqlalchemy import text
 
     async with engine.begin() as conn:
-        await conn.execute(text(CREATE_VIEWS_SQL))
-    logger.info("ML views created successfully")
+        await conn.execute(text(CREATE_VIEW_OPENED_VS_CANCELED_SQL))
+        logger.info("View ml_opened_vs_canceled created")
+        await conn.execute(text(CREATE_VIEW_OPENED_PROFITABLE_SQL))
+        logger.info("View ml_opened_only_profitable created")
+    logger.info("ML views migration completed successfully")
 
 
 if __name__ == "__main__":
