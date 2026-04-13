@@ -99,7 +99,7 @@ class RiskScore:
         return self.score >= 45 and self.triggered_count >= 2
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "symbol": self.symbol,
             "ts": self.ts,
             "score": round(self.score, 1),
@@ -118,6 +118,9 @@ class RiskScore:
                 for f in sorted(self.factors, key=lambda x: -x.contribution)
             ],
         }
+        if self.features_snapshot:
+            d["features_snapshot"] = {"last_price": self.features_snapshot.last_price}
+        return d
 
 
 def _level_from_score(score: float) -> RiskLevel:

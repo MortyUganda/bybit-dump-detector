@@ -88,7 +88,6 @@ class CoinFeatures:
     volume_1m: float = 0.0            # current 1m volume (USDT turnover)
     volume_zscore_1m: float = 0.0     # z-score vs rolling 60-period mean (trade-based)
     volume_zscore_candle: float = 0.0 # z-score from candle turnover (candle-based)
-    volume_ratio_5m: float = 0.0      # 5m volume / avg 5m volume (rolling 12 periods)
 
     # ── Price momentum ────────────────────────────────────────────
     price_change_1m: float = 0.0      # % price change last 1m
@@ -126,7 +125,6 @@ class CoinFeatures:
     bid_depth_change_5m: float = 0.0  # % change in bid depth (negative = thinning)
 
     # ── Open Interest (perpetual only, None for spot) ─────────────
-    oi_change_pct_1h: float | None = None  # % OI change in last hour
     oi_change_pct: float = 0.0             # % change vs 5 min ago
     oi_zscore: float = 0.0                 # z-score of OI change rate
     funding_rate: float | None = None       # latest funding rate

@@ -51,30 +51,37 @@ class AnalyzerService:
         redis: aioredis.Redis,
         db_session_factory=None,
         alert_callback=None,  # async (symbol, risk_score) -> None
+        bot=None,
     ) -> None:
         self._ingestion = ingestion
         self._redis = redis
         self._db = db_session_factory
         self._alert_callback = alert_callback
+        self._bot = bot
         self._scoring = ScoringEngine()
         self._market_context = MarketContext(ingestion._rest)
         self._ml_scorer = MLScorer()
         self._running = False
         self._cycle_count = 0
+        self._tasks: list[asyncio.Task] = []
+        self._overvalued_broadcast_count = 0
 
     async def start(self) -> None:
         self._running = True
         logger.info("Analyzer service started")
-        asyncio.create_task(self._scoring_loop())
-        asyncio.create_task(self._overvalued_loop())
+        self._tasks.append(asyncio.create_task(self._scoring_loop()))
+        self._tasks.append(asyncio.create_task(self._overvalued_loop()))
 
     async def stop(self) -> None:
         self._running = False
+        for task in self._tasks:
+            task.cancel()
+        self._tasks.clear()
 
     # ── Main scoring loop ─────────────────────────────────────────
 
     async def _scoring_loop(self) -> None:
-        """Score all symbols every 30 seconds."""
+        """Score all symbols every 10 seconds."""
         while self._running:
             try:
                 await self._run_scoring_cycle()
@@ -319,9 +326,7 @@ class AnalyzerService:
         # Уведомляем если появились новые монеты
         # или каждые 3 пересчёта (15 минут) если список не пустой
         added_symbols = new_symbols - prev_symbols
-        self._overvalued_broadcast_count = (
-            getattr(self, "_overvalued_broadcast_count", 0) + 1
-        )
+        self._overvalued_broadcast_count += 1
 
         should_broadcast = (added_symbols and top_n) or (
             top_n and self._overvalued_broadcast_count % 3 == 0
@@ -372,15 +377,10 @@ class AnalyzerService:
             )
             keyboard = overvalued_keyboard()
 
-            # Получаем бот через alert_callback
-            if not hasattr(self._alert_callback, "__self__"):
+            if not self._bot:
                 return
 
-            alert_manager = self._alert_callback.__self__
-            if not hasattr(alert_manager, "_bot"):
-                return
-
-            bot = alert_manager._bot
+            bot = self._bot
 
             for user_id in user_ids:
                 try:

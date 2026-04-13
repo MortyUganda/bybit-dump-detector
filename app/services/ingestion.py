@@ -61,6 +61,7 @@ class IngestionService:
         self._ob_analyzer = OrderbookAnalyzer()
         self._ws_spot: BybitWSClient | None = None
         self._running = False
+        self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
         self._running = True
@@ -87,14 +88,17 @@ class IngestionService:
         logger.info("Ingestion service started", symbols=len(symbols))
 
         # Background tasks
-        asyncio.create_task(self._candle_refresh_loop())
-        asyncio.create_task(self._universe_sync_loop())
-        asyncio.create_task(self._trend_refresh_loop())
-        asyncio.create_task(self._oi_refresh_loop())
-        asyncio.create_task(self._funding_rate_refresh_loop())
+        self._tasks.append(asyncio.create_task(self._candle_refresh_loop()))
+        self._tasks.append(asyncio.create_task(self._universe_sync_loop()))
+        self._tasks.append(asyncio.create_task(self._trend_refresh_loop()))
+        self._tasks.append(asyncio.create_task(self._oi_refresh_loop()))
+        self._tasks.append(asyncio.create_task(self._funding_rate_refresh_loop()))
 
     async def stop(self) -> None:
         self._running = False
+        for task in self._tasks:
+            task.cancel()
+        self._tasks.clear()
         if self._ws_spot:
             await self._ws_spot.stop()
 
@@ -141,7 +145,7 @@ class IngestionService:
     # ── REST refresh loops ────────────────────────────────────────
 
     async def _candle_refresh_loop(self) -> None:
-        """Fetch and update 1m/5m candles for all symbols every 60s."""
+        """Fetch and update 1m/5m candles for all symbols every 30s."""
         while self._running:
             try:
                 symbols = list(self._universe.symbols)
@@ -306,6 +310,10 @@ class IngestionService:
                 k: v for k, v in features.__dict__.items()
                 if isinstance(v, (int, float, bool, str, type(None)))
             }
+
+            # Сохраняем trend_context отдельно (dataclass не попадает в фильтр выше)
+            if hasattr(features, 'trend_context') and features.trend_context:
+                features_dict['trend_context'] = features.trend_context.__dict__
 
             await self._redis.setex(key, REDIS_FEATURES_TTL, json.dumps(features_dict))
             return features

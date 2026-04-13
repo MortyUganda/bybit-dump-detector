@@ -104,7 +104,7 @@ class AlertManager:
 
         if not risk_score.is_alertable:
             logger.debug(
-                "Auto short skipped — score is not actionable",
+                "Auto short skipped — score is not alertable",
                 symbol=symbol,
                 score=risk_score.score,
                 signal_type=signal_type,

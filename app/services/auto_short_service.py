@@ -901,6 +901,14 @@ class AutoShortService:
                 )
                 return
 
+            if not await self._check_trend_filter(risk_score):
+                logger.info(
+                    "Short blocked by trend filter",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                )
+                return
+
             signal_price = await self._get_price(symbol)
             if not signal_price:
                 logger.warning(
@@ -910,8 +918,8 @@ class AutoShortService:
                 )
                 return
 
-            entry_delay_sec = await self._get_entry_delay_sec()
-            min_score_to_enter = await self._get_min_score_to_enter()
+            entry_delay_sec = int(strategy.get("entry_delay_sec", ENTRY_DELAY_SEC))
+            min_score_to_enter = float(strategy.get("min_score_to_enter", MIN_SCORE_TO_ENTER))
 
             logger.info(
                 "Short signal received — waiting before entry",

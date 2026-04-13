@@ -110,6 +110,7 @@ async def run_analyzer() -> None:
         ingestion=ingestion,
         redis=redis_client,
         alert_callback=alert_mgr.send_alert,
+        bot=bot,
     )
     await analyzer.start()
 
