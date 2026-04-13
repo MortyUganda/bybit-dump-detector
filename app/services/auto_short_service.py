@@ -61,6 +61,7 @@ class AutoShortService:
         self._rest_client = rest_client
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._trade_tasks: dict[int, asyncio.Task] = {}
+        self._canceled_price_tasks: set[asyncio.Task] = set()
         self._pending_symbols: set[str] = set()
         self._price_cache: dict[str, float] = {}
 
@@ -757,6 +758,7 @@ class AutoShortService:
                     canceled_signal_id=row.id,
                     event1="Canceled signal saved",
                 )
+            self._schedule_canceled_price_updates(row.id, risk_score.symbol)
             return row.id
 
         except Exception as exc:
@@ -770,8 +772,79 @@ class AutoShortService:
                 event1="Canceled signal DB save failed",
             )
             return None
-        
-        
+
+    # ── Delayed price updates for canceled signals ────────────────
+
+    def _schedule_canceled_price_updates(
+        self, canceled_id: int, symbol: str
+    ) -> None:
+        task = asyncio.create_task(
+            self._update_canceled_delayed_prices(canceled_id, symbol)
+        )
+        self._canceled_price_tasks.add(task)
+        task.add_done_callback(self._canceled_price_tasks.discard)
+
+    async def _update_canceled_delayed_prices(
+        self, canceled_id: int, symbol: str
+    ) -> None:
+        from sqlalchemy import update
+        from app.db.models.canceled_signal import CanceledSignal
+        from app.db.session import AsyncSessionLocal
+
+        delays = [
+            (15 * 60, "price_15m", "price_15m_ts"),
+            (30 * 60, "price_30m", "price_30m_ts"),
+            (60 * 60, "price_60m", "price_60m_ts"),
+        ]
+
+        prev_wait = 0
+        for delay_sec, col_price, col_ts in delays:
+            try:
+                await asyncio.sleep(delay_sec - prev_wait)
+                prev_wait = delay_sec
+
+                price = await self._get_price(symbol)
+                if price is None:
+                    logger.warning(
+                        "Canceled price update: price unavailable",
+                        canceled_id=canceled_id,
+                        symbol=symbol,
+                        col=col_price,
+                    )
+                    continue
+
+                now = datetime.now(timezone.utc)
+                async with AsyncSessionLocal() as session:
+                    await session.execute(
+                        update(CanceledSignal)
+                        .where(CanceledSignal.id == canceled_id)
+                        .values(**{col_price: price, col_ts: now})
+                    )
+                    await session.commit()
+
+                logger.info(
+                    "Canceled price snapshot saved",
+                    canceled_id=canceled_id,
+                    symbol=symbol,
+                    col=col_price,
+                    price=price,
+                )
+            except asyncio.CancelledError:
+                logger.info(
+                    "Canceled price update task cancelled",
+                    canceled_id=canceled_id,
+                    symbol=symbol,
+                )
+                return
+            except Exception as e:
+                logger.error(
+                    "Canceled price update failed",
+                    canceled_id=canceled_id,
+                    symbol=symbol,
+                    col=col_price,
+                    error=str(e),
+                )
+
     async def save_to_db(
         self,
         risk_score: RiskScore,

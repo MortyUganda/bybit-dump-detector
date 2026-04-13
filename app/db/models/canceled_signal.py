@@ -74,3 +74,11 @@ class CanceledSignal(Base):
     funding_rate_at_signal: Mapped[float | None] = mapped_column(Float, nullable=True)
     oi_change_pct_at_signal: Mapped[float | None] = mapped_column(Float, nullable=True)
     trend_strength_1h: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Цены через N минут после отмены (для ретроспективного ML) ──
+    price_15m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_30m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_60m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_15m_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    price_30m_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    price_60m_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
