@@ -646,6 +646,17 @@ class AutoShortService:
         cancel_reason: str,
         entry_mode_candidate: str = "direct",
     ) -> int | None:
+        logger.info(
+            "Entering canceled signal save",
+            symbol=risk_score.symbol,
+            cancel_reason=cancel_reason,
+            entry_mode_candidate=entry_mode_candidate,
+            signal_price=signal_price,
+            final_price=final_price,
+            price_change_pct=round(price_change_pct, 3),
+            final_score=round(float(final_score), 2),
+            event1="Entering _save_canceled_signal",
+        )
         from app.db.models.canceled_signal import CanceledSignal
         from app.db.session import AsyncSessionLocal
 
@@ -674,6 +685,7 @@ class AutoShortService:
                     if risk_score.signal_type
                     else "unknown"
                 ),
+
                 cancel_reason=cancel_reason,
                 signal_price=signal_price,
                 final_price=final_price,
@@ -720,24 +732,45 @@ class AutoShortService:
                     else None
                 ),
             )
-
+            logger.info(
+                "Canceled signal row prepared",
+                symbol=risk_score.symbol,
+                cancel_reason=cancel_reason,
+                signal_type=(
+                    risk_score.signal_type.value
+                    if risk_score.signal_type
+                    else "unknown"
+                ),
+                volume_24h_usdt=volume_24h_usdt,
+                has_features=features is not None,
+                event1="Canceled signal row prepared",
+            )
             async with AsyncSessionLocal() as session:
                 session.add(row)
                 await session.commit()
                 await session.refresh(row)
-
+                logger.info(
+                    "Canceled signal saved",
+                    symbol=risk_score.symbol,
+                    cancel_reason=cancel_reason,
+                    canceled_signal_id=row.id,
+                    event1="Canceled signal saved",
+                )
             return row.id
 
         except Exception as exc:
             logger.exception(
                 "Canceled signal DB save failed",
-                extra={
-                    "symbol": risk_score.symbol,
-                    "reason": cancel_reason,
-                    "error": str(exc),
-                },
+                symbol=risk_score.symbol,
+                cancel_reason=cancel_reason,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                has_features=features is not None if "features" in locals() else None,
+                event1="Canceled signal DB save failed",
             )
             return None
+        
+        
     async def save_to_db(
         self,
         risk_score: RiskScore,
