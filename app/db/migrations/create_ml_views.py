@@ -207,6 +207,8 @@ async def run_migration() -> None:
     from sqlalchemy import text
 
     async with engine.begin() as conn:
+        await conn.execute(text("DROP VIEW IF EXISTS ml_opened_vs_canceled"))
+        await conn.execute(text("DROP VIEW IF EXISTS ml_opened_only_profitable"))
         await conn.execute(text(CREATE_VIEW_OPENED_VS_CANCELED_SQL))
         logger.info("View ml_opened_vs_canceled created")
         await conn.execute(text(CREATE_VIEW_OPENED_PROFITABLE_SQL))
