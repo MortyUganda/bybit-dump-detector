@@ -339,16 +339,17 @@ class IngestionService:
         logger.info("Bootstrapping calculators", count=len(symbols))
 
         # Сначала пробуем восстановить из Redis
-        restored = 0
+        restored = set()
         for symbol in symbols:
             calc = self._get_or_create_calculator(symbol)
             if await calc.restore_from_redis(self._redis):
-                restored += 1
+                restored.add(symbol)
 
-        logger.info("Restored from Redis", count=restored, total=len(symbols))
+        logger.info("Restored from Redis", count=len(restored), total=len(symbols))
 
         # Для оставшихся — загружаем с REST
-        tasks = [self._refresh_candles(sym) for sym in symbols]
+        need_refresh = [sym for sym in symbols if sym not in restored]
+        tasks = [self._refresh_candles(sym) for sym in need_refresh]
         batch_size = 20
         for i in range(0, len(tasks), batch_size):
             await asyncio.gather(*tasks[i: i + batch_size], return_exceptions=True)

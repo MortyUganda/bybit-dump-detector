@@ -482,11 +482,12 @@ class AutoShortService:
                 return
 
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
-            min_score_to_enter = await self._get_min_score_to_enter()
-            max_entry_drop_pct = await self._get_max_entry_drop_pct()
-            max_rise_pct = await self._get_max_rise_pct()
-            monitor_attempts = await self._get_monitor_attempts()
-            monitor_interval_sec = await self._get_monitor_interval_sec()
+            strategy = await self._get_strategy()
+            min_score_to_enter = float(strategy.get("min_score_to_enter", MIN_SCORE_TO_ENTER))
+            max_entry_drop_pct = float(strategy.get("max_entry_drop_pct", MAX_ENTRY_DROP_PCT))
+            max_rise_pct = float(strategy.get("max_rise_pct", MAX_RISE_PCT))
+            monitor_attempts = int(strategy.get("monitor_attempts", MONITOR_ATTEMPTS))
+            monitor_interval_sec = int(strategy.get("monitor_interval_sec", MONITOR_INTERVAL_SEC))
 
             reason_details = {
                 "score_dropped": (

@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     postgres_port: int = 5432
     postgres_db: str = "dumpdetector"
     postgres_user: str = "dumpuser"
-    postgres_password: str = "strongpassword123"
+    postgres_password: str = ""
 
     @computed_field
     @property

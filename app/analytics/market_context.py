@@ -33,11 +33,13 @@ class MarketContext:
             return
         try:
             candles = await self._rest.get_klines(
-                "BTCUSDT", interval="15", limit=2, category="linear",
+                "BTCUSDT", interval="15", limit=4, category="linear",
             )
-            if len(candles) >= 2:
-                prev_close = float(candles[-2]["close"])
-                curr_close = float(candles[-1]["close"])
+            # candles[-1] is the current (incomplete) candle — skip it
+            # Use the two most recent completed candles for a stable reading
+            if len(candles) >= 3:
+                prev_close = float(candles[-3]["close"])
+                curr_close = float(candles[-2]["close"])
                 if prev_close > 0:
                     self._btc_change_15m = (curr_close - prev_close) / prev_close * 100
             self._last_update = now

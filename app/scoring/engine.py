@@ -88,13 +88,6 @@ class RiskScore:
     trend_blocks_short: bool = False
 
     @property
-    def is_actionable(self) -> bool:
-        return self.signal_type in {
-            SignalType.REVERSAL_RISK,
-            SignalType.DUMP_STARTED,
-        }
-
-    @property
     def is_alertable(self) -> bool:
         return self.score >= 45 and self.triggered_count >= 2
 

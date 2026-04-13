@@ -110,9 +110,9 @@ class TestOverheatedDetection:
         result = engine.score(overheated_features)
         assert len(result.top_reasons) >= 1
 
-    def test_overheated_is_actionable(self, engine, overheated_features):
+    def test_overheated_is_alertable(self, engine, overheated_features):
         result = engine.score(overheated_features)
-        assert result.triggered_count >= 3
+        assert result.is_alertable is True
 
 
 class TestReversalDetection:
