@@ -21,7 +21,7 @@ class AutoShort(Base):
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     signal_type: Mapped[str] = mapped_column(String(32), nullable=False)
     close_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)
-
+    
     # ── Вход ──────────────────────────────────────────────────────
     signal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)

@@ -384,7 +384,7 @@ class AutoShortService:
                     final_price=current_price,
                     price_change_pct=price_change_pct,
                     final_score=current_score,
-                    cancel_reason="score_dropped",
+                    cancel_reason="price_dropped",
                     entry_mode_candidate="after_monitor",
                 )
                 await self._notify_entry_canceled(
@@ -393,7 +393,7 @@ class AutoShortService:
                     current_price=current_price,
                     price_change_pct=price_change_pct,
                     score=current_score,
-                    reason="score_dropped",
+                    reason="price_dropped",
                 )
                 return None
 
@@ -411,7 +411,7 @@ class AutoShortService:
                     final_price=current_price,
                     price_change_pct=price_change_pct,
                     final_score=current_score,
-                    cancel_reason="score_dropped",
+                    cancel_reason="price_too_high",
                     entry_mode_candidate="after_monitor",
                 )
                 await self._notify_entry_canceled(
@@ -420,7 +420,7 @@ class AutoShortService:
                     current_price=current_price,
                     price_change_pct=price_change_pct,
                     score=current_score,
-                    reason="score_dropped",
+                    reason="price_too_high",
                 )
                 return None
 
@@ -443,21 +443,23 @@ class AutoShortService:
         await self._save_canceled_signal(
             risk_score=risk_score,
             signal_price=signal_price,
-            final_price=current_price,
-            price_change_pct=price_change_pct,
-            final_score=current_score,
-            cancel_reason="score_dropped",
+            final_price=last_price or signal_price,
+            price_change_pct=last_change,
+            final_score=last_score,
+            cancel_reason="timeout",
             entry_mode_candidate="after_monitor",
         )
         await self._notify_entry_canceled(
             symbol=symbol,
             signal_price=signal_price,
-            current_price=current_price,
-            price_change_pct=price_change_pct,
-            score=current_score,
-            reason="score_dropped",
+            current_price=last_price or signal_price,
+            price_change_pct=last_change,
+            score=last_score,
+            reason="timeout",
         )
         return None
+    
+
     # ── Notify canceled entry ─────────────────────────────────────
 
     async def _notify_entry_canceled(
@@ -633,6 +635,7 @@ class AutoShortService:
             logger.exception("Failed to restore trades", error=str(e))
 
 
+
     async def _save_canceled_signal(
         self,
         risk_score: RiskScore,
@@ -643,12 +646,18 @@ class AutoShortService:
         cancel_reason: str,
         entry_mode_candidate: str = "direct",
     ) -> int | None:
-        try:
-            from app.db.models.canceled_signal import CanceledSignal
-            from app.db.session import AsyncSessionLocal
+        from app.db.models.canceled_signal import CanceledSignal
+        from app.db.session import AsyncSessionLocal
 
+        try:
             features = risk_score.features_snapshot
             factor_map = {f.name: f.raw_value for f in risk_score.factors}
+
+            volume_24h_usdt = (
+                features.volume_24h_usdt
+                if features and features.volume_24h_usdt is not None
+                else await self._get_volume_24h_usdt(risk_score.symbol)
+            )
 
             entry_delay_sec = await self._get_entry_delay_sec()
             monitor_attempts = await self._get_monitor_attempts()
@@ -697,7 +706,7 @@ class AutoShortService:
                 f_cvd_divergence=factor_map.get("cvd_divergence"),
                 f_liquidation_cascade=factor_map.get("liquidation_cascade"),
                 realized_vol_1h=features.realized_vol_1h if features else None,
-                volume_24h_usdt=features.volume_24h_usdt if features else None,
+                volume_24h_usdt=volume_24h_usdt,
                 price_change_5m=features.price_change_5m if features else None,
                 price_change_1h=features.price_change_1h if features else None,
                 spread_pct=features.spread_pct if features else None,
@@ -716,106 +725,112 @@ class AutoShortService:
                 session.add(row)
                 await session.commit()
                 await session.refresh(row)
-                return row.id
 
-        except Exception as e:
+            return row.id
+
+        except Exception as exc:
             logger.exception(
                 "Canceled signal DB save failed",
-                symbol=risk_score.symbol,
-                reason=cancel_reason,
-                error=str(e),
+                extra={
+                    "symbol": risk_score.symbol,
+                    "reason": cancel_reason,
+                    "error": str(exc),
+                },
             )
             return None
-        
-
     async def save_to_db(
-            self,
-            risk_score: RiskScore,
-            entry_price: float,
-            signal_price: float,
-            price_change_at_entry: float,
-            tp_price: float,
-            sl_price: float,
-            entry_score: float,
-            entry_mode: str = "direct",
-        ) -> int | None:
-            try:
-                from app.db.models.auto_short import AutoShort
-                from app.db.session import AsyncSessionLocal
+        self,
+        risk_score: RiskScore,
+        entry_price: float,
+        signal_price: float,
+        price_change_at_entry: float,
+        tp_price: float,
+        sl_price: float,
+        entry_score: float,
+        entry_mode: str = "direct",
+    ) -> int | None:
+        try:
+            from app.db.models.auto_short import AutoShort
+            from app.db.session import AsyncSessionLocal
 
-                features = risk_score.features_snapshot
-                factor_map = {f.name: f.raw_value for f in risk_score.factors}
+            features = risk_score.features_snapshot
+            factor_map = {f.name: f.raw_value for f in risk_score.factors}
 
-                leverage = await self._get_leverage()
-                target_pnl_pct = await self._get_target_pnl_pct()
-                target_sl_pct = await self._get_target_sl_pct()
-                entry_delay_sec = await self._get_entry_delay_sec()
-                min_score_to_enter = await self._get_min_score_to_enter()
+            volume_24h_usdt = (
+                features.volume_24h_usdt
+                if features and features.volume_24h_usdt is not None
+                else await self._get_volume_24h_usdt(risk_score.symbol)
+            )
 
-                trade = AutoShort(
-                    symbol=risk_score.symbol,
-                    signal_type=(
-                        risk_score.signal_type.value
-                        if risk_score.signal_type
-                        else "unknown"
-                    ),
-                    signal_price=signal_price,
-                    entry_price=entry_price,
-                    price_change_at_entry=price_change_at_entry,
-                    entry_delay_sec=entry_delay_sec,
-                    leverage=leverage,
-                    tp_pct=target_pnl_pct,
-                    sl_pct=target_sl_pct,
-                    tp_price=tp_price,
-                    sl_price=sl_price,
-                    status="open",
-                    score=float(risk_score.score),
-                    entry_score=float(entry_score),
-                    min_score_at_entry=float(min_score_to_enter),
-                    entry_mode=entry_mode,
-                    triggered_count=risk_score.triggered_count,
-                    f_rsi=factor_map.get("rsi_1m") or factor_map.get("rsi"),
-                    f_vwap_extension=factor_map.get("vwap_extension"),
-                    f_volume_zscore=factor_map.get("volume_zscore"),
-                    f_trade_imbalance=factor_map.get("trade_imbalance"),
-                    f_large_buy_cluster=factor_map.get("large_buy_cluster"),
-                    f_price_acceleration=factor_map.get("price_acceleration"),
-                    f_consecutive_greens=factor_map.get("consecutive_greens"),
-                    f_ob_bid_thinning=factor_map.get("ob_bid_thinning"),
-                    f_spread_expansion=factor_map.get("spread_expansion"),
-                    f_momentum_loss=factor_map.get("momentum_loss"),
-                    f_upper_wick=factor_map.get("upper_wick"),
-                    f_funding_rate=factor_map.get("funding_rate"),
-                    f_rsi_5m=factor_map.get("rsi_5m"),
-                    f_large_sell_cluster=factor_map.get("large_sell_cluster"),
-                    f_cvd_divergence=factor_map.get("cvd_divergence"),
-                    f_liquidation_cascade=factor_map.get("liquidation_cascade"),
-                    realized_vol_1h=features.realized_vol_1h if features else None,
-                    volume_24h_usdt=features.volume_24h_usdt if features else None,
-                    price_change_5m=features.price_change_5m if features else None,
-                    price_change_1h=features.price_change_1h if features else None,
-                    spread_pct=features.spread_pct if features else None,
-                    bid_depth_change_5m=features.bid_depth_change_5m if features else None,
-                    btc_change_15m=features.btc_change_15m if features else None,
-                    funding_rate_at_signal=features.funding_rate if features else None,
-                    oi_change_pct_at_signal=features.oi_change_pct if features else None,
-                    trend_strength_1h=(
-                        features.trend_context.trend_strength
-                        if features and features.trend_context
-                        else None
-                    ),
-                )
+            leverage = await self._get_leverage()
+            target_pnl_pct = await self._get_target_pnl_pct()
+            target_sl_pct = await self._get_target_sl_pct()
+            entry_delay_sec = await self._get_entry_delay_sec()
+            min_score_to_enter = await self._get_min_score_to_enter()
 
-                async with AsyncSessionLocal() as session:
-                    session.add(trade)
-                    await session.commit()
-                    await session.refresh(trade)
-                    return trade.id
+            trade = AutoShort(
+                symbol=risk_score.symbol,
+                signal_type=(
+                    risk_score.signal_type.value
+                    if risk_score.signal_type
+                    else "unknown"
+                ),
+                signal_price=signal_price,
+                entry_price=entry_price,
+                price_change_at_entry=price_change_at_entry,
+                entry_delay_sec=entry_delay_sec,
+                leverage=leverage,
+                tp_pct=target_pnl_pct,
+                sl_pct=target_sl_pct,
+                tp_price=tp_price,
+                sl_price=sl_price,
+                status="open",
+                score=float(risk_score.score),
+                entry_score=float(entry_score),
+                min_score_at_entry=float(min_score_to_enter),
+                entry_mode=entry_mode,
+                triggered_count=risk_score.triggered_count,
+                f_rsi=factor_map.get("rsi_1m") or factor_map.get("rsi"),
+                f_vwap_extension=factor_map.get("vwap_extension"),
+                f_volume_zscore=factor_map.get("volume_zscore"),
+                f_trade_imbalance=factor_map.get("trade_imbalance"),
+                f_large_buy_cluster=factor_map.get("large_buy_cluster"),
+                f_price_acceleration=factor_map.get("price_acceleration"),
+                f_consecutive_greens=factor_map.get("consecutive_greens"),
+                f_ob_bid_thinning=factor_map.get("ob_bid_thinning"),
+                f_spread_expansion=factor_map.get("spread_expansion"),
+                f_momentum_loss=factor_map.get("momentum_loss"),
+                f_upper_wick=factor_map.get("upper_wick"),
+                f_funding_rate=factor_map.get("funding_rate"),
+                f_rsi_5m=factor_map.get("rsi_5m"),
+                f_large_sell_cluster=factor_map.get("large_sell_cluster"),
+                f_cvd_divergence=factor_map.get("cvd_divergence"),
+                f_liquidation_cascade=factor_map.get("liquidation_cascade"),
+                realized_vol_1h=features.realized_vol_1h if features else None,
+                volume_24h_usdt=volume_24h_usdt,
+                price_change_5m=features.price_change_5m if features else None,
+                price_change_1h=features.price_change_1h if features else None,
+                spread_pct=features.spread_pct if features else None,
+                bid_depth_change_5m=features.bid_depth_change_5m if features else None,
+                btc_change_15m=features.btc_change_15m if features else None,
+                funding_rate_at_signal=features.funding_rate if features else None,
+                oi_change_pct_at_signal=features.oi_change_pct if features else None,
+                trend_strength_1h=(
+                    features.trend_context.trend_strength
+                    if features and features.trend_context
+                    else None
+                ),
+            )
 
-            except Exception as e:
-                logger.exception("Auto short DB save failed", error=str(e))
-                return None
+            async with AsyncSessionLocal() as session:
+                session.add(trade)
+                await session.commit()
+                await session.refresh(trade)
+                return trade.id
 
+        except Exception as e:
+            logger.exception("Auto short DB save failed", error=str(e))
+            return None
 
     # ── Open short ────────────────────────────────────────────────
 
@@ -888,7 +903,9 @@ class AutoShortService:
 
             current_score = await self._get_current_score(symbol)
             effective_score = (
-                float(current_score) if current_score is not None else float(risk_score.score)
+                float(current_score)
+                if current_score is not None
+                else float(risk_score.score)
             )
             price_change_pct = self._calc_price_move_pct(signal_price, entry_price)
 
@@ -908,7 +925,10 @@ class AutoShortService:
                 symbol=symbol,
             )
 
+            # ── immediate cancels before monitoring ────────────────
+
             if decision == "cancel_score":
+                current_price = entry_price
                 logger.info(
                     "Canceled because score dropped before entry",
                     symbol=symbol,
@@ -921,21 +941,22 @@ class AutoShortService:
                     signal_price=signal_price,
                     final_price=current_price,
                     price_change_pct=price_change_pct,
-                    final_score=current_score,
+                    final_score=effective_score,
                     cancel_reason="score_dropped",
-                    entry_mode_candidate="after_monitor",
+                    entry_mode_candidate="direct",
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
                     current_price=current_price,
                     price_change_pct=price_change_pct,
-                    score=current_score,
+                    score=effective_score,
                     reason="score_dropped",
                 )
                 return
 
             if decision == "cancel_drop":
+                current_price = entry_price
                 logger.info(
                     "Canceled because price dropped too much before entry",
                     symbol=symbol,
@@ -947,21 +968,22 @@ class AutoShortService:
                     signal_price=signal_price,
                     final_price=current_price,
                     price_change_pct=price_change_pct,
-                    final_score=current_score,
-                    cancel_reason="score_dropped",
-                    entry_mode_candidate="after_monitor",
+                    final_score=effective_score,
+                    cancel_reason="price_dropped",
+                    entry_mode_candidate="direct",
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
                     current_price=current_price,
                     price_change_pct=price_change_pct,
-                    score=current_score,
-                    reason="score_dropped",
+                    score=effective_score,
+                    reason="price_dropped",
                 )
                 return
 
             if decision == "cancel_rise":
+                current_price = entry_price
                 logger.info(
                     "Canceled because price rose too much before entry",
                     symbol=symbol,
@@ -973,19 +995,21 @@ class AutoShortService:
                     signal_price=signal_price,
                     final_price=current_price,
                     price_change_pct=price_change_pct,
-                    final_score=current_score,
-                    cancel_reason="score_dropped",
-                    entry_mode_candidate="after_monitor",
+                    final_score=effective_score,
+                    cancel_reason="price_too_high",
+                    entry_mode_candidate="direct",
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
                     current_price=current_price,
                     price_change_pct=price_change_pct,
-                    score=current_score,
-                    reason="score_dropped",
+                    score=effective_score,
+                    reason="price_too_high",
                 )
                 return
+
+            # ── maybe monitor, maybe enter сразу ──────────────────
 
             entry_mode = "direct"
 
@@ -1026,6 +1050,8 @@ class AutoShortService:
                     effective_score=round(effective_score, 1),
                     entry_mode=entry_mode,
                 )
+
+            # ── final open under lock ─────────────────────────────
 
             async with lock:
                 if await self._is_symbol_already_open(symbol):
@@ -1116,7 +1142,6 @@ class AutoShortService:
             )
         finally:
             self._pending_symbols.discard(symbol)
-
     # ── Trend filter ──────────────────────────────────────────────
 
     async def _check_trend_filter(self, risk_score: RiskScore) -> bool:
@@ -1452,6 +1477,41 @@ class AutoShortService:
                 error=str(e),
             )
             raise
+
+    # ── Get 24h volume usdt ───────────────────────────────────────────────
+    async def _get_volume_24h_usdt(self, symbol: str) -> float | None:
+        try:
+            raw = await self._redis.get(f"features:{symbol}")
+            if raw:
+                data = json.loads(raw)
+                volume = data.get("volume_24h_usdt")
+                if volume is not None and float(volume) > 0:
+                    return float(volume)
+        except Exception as e:
+            logger.debug("Redis features volume fetch failed", symbol=symbol, error=str(e))
+
+        try:
+            raw = await self._redis.get(f"score:{symbol}")
+            if raw:
+                data = json.loads(raw)
+                snapshot = data.get("features_snapshot") or {}
+                volume = snapshot.get("volume_24h_usdt")
+                if volume is not None and float(volume) > 0:
+                    return float(volume)
+        except Exception as e:
+            logger.debug("Redis score volume fetch failed", symbol=symbol, error=str(e))
+
+        if self._rest_client:
+            try:
+                ticker = await self._rest_client.get_ticker(symbol, category="linear")
+                if ticker:
+                    volume = ticker.get("turnover24h") or ticker.get("volume24h")
+                    if volume is not None and float(volume) > 0:
+                        return float(volume)
+            except Exception as e:
+                logger.debug("REST client volume fetch failed", symbol=symbol, error=str(e))
+
+        return None
 
     # ── Price fetch ───────────────────────────────────────────────
 
