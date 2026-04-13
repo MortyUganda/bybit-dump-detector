@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     # ── Auto Short ──────────────────────────────────────────────
     max_concurrent_shorts: int = 5
 
+    # ── Paper Trading Costs ──────────────────────────────────────
+    paper_entry_fee: float = 0.00055   # 0.055% taker fee
+    paper_exit_fee: float = 0.00055    # 0.055% taker fee
+
     # ── Scoring ───────────────────────────────────────────────────
     score_alert_threshold: int = 50
     score_critical_threshold: int = 75

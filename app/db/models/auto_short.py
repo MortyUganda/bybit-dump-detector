@@ -55,6 +55,12 @@ class AutoShort(Base):
     # ml_label: 1 = прибыль, 0 = убыток
     ml_label: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # ── Расходы paper trading ─────────────────────────────────────
+    raw_pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fee_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    slippage_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    funding_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # ── Цены через N минут после входа (для ИИ) ───────────────────
     price_15m: Mapped[float | None] = mapped_column(Float, nullable=True)
     price_30m: Mapped[float | None] = mapped_column(Float, nullable=True)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from datetime import datetime, timezone
 from typing import Any
 
@@ -584,24 +585,33 @@ class AutoShortService:
                 if elapsed >= max_trade_duration:
                     current_price = await self._get_price(trade.symbol)
                     if current_price:
-                        pnl = await self._calc_short_pnl_pct(
+                        raw_pnl = await self._calc_short_pnl_pct(
                             trade.entry_price,
                             current_price,
                         )
+                        leverage = await self._get_leverage()
+                        fee_pct = (settings.paper_entry_fee + settings.paper_exit_fee) * leverage * 100
+                        final_pnl = raw_pnl - fee_pct
                         await self._update_db(
                             trade_id=trade.id,
                             exit_price=current_price,
                             exit_ts=now,
                             status="closed",
                             close_reason="expired",
-                            pnl=pnl,
-                            ml_label=1 if pnl > 0 else 0,
+                            pnl=final_pnl,
+                            ml_label=1 if final_pnl > 0 else 0,
+                            raw_pnl_pct=raw_pnl,
+                            fee_pct=fee_pct,
+                            slippage_pct=0.0,
+                            funding_pct=0.0,
                         )
                         logger.info(
                             "Expired trade closed on restore",
                             trade_id=trade.id,
                             symbol=trade.symbol,
-                            pnl=f"{pnl:+.2f}%",
+                            raw_pnl=f"{raw_pnl:+.2f}%",
+                            fee_pct=f"-{fee_pct:.2f}%",
+                            pnl=f"{final_pnl:+.2f}%",
                         )
                     continue
 
@@ -1370,6 +1380,10 @@ class AutoShortService:
         trailing_activated = False
         max_pnl_seen = 0.0
 
+        # Funding rate tracking: accumulate funding fees across the trade
+        accumulated_funding_pct = 0.0
+        last_funding_hour: int | None = None
+
         while trade["status"] == "open":
             trade_monitor_interval = await self._get_trade_monitor_interval()
             max_trade_duration = await self._get_max_trade_duration()
@@ -1392,6 +1406,28 @@ class AutoShortService:
 
             await self._save_price_snapshot(trade_id, trade, current_price, elapsed, now)
 
+            # ── Funding rate check (00:00, 08:00, 16:00 UTC) ─────
+            funding_hours = {0, 8, 16}
+            current_hour = now.hour
+            if current_hour in funding_hours and current_hour != last_funding_hour:
+                if now.minute < 5:  # within 5 min window of funding moment
+                    funding_rate = await self._get_funding_rate(symbol)
+                    if funding_rate is not None:
+                        leverage = await self._get_leverage()
+                        # For shorts: positive funding → short receives, negative → short pays
+                        # funding_impact_pct = funding_rate * leverage * 100 (as % of margin)
+                        funding_impact_pct = funding_rate * leverage * 100
+                        accumulated_funding_pct += funding_impact_pct
+                        last_funding_hour = current_hour
+                        logger.info(
+                            "Funding rate applied",
+                            trade_id=trade_id,
+                            symbol=symbol,
+                            funding_rate=f"{funding_rate:.6f}",
+                            funding_impact_pct=f"{funding_impact_pct:+.4f}%",
+                            accumulated_funding_pct=f"{accumulated_funding_pct:+.4f}%",
+                        )
+
             pnl = await self._calc_short_pnl_pct(entry_price, current_price)
 
             # Жёсткий аварийный стоп по PnL (защита от багов/дегенерата)
@@ -1402,7 +1438,7 @@ class AutoShortService:
                     symbol=symbol,
                     pnl=f"{pnl:+.2f}%",
                 )
-                await self._close_trade(trade_id, current_price, "sl_hit", pnl)
+                await self._close_trade(trade_id, current_price, "sl_hit", pnl, accumulated_funding_pct)
                 return
 
             # Обновляем максимум профита
@@ -1449,16 +1485,16 @@ class AutoShortService:
 
             # TP/SL/expiry логика остаётся как была
             if current_price <= trade["tp_price"]:
-                await self._close_trade(trade_id, current_price, "tp_hit", pnl)
+                await self._close_trade(trade_id, current_price, "tp_hit", pnl, accumulated_funding_pct)
                 return
 
             if current_price >= trade["sl_price"]:
                 reason = "trailing_sl" if trailing_activated else "sl_hit"
-                await self._close_trade(trade_id, current_price, reason, pnl)
+                await self._close_trade(trade_id, current_price, reason, pnl, accumulated_funding_pct)
                 return
 
             if elapsed >= max_trade_duration:
-                await self._close_trade(trade_id, current_price, "expired", pnl)
+                await self._close_trade(trade_id, current_price, "expired", pnl, accumulated_funding_pct)
                 return
             
 
@@ -1470,6 +1506,7 @@ class AutoShortService:
         exit_price: float,
         reason: str,
         pnl: float,
+        accumulated_funding_pct: float = 0.0,
     ) -> None:
         trade = await self._get_active_short(trade_id)
         if not trade:
@@ -1491,8 +1528,35 @@ class AutoShortService:
             )
             reason = "manual"
 
+        # ── Slippage on exit (shorts: slippage pushes price up = worse) ──
+        slippage_pct = 0.0
+        if reason in ("sl_hit", "trailing_sl"):
+            slip = random.uniform(0.0001, 0.001)  # 0.01-0.1%
+            exit_price *= (1 + slip)
+            slippage_pct = slip * 100  # as percentage
+        elif reason == "tp_hit":
+            slip = random.uniform(0.0001, 0.0005)  # 0.01-0.05%
+            exit_price *= (1 + slip)
+            slippage_pct = slip * 100
+
+        # ── Recalculate PnL with slippage-adjusted exit price ────
+        entry_price = trade["entry_price"]
+        raw_pnl = await self._calc_short_pnl_pct(entry_price, exit_price)
+
+        # ── Fees: entry + exit as % of margin ────────────────────
+        leverage = await self._get_leverage()
+        fee_pct = (settings.paper_entry_fee + settings.paper_exit_fee) * leverage * 100
+
+        # ── Final PnL = raw - fees + funding (funding already signed) ──
+        final_pnl = raw_pnl - fee_pct + accumulated_funding_pct
+
+        # Slippage is already baked into raw_pnl via exit_price adjustment,
+        # but we track it separately for analytics
+        # Convert slippage_pct to margin impact for logging
+        slippage_margin_pct = slippage_pct * leverage
+
         now = datetime.now(timezone.utc)
-        ml_label = 1 if pnl > 0 else 0
+        ml_label = 1 if final_pnl > 0 else 0
 
         trade["status"] = "closed"
         trade["close_reason"] = reason
@@ -1503,8 +1567,12 @@ class AutoShortService:
             exit_ts=now,
             status="closed",
             close_reason=reason,
-            pnl=pnl,
+            pnl=final_pnl,
             ml_label=ml_label,
+            raw_pnl_pct=raw_pnl,
+            fee_pct=fee_pct,
+            slippage_pct=slippage_margin_pct,
+            funding_pct=accumulated_funding_pct,
         )
 
         logger.info(
@@ -1513,12 +1581,25 @@ class AutoShortService:
             symbol=trade["symbol"],
             status="closed",
             close_reason=reason,
-            pnl=f"{pnl:+.2f}%",
-            leverage=await self._get_leverage(),
+            raw_pnl=f"{raw_pnl:+.2f}%",
+            fee_impact=f"-{fee_pct:.2f}%",
+            slippage_impact=f"-{slippage_margin_pct:.3f}%",
+            funding_impact=f"{accumulated_funding_pct:+.4f}%",
+            pnl=f"{final_pnl:+.2f}%",
+            leverage=leverage,
             ml_label=ml_label,
         )
 
-        await self._notify_closed(trade_id, trade["symbol"], exit_price, pnl, reason)
+        logger.info(
+            "Applied costs",
+            trade_id=trade_id,
+            symbol=trade["symbol"],
+            fees=f"-{fee_pct:.2f}%",
+            slippage=f"-{slippage_margin_pct:.3f}%",
+            funding=f"{accumulated_funding_pct:+.4f}%",
+        )
+
+        await self._notify_closed(trade_id, trade["symbol"], exit_price, final_pnl, reason, fee_pct, slippage_margin_pct, accumulated_funding_pct)
         await self._del_active_short(trade_id)
 
 
@@ -1565,14 +1646,19 @@ class AutoShortService:
             return None
 
         pnl = await self._calc_short_pnl_pct(trade["entry_price"], current_price)
-        await self._close_trade(trade_id, current_price, "closed_manual", pnl)
+        await self._close_trade(trade_id, current_price, "closed_manual", pnl, 0.0)
+
+        # Re-read the final PnL after costs are applied by _close_trade
+        leverage = await self._get_leverage()
+        fee_pct = (settings.paper_entry_fee + settings.paper_exit_fee) * leverage * 100
+        final_pnl = pnl - fee_pct
 
         return (
             f"✋ <b>Сделка закрыта вручную</b>\n\n"
             f"📌 #{trade_id} {symbol}\n"
             f"💰 Вход: <b>${float(trade['entry_price']):.6g}</b>\n"
             f"💹 Выход: <b>${float(current_price):.6g}</b>\n"
-            f"📊 Результат: <b>{pnl:+.2f}%</b>"
+            f"📊 Результат: <b>{final_pnl:+.2f}%</b> (комиссии: -{fee_pct:.2f}%)"
         )
 
     # ── Save price snapshots ──────────────────────────────────────
@@ -1636,24 +1722,38 @@ class AutoShortService:
         close_reason: str,
         pnl: float,
         ml_label: int,
+        raw_pnl_pct: float | None = None,
+        fee_pct: float | None = None,
+        slippage_pct: float | None = None,
+        funding_pct: float | None = None,
     ) -> None:
         try:
             from sqlalchemy import update
             from app.db.models.auto_short import AutoShort
             from app.db.session import AsyncSessionLocal
 
+            values = dict(
+                status=status,
+                exit_price=exit_price,
+                exit_ts=exit_ts,
+                pnl_pct=pnl,
+                ml_label=ml_label,
+                close_reason=close_reason,
+            )
+            if raw_pnl_pct is not None:
+                values["raw_pnl_pct"] = raw_pnl_pct
+            if fee_pct is not None:
+                values["fee_pct"] = fee_pct
+            if slippage_pct is not None:
+                values["slippage_pct"] = slippage_pct
+            if funding_pct is not None:
+                values["funding_pct"] = funding_pct
+
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
                     update(AutoShort)
                     .where(AutoShort.id == trade_id)
-                    .values(
-                        status=status,
-                        exit_price=exit_price,
-                        exit_ts=exit_ts,
-                        pnl_pct=pnl,
-                        ml_label=ml_label,
-                        close_reason=close_reason,
-                    )
+                    .values(**values)
                 )
                 await session.commit()
 
@@ -1707,6 +1807,33 @@ class AutoShortService:
                         return float(volume)
             except Exception as e:
                 logger.debug("REST client volume fetch failed", symbol=symbol, error=str(e))
+
+        return None
+
+    # ── Funding rate fetch ────────────────────────────────────────
+
+    async def _get_funding_rate(self, symbol: str) -> float | None:
+        """Get current funding rate from Redis features cache."""
+        try:
+            raw = await self._redis.get(f"features:{symbol}")
+            if raw:
+                data = json.loads(raw)
+                rate = data.get("funding_rate")
+                if rate is not None:
+                    return float(rate)
+        except Exception as e:
+            logger.debug("Redis funding rate fetch failed", symbol=symbol, error=str(e))
+
+        try:
+            raw = await self._redis.get(f"score:{symbol}")
+            if raw:
+                data = json.loads(raw)
+                snapshot = data.get("features_snapshot") or {}
+                rate = snapshot.get("funding_rate")
+                if rate is not None:
+                    return float(rate)
+        except Exception as e:
+            logger.debug("Redis score funding rate fetch failed", symbol=symbol, error=str(e))
 
         return None
 
@@ -1825,6 +1952,9 @@ class AutoShortService:
         exit_price: float,
         pnl: float,
         reason: str,
+        fee_pct: float = 0.0,
+        slippage_pct: float = 0.0,
+        funding_pct: float = 0.0,
     ) -> None:
         if not self._bot:
             logger.warning("Bot not set — cannot send close notification", trade_id=trade_id)
@@ -1853,12 +1983,22 @@ class AutoShortService:
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
             leverage = await self._get_leverage()
 
+            # Build costs breakdown line
+            costs_parts = []
+            if fee_pct > 0:
+                costs_parts.append(f"комиссии: -{fee_pct:.2f}%")
+            if slippage_pct > 0:
+                costs_parts.append(f"slippage: -{slippage_pct:.3f}%")
+            if funding_pct != 0:
+                costs_parts.append(f"funding: {funding_pct:+.4f}%")
+            costs_line = f"\n💸 <i>{', '.join(costs_parts)}</i>" if costs_parts else ""
+
             text = (
                 f"{result_em} <b>Авто-шорт закрыт</b>\n\n"
                 f"📌 <a href=\"{bybit_url}\">{symbol}</a>\n"
                 f"{reason_text}\n\n"
                 f"💰 Выход: <b>${exit_price:.6g}</b>\n"
-                f"P&L: {pnl_em} <b>{pnl:+.2f}%</b>\n"
+                f"P&L: {pnl_em} <b>{pnl:+.2f}%</b>{costs_line}\n"
                 f"⚡ Плечо: {leverage:.0f}x\n\n"
                 f"<i>Сделка #{trade_id} | /stats для статистики</i>"
             )
