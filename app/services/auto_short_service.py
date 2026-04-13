@@ -1225,6 +1225,8 @@ class AutoShortService:
 
         return True
 
+
+
     # ── Monitor trade ─────────────────────────────────────────────
 
     async def _monitor_trade(self, trade_id: int) -> None:
@@ -1236,11 +1238,23 @@ class AutoShortService:
         entry_price = trade["entry_price"]
         entry_ts = trade["entry_ts"]
 
-        TRAILING_ACTIVATE_PCT = 10.0
-        BREAKEVEN_BUFFER_PCT = 0.1
-        MAX_LOSS_PCT = -50.0
+        # Локальные защитные параметры
+        MAX_LOSS_PCT = -50.0  # аварийный стоп по PnL, если что-то пошло совсем не так
+
+        # Трейлинг задаём в долях от целевого TP
+        TRAILING_FROM_TP_FRACTION = 0.4   # включаем трейлинг, когда достигнуто 40% от TP
+        LOCK_IN_FROM_TP_FRACTION  = 0.8   # при 80% от TP фиксируем минимум безубыток
+        MAX_DRAWDOWN_FRACTION     = 0.5   # допускаем откат не больше 50% от max_pnl
 
         trailing_activated = False
+        max_pnl_seen = 0.0
+
+        # Берём актуальные TP/SL из рантайма (в PnL%, а не в движении цены)
+        target_pnl_pct = await self._get_target_pnl_pct()  # например, 20.0
+        target_sl_pct = await self._get_target_sl_pct()    # например, 10.0
+
+        trailing_activate_pnl = target_pnl_pct * TRAILING_FROM_TP_FRACTION
+        lock_in_pnl = target_pnl_pct * LOCK_IN_FROM_TP_FRACTION
 
         while trade["status"] == "open":
             trade_monitor_interval = await self._get_trade_monitor_interval()
@@ -1259,6 +1273,7 @@ class AutoShortService:
 
             pnl = await self._calc_short_pnl_pct(entry_price, current_price)
 
+            # Жёсткий аварийный стоп по PnL (защита от багов/дегенерата)
             if pnl <= MAX_LOSS_PCT:
                 logger.warning(
                     "Max loss reached — emergency stop",
@@ -1269,22 +1284,49 @@ class AutoShortService:
                 await self._close_trade(trade_id, current_price, "sl_hit", pnl)
                 return
 
-            if pnl >= TRAILING_ACTIVATE_PCT and not trailing_activated:
-                breakeven_sl = entry_price * (1 + BREAKEVEN_BUFFER_PCT / 100)
-                if breakeven_sl < trade["sl_price"]:
-                    old_sl = trade["sl_price"]
-                    trade["sl_price"] = breakeven_sl
+            # Обновляем максимум профита
+            if pnl > max_pnl_seen:
+                max_pnl_seen = pnl
+
+            # Трейлинг: как только профит достиг части TP, начинаем подтягивать SL
+            if max_pnl_seen >= trailing_activate_pnl:
+                # желаемый минимальный PnL, который хотим гарантировать
+                # допускаем откат не больше MAX_DRAWDOWN_FRACTION от max_pnl_seen,
+                # но не хуже исходного SL (‑target_sl_pct)
+                desired_min_pnl = max(
+                    -target_sl_pct,
+                    max_pnl_seen * (1.0 - MAX_DRAWDOWN_FRACTION),
+                )
+
+                # если почти достигли TP — гарантируем минимум безубыток
+                if max_pnl_seen >= lock_in_pnl:
+                    desired_min_pnl = max(desired_min_pnl, 0.0)
+
+                # считаем цену SL из желаемого PnL
+                # pnl = (entry_price - sl_price) / entry_price * leverage * 100  (для шорта)
+                leverage = await self._get_leverage()
+                pnl_factor = desired_min_pnl / (leverage * 100.0)
+                new_sl_price = entry_price * (1.0 - pnl_factor)
+
+                old_sl = trade["sl_price"]
+
+                # Обновляем SL только если это улучшает нашу позицию:
+                # для шорта меньшая цена SL = меньше риск/лучше PnL
+                if new_sl_price < old_sl:
+                    trade["sl_price"] = new_sl_price
                     await self._set_active_short(trade_id, trade)
                     trailing_activated = True
                     logger.info(
-                        "Trailing: SL moved to breakeven",
+                        "Trailing SL updated",
                         trade_id=trade_id,
                         symbol=symbol,
+                        max_pnl_seen=f"{max_pnl_seen:+.2f}%",
+                        desired_min_pnl=f"{desired_min_pnl:+.2f}%",
                         old_sl=round(old_sl, 6),
-                        new_sl=round(breakeven_sl, 6),
-                        pnl=f"{pnl:+.2f}%",
+                        new_sl=round(new_sl_price, 6),
                     )
 
+            # TP/SL/expiry логика остаётся как была
             if current_price <= trade["tp_price"]:
                 await self._close_trade(trade_id, current_price, "tp_hit", pnl)
                 return
@@ -1297,6 +1339,7 @@ class AutoShortService:
             if elapsed >= max_trade_duration:
                 await self._close_trade(trade_id, current_price, "expired", pnl)
                 return
+            
 
     # ── Close trade ───────────────────────────────────────────────
 
