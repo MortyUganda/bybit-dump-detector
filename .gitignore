@@ -1,4 +1,11 @@
 dd_venv
 .env
 ml_dumps
-C:\Users\Sergei\Desktop\bybit-dump-detector\ml\data\raw\current\archive
+ml/data/raw/current/canceled_signals.csv
+canceled_signals.csv
+ml/data/raw/current/ml_opened_vs_canceled.parquet
+ml/data/raw/current/ml_opened_only_profitable.parquet
+ml/data/raw/current/canceled_signals.parquet
+ml/data/raw/archive
+
+docker/canceled_signals_dump.csv

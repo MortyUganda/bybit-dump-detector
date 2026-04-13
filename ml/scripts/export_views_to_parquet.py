@@ -21,7 +21,7 @@ RAW_ARCHIVE.mkdir(parents=True, exist_ok=True)
 
 def export_view_to_csv(view: str, csv_path: Path) -> None:
     """
-    COPY view -> CSV через docker compose exec postgres.
+    COPY view/table -> CSV через docker compose exec postgres.
     """
     psql_cmd = [
         "docker",
@@ -55,45 +55,52 @@ def csv_to_parquet(csv_path: Path, parquet_path: Path) -> None:
 
 
 def main() -> None:
-    today = dt.date.today().isoformat()  # например, '2026-04-12'
+    today = dt.date.today().isoformat()  # '2026-04-13'
     archive_dir = RAW_ARCHIVE / today
     archive_dir.mkdir(parents=True, exist_ok=True)
 
-    # Временные CSV в archive/<date>
+    # --- CSV во временный архив ---
     csv_entry = archive_dir / "ml_opened_vs_canceled.csv"
     csv_pnl = archive_dir / "ml_opened_only_profitable.csv"
+    csv_canceled = archive_dir / "canceled_signals.csv"
 
-    # Parquet в archive/<date>
+    # --- Parquet в архив ---
     pq_entry_archive = archive_dir / "ml_opened_vs_canceled.parquet"
     pq_pnl_archive = archive_dir / "ml_opened_only_profitable.parquet"
+    pq_canceled_archive = archive_dir / "canceled_signals.parquet"
 
-    # Parquet в current/
+    # --- Parquet в current/ ---
     pq_entry_current = RAW_CURRENT / "ml_opened_vs_canceled.parquet"
     pq_pnl_current = RAW_CURRENT / "ml_opened_only_profitable.parquet"
+    pq_canceled_current = RAW_CURRENT / "canceled_signals.parquet"
 
     # 1. Экспорт CSV из Postgres
     export_view_to_csv("ml_opened_vs_canceled", csv_entry)
     export_view_to_csv("ml_opened_only_profitable", csv_pnl)
+    # здесь можно использовать либо саму таблицу, либо вьюху, если сделаешь:
+    export_view_to_csv("canceled_signals", csv_canceled)
 
     # 2. CSV -> Parquet (в архив)
     csv_to_parquet(csv_entry, pq_entry_archive)
     csv_to_parquet(csv_pnl, pq_pnl_archive)
+    csv_to_parquet(csv_canceled, pq_canceled_archive)
 
-    # 3. Обновляем current/* из архива
+    # 3. Обновляем current/ snapshots
     print("Updating current/ snapshots ...")
     pq_entry_current.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(pq_entry_archive, pq_entry_current)
     shutil.copy2(pq_pnl_archive, pq_pnl_current)
+    shutil.copy2(pq_canceled_archive, pq_canceled_current)
 
     print("All done.")
     print(f"Archive: {archive_dir}")
     print(f"Current: {pq_entry_current}")
     print(f"         {pq_pnl_current}")
+    print(f"         {pq_canceled_current}")
 
 
 if __name__ == "__main__":
     main()
-
 
 #----------------------------------------------------------------------------------------
 # #Как пользоваться
