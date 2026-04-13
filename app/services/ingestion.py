@@ -286,8 +286,8 @@ class IngestionService:
                 await self._ws_spot.subscribe_trades(list(added))
                 await self._ws_spot.subscribe_tickers(list(added))
                 await self._ws_spot.subscribe_orderbook(list(added))
-                for sym in added:
-                    asyncio.create_task(self._refresh_candles(sym))
+                refresh_tasks = [self._refresh_candles(sym) for sym in added]
+                await asyncio.gather(*refresh_tasks, return_exceptions=True)
 
             if removed and self._ws_spot:
                 await self._ws_spot.unsubscribe(list(removed))
@@ -326,9 +326,14 @@ class IngestionService:
         """Compute and return features for all active symbols."""
         results = []
         for symbol in self._universe.symbols:
-            f = await self.publish_features(symbol)
-            if f:
-                results.append(f)
+            calc = self._calculators.get(symbol)
+            if not calc:
+                continue
+            try:
+                features = calc.compute()
+                results.append(features)
+            except Exception as e:
+                logger.debug("Feature compute error", symbol=symbol, error=str(e))
         return results
 
     # ── Helpers ───────────────────────────────────────────────────

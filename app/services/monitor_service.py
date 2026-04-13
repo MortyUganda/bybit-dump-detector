@@ -27,6 +27,7 @@ class MonitorService:
         self._bot = bot
         self._running = False
         self._alert_sent = False  # не спамить повторными алертами
+        self._task: asyncio.Task | None = None
 
     def set_bot(self, bot) -> None:
         self._bot = bot
@@ -34,10 +35,13 @@ class MonitorService:
     async def start(self) -> None:
         self._running = True
         logger.info("Monitor service started")
-        asyncio.create_task(self._monitor_loop())
+        self._task = asyncio.create_task(self._monitor_loop())
 
     async def stop(self) -> None:
         self._running = False
+        if self._task:
+            self._task.cancel()
+            self._task = None
 
     async def _monitor_loop(self) -> None:
         while self._running:

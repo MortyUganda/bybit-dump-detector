@@ -64,6 +64,7 @@ class BybitWSClient:
         self._session: aiohttp.ClientSession | None = None
         self._running = False
         self._reconnect_delay = 1.0
+        self._connection_task: asyncio.Task | None = None
 
         if settings.bybit_testnet:
             self._url = WS_TESTNET_SPOT_URL if category == "spot" else WS_TESTNET_LINEAR_URL
@@ -73,11 +74,14 @@ class BybitWSClient:
     async def start(self) -> None:
         self._running = True
         self._session = aiohttp.ClientSession()
-        asyncio.create_task(self._connection_loop())
+        self._connection_task = asyncio.create_task(self._connection_loop())
         logger.info("WebSocket client starting", category=self.category, url=self._url)
 
     async def stop(self) -> None:
         self._running = False
+        if self._connection_task:
+            self._connection_task.cancel()
+            self._connection_task = None
         if self._ws and not self._ws.closed:
             await self._ws.close()
         if self._session and not self._session.closed:

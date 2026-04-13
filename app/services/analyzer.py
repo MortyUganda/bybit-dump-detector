@@ -63,18 +63,53 @@ class AnalyzerService:
         self._ml_scorer = MLScorer()
         self._running = False
         self._cycle_count = 0
-        self._tasks: list[asyncio.Task] = []
+        self._tasks: dict[str, asyncio.Task] = {}
         self._overvalued_broadcast_count = 0
 
     async def start(self) -> None:
         self._running = True
         logger.info("Analyzer service started")
-        self._tasks.append(asyncio.create_task(self._scoring_loop()))
-        self._tasks.append(asyncio.create_task(self._overvalued_loop()))
+        self._launch_task("scoring_loop", self._scoring_loop())
+        self._launch_task("overvalued_loop", self._overvalued_loop())
+
+    def _launch_task(self, name: str, coro) -> None:
+        """Create a named task with a done-callback that logs + auto-restarts."""
+        task = asyncio.create_task(coro, name=name)
+        self._tasks[name] = task
+        task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        name = task.get_name()
+        if task.cancelled():
+            logger.info("Analyzer task cancelled", task=name)
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(
+                "Analyzer task died with exception — restarting",
+                task=name,
+                error=str(exc),
+                exc_type=type(exc).__name__,
+            )
+        else:
+            logger.warning(
+                "Analyzer task exited cleanly (should not happen) — restarting",
+                task=name,
+            )
+        # Auto-restart if still running
+        if self._running:
+            coro_map = {
+                "scoring_loop": self._scoring_loop,
+                "overvalued_loop": self._overvalued_loop,
+            }
+            factory = coro_map.get(name)
+            if factory:
+                logger.info("Auto-restarting analyzer task", task=name)
+                self._launch_task(name, factory())
 
     async def stop(self) -> None:
         self._running = False
-        for task in self._tasks:
+        for task in self._tasks.values():
             task.cancel()
         self._tasks.clear()
 
@@ -84,7 +119,13 @@ class AnalyzerService:
         """Score all symbols every 10 seconds."""
         while self._running:
             try:
-                await self._run_scoring_cycle()
+                await asyncio.wait_for(
+                    self._run_scoring_cycle(),
+                    timeout=120,
+                )
+            except asyncio.TimeoutError:
+                logger.error("Scoring cycle timed out after 120s — skipping")
+                continue
             except asyncio.CancelledError:
                 logger.info("Scoring loop cancelled")
                 return
@@ -256,7 +297,13 @@ class AnalyzerService:
         """Rebuild overvalued ranking every 5 minutes."""
         while self._running:
             try:
-                await self._rebuild_overvalued()
+                await asyncio.wait_for(
+                    self._rebuild_overvalued(),
+                    timeout=180,
+                )
+            except asyncio.TimeoutError:
+                logger.error("Overvalued rebuild timed out after 180s — skipping")
+                continue
             except asyncio.CancelledError:
                 logger.info("Overvalued loop cancelled")
                 return

@@ -41,7 +41,12 @@ async def run_ingestion() -> None:
     from app.bybit.universe import UniverseManager
     from app.services.ingestion import IngestionService
 
-    redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+    redis_client = aioredis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_timeout=10,
+        socket_connect_timeout=5,
+    )
 
     rest = BybitRestClient()
     await rest.start()
@@ -77,7 +82,12 @@ async def run_analyzer() -> None:
     from app.services.ingestion import IngestionService
     from app.services.monitor_service import MonitorService
 
-    redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+    redis_client = aioredis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_timeout=10,
+        socket_connect_timeout=5,
+    )
 
     rest = BybitRestClient()
     await rest.start()
@@ -119,6 +129,15 @@ async def run_analyzer() -> None:
     try:
         while True:
             await asyncio.sleep(60)
+            # Периодическая проверка здоровья тасков analyzer
+            for name, task in analyzer._tasks.items():
+                if task.done():
+                    logger.error(
+                        "Analyzer task found dead in main loop",
+                        task=name,
+                        cancelled=task.cancelled(),
+                        exception=str(task.exception()) if not task.cancelled() and task.exception() else None,
+                    )
     except asyncio.CancelledError:
         pass
     finally:
