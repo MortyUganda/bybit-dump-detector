@@ -313,23 +313,12 @@ class ScoringEngine:
         if triggered_count < 2:
             total_score = min(total_score, 30.0)
 
-        # ── Multi-timeframe trend context ─────────────────────────
+        # ── Multi-timeframe trend context (informational only) ───
         trend_blocks_short = (
             hasattr(features, "trend_context")
             and features.trend_context is not None
             and not features.trend_context.is_safe_to_short()
         )
-
-        if trend_blocks_short:
-            pre_penalty = total_score
-            total_score = max(0.0, total_score - 10.0)
-            logger.info(
-                "Trend penalty applied",
-                symbol=features.symbol,
-                penalty=-10,
-                score_before=round(pre_penalty, 1),
-                score_after=round(total_score, 1),
-            )
 
         level = _level_from_score(total_score)
         signal_type = self._classify_signal(features, total_score, factors)
