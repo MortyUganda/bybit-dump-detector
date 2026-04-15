@@ -24,10 +24,10 @@ class MarketContext:
 
     def __init__(self, rest_client) -> None:
         self._rest = rest_client
-        self._btc_change_1m: float = 0.0
-        self._btc_change_5m: float = 0.0
-        self._btc_change_15m: float = 0.0
-        self._btc_change_1h: float = 0.0
+        self._btc_change_1m: float | None = None
+        self._btc_change_5m: float | None = None
+        self._btc_change_15m: float | None = None
+        self._btc_change_1h: float | None = None
         self._last_update: float = 0.0
 
     async def refresh(self) -> None:
@@ -58,6 +58,11 @@ class MarketContext:
             self._last_update = now
         except Exception as e:
             logger.warning("BTC context refresh failed", error=str(e))
+            # On failure, reset to None so callers can skip rather than block
+            self._btc_change_1m = None
+            self._btc_change_5m = None
+            self._btc_change_15m = None
+            self._btc_change_1h = None
 
     @staticmethod
     def _calc_change(candles: list) -> float:
@@ -70,21 +75,23 @@ class MarketContext:
         return 0.0
 
     @property
-    def btc_change_1m(self) -> float:
+    def btc_change_1m(self) -> float | None:
         return self._btc_change_1m
 
     @property
-    def btc_change_5m(self) -> float:
+    def btc_change_5m(self) -> float | None:
         return self._btc_change_5m
 
     @property
-    def btc_change_15m(self) -> float:
+    def btc_change_15m(self) -> float | None:
         return self._btc_change_15m
 
     @property
-    def btc_change_1h(self) -> float:
+    def btc_change_1h(self) -> float | None:
         return self._btc_change_1h
 
     def should_suppress_shorts(self) -> bool:
         """Return True if BTC is pumping — suppress all alt short signals."""
+        if self._btc_change_15m is None:
+            return False
         return self._btc_change_15m > BTC_PUMP_THRESHOLD

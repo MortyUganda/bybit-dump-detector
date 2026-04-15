@@ -148,9 +148,9 @@ class AnalyzerService:
         if btc_suppressing:
             logger.info(
                 "BTC rally detected — suppressing alt short signals",
-                btc_change_5m=round(self._market_context.btc_change_5m, 2),
-                btc_change_15m=round(self._market_context.btc_change_15m, 2),
-                btc_change_1h=round(self._market_context.btc_change_1h, 2),
+                btc_change_5m=round(self._market_context.btc_change_5m or 0, 2),
+                btc_change_15m=round(self._market_context.btc_change_15m or 0, 2),
+                btc_change_1h=round(self._market_context.btc_change_1h or 0, 2),
             )
 
         features_list = await self._ingestion.get_all_features()
@@ -163,7 +163,7 @@ class AnalyzerService:
         for features in features_list:
             try:
                 # Populate BTC context on each feature
-                features.btc_change_15m = self._market_context.btc_change_15m
+                features.btc_change_15m = self._market_context.btc_change_15m or 0.0
 
                 risk_score = self._scoring.score(features)
 

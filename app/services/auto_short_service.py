@@ -527,6 +527,13 @@ class AutoShortService:
                 ),
             }
 
+            # BTC filter reasons
+            for window in ("1m", "5m", "15m", "1h"):
+                reason_details[f"btc_filter_{window}"] = (
+                    f"₿ BTC фильтр ({window}) заблокировал вход\n\n"
+                    f"<i>BTC растёт слишком быстро на окне {window} — шорт опасен</i>"
+                )
+
             detail = reason_details.get(reason, f"<i>Причина: {reason}</i>")
 
             text = (
@@ -1022,13 +1029,14 @@ class AutoShortService:
                     btc_15m = self._market_context.btc_change_15m
                     btc_1h = self._market_context.btc_change_1h
                     blocked_window = None
-                    if btc_1m >= BTC_ENTRY_FILTER_1M:
+                    # Skip window if value is None (API error) — don't block on missing data
+                    if btc_1m is not None and btc_1m >= BTC_ENTRY_FILTER_1M:
                         blocked_window = ("1m", btc_1m, BTC_ENTRY_FILTER_1M)
-                    elif btc_5m >= BTC_ENTRY_FILTER_5M:
+                    elif btc_5m is not None and btc_5m >= BTC_ENTRY_FILTER_5M:
                         blocked_window = ("5m", btc_5m, BTC_ENTRY_FILTER_5M)
-                    elif btc_15m >= BTC_ENTRY_FILTER_15M:
+                    elif btc_15m is not None and btc_15m >= BTC_ENTRY_FILTER_15M:
                         blocked_window = ("15m", btc_15m, BTC_ENTRY_FILTER_15M)
-                    elif btc_1h >= BTC_ENTRY_FILTER_1H:
+                    elif btc_1h is not None and btc_1h >= BTC_ENTRY_FILTER_1H:
                         blocked_window = ("1h", btc_1h, BTC_ENTRY_FILTER_1H)
                     if blocked_window:
                         window, value, threshold = blocked_window
@@ -1039,11 +1047,30 @@ class AutoShortService:
                             blocked_by=window,
                             btc_change=round(value, 2),
                             threshold=threshold,
-                            btc_1m=round(btc_1m, 2),
-                            btc_5m=round(btc_5m, 2),
-                            btc_15m=round(btc_15m, 2),
-                            btc_1h=round(btc_1h, 2),
+                            btc_1m=round(btc_1m or 0, 2),
+                            btc_5m=round(btc_5m or 0, 2),
+                            btc_15m=round(btc_15m or 0, 2),
+                            btc_1h=round(btc_1h or 0, 2),
                         )
+                        signal_price_for_btc = await self._get_price(symbol)
+                        if signal_price_for_btc:
+                            await self._save_canceled_signal(
+                                risk_score=risk_score,
+                                signal_price=signal_price_for_btc,
+                                final_price=signal_price_for_btc,
+                                price_change_pct=0.0,
+                                final_score=float(risk_score.score),
+                                cancel_reason=f"btc_filter_{window}",
+                                entry_mode_candidate="direct",
+                            )
+                            await self._notify_entry_canceled(
+                                symbol=symbol,
+                                signal_price=signal_price_for_btc,
+                                current_price=signal_price_for_btc,
+                                price_change_pct=0.0,
+                                score=float(risk_score.score),
+                                reason=f"btc_filter_{window}",
+                            )
                         return
                 except Exception as e:
                     logger.warning(
