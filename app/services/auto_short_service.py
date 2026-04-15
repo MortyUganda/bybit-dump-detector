@@ -41,8 +41,10 @@ MAX_TRADE_DURATION = 60 * 60 * 4
 
 REDIS_ACTIVE_SHORTS_KEY = "active_shorts"
 
-# Block auto-short entry if BTC pumped >1% in 15m
-BTC_ENTRY_FILTER_THRESHOLD = 1.0
+# Multi-level BTC entry filter — block short if BTC pumps on ANY timeframe
+BTC_ENTRY_FILTER_5M = 0.3
+BTC_ENTRY_FILTER_15M = 0.45
+BTC_ENTRY_FILTER_1H = 0.8
 
 
 def _serialize_trade(trade: dict[str, Any]) -> str:
@@ -1005,17 +1007,32 @@ class AutoShortService:
                 )
                 return
 
-            # ── BTC rally filter at entry ─────────────────────────
+            # ── BTC multi-level rally filter at entry ────────────
             if self._market_context:
                 try:
                     await self._market_context.refresh()
-                    if self._market_context.btc_change_15m > BTC_ENTRY_FILTER_THRESHOLD:
+                    btc_5m = self._market_context.btc_change_5m
+                    btc_15m = self._market_context.btc_change_15m
+                    btc_1h = self._market_context.btc_change_1h
+                    blocked_window = None
+                    if btc_5m >= BTC_ENTRY_FILTER_5M:
+                        blocked_window = ("5m", btc_5m, BTC_ENTRY_FILTER_5M)
+                    elif btc_15m >= BTC_ENTRY_FILTER_15M:
+                        blocked_window = ("15m", btc_15m, BTC_ENTRY_FILTER_15M)
+                    elif btc_1h >= BTC_ENTRY_FILTER_1H:
+                        blocked_window = ("1h", btc_1h, BTC_ENTRY_FILTER_1H)
+                    if blocked_window:
+                        window, value, threshold = blocked_window
                         logger.info(
                             "Short blocked by BTC rally filter at entry",
                             symbol=symbol,
                             signal_type=signal_type,
-                            btc_change_15m=round(self._market_context.btc_change_15m, 2),
-                            threshold=BTC_ENTRY_FILTER_THRESHOLD,
+                            blocked_by=window,
+                            btc_change=round(value, 2),
+                            threshold=threshold,
+                            btc_5m=round(btc_5m, 2),
+                            btc_15m=round(btc_15m, 2),
+                            btc_1h=round(btc_1h, 2),
                         )
                         return
                 except Exception as e:

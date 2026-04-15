@@ -174,14 +174,9 @@ async def _build_status_dashboard() -> str:
         except Exception:
             btc_change = 0
 
-        btc_filter_active = abs(btc_change) > 1.0
-        btc_filter_label = (
-            "🚫 АКТИВЕН" if btc_filter_active else "🟢 неактивен"
-        )
         lines.append(
             f"📈 <b>BTC контекст:</b>\n"
-            f"  BTC 15m: <b>{btc_change:+.1f}%</b> | "
-            f"Шорт-фильтр: {btc_filter_label}\n"
+            f"  BTC 15m: <b>{btc_change:+.1f}%</b>\n"
         )
 
         # ── Active shorts ────────────────────────────────────────────

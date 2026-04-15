@@ -7,6 +7,7 @@ This module provides a lightweight BTC momentum check.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 
 from app.utils.logging import get_logger
@@ -23,7 +24,9 @@ class MarketContext:
 
     def __init__(self, rest_client) -> None:
         self._rest = rest_client
+        self._btc_change_5m: float = 0.0
         self._btc_change_15m: float = 0.0
+        self._btc_change_1h: float = 0.0
         self._last_update: float = 0.0
 
     async def refresh(self) -> None:
@@ -32,23 +35,46 @@ class MarketContext:
         if now - self._last_update < 60:
             return
         try:
-            candles = await self._rest.get_klines(
-                "BTCUSDT", interval="15", limit=4, category="linear",
+            # Fetch all three intervals in parallel
+            candles_5m, candles_15m, candles_1h = await asyncio.gather(
+                self._rest.get_klines(
+                    "BTCUSDT", interval="5", limit=4, category="linear",
+                ),
+                self._rest.get_klines(
+                    "BTCUSDT", interval="15", limit=4, category="linear",
+                ),
+                self._rest.get_klines(
+                    "BTCUSDT", interval="60", limit=4, category="linear",
+                ),
             )
-            # candles[-1] is the current (incomplete) candle — skip it
-            # Use the two most recent completed candles for a stable reading
-            if len(candles) >= 3:
-                prev_close = float(candles[-3]["close"])
-                curr_close = float(candles[-2]["close"])
-                if prev_close > 0:
-                    self._btc_change_15m = (curr_close - prev_close) / prev_close * 100
+            self._btc_change_5m = self._calc_change(candles_5m)
+            self._btc_change_15m = self._calc_change(candles_15m)
+            self._btc_change_1h = self._calc_change(candles_1h)
             self._last_update = now
         except Exception as e:
             logger.warning("BTC context refresh failed", error=str(e))
 
+    @staticmethod
+    def _calc_change(candles: list) -> float:
+        """Calculate % change from two most recent completed candles."""
+        if len(candles) >= 3:
+            prev_close = float(candles[-3]["close"])
+            curr_close = float(candles[-2]["close"])
+            if prev_close > 0:
+                return (curr_close - prev_close) / prev_close * 100
+        return 0.0
+
+    @property
+    def btc_change_5m(self) -> float:
+        return self._btc_change_5m
+
     @property
     def btc_change_15m(self) -> float:
         return self._btc_change_15m
+
+    @property
+    def btc_change_1h(self) -> float:
+        return self._btc_change_1h
 
     def should_suppress_shorts(self) -> bool:
         """Return True if BTC is pumping — suppress all alt short signals."""

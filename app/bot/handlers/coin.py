@@ -251,11 +251,8 @@ def _format_coin_card(symbol: str, data: dict) -> str:
     # ── BTC контекст ─────────────────────────────────────────────
     btc_change = snapshot.get("btc_change_15m") if snapshot else None
     if btc_change is not None:
-        btc_filter = abs(btc_change) > 1.0
-        btc_label = "фильтр АКТИВЕН" if btc_filter else "фильтр неактивен"
-        btc_em = "🚫" if btc_filter else "📌"
         lines.append(
-            f"\n{btc_em} BTC: <b>{btc_change:+.1f}%</b> (15m) — {btc_label}"
+            f"\n📌 BTC: <b>{btc_change:+.1f}%</b> (15m)"
         )
 
     return "\n".join(lines)

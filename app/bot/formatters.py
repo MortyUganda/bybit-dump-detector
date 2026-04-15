@@ -67,15 +67,9 @@ def format_risk_alert(score: RiskScore) -> str:
         # BTC context
         btc_change = features.btc_change_15m
         if btc_change is not None:
-            btc_filter_active = abs(btc_change) > 1.0
-            if btc_filter_active:
-                context_lines.append(
-                    f"🚫 BTC: <b>{btc_change:+.1f}%</b> (15m) — фильтр АКТИВЕН"
-                )
-            else:
-                context_lines.append(
-                    f"📌 BTC: <b>{btc_change:+.1f}%</b> (15m) — фильтр неактивен"
-                )
+            context_lines.append(
+                f"📌 BTC: <b>{btc_change:+.1f}%</b> (15m)"
+            )
 
         # Funding rate
         funding = features.funding_rate
