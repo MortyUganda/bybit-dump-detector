@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.bot.handlers.auto_shorts import _format_active_shorts, auto_shorts_keyboard
 from app.bot.keyboards import main_menu_keyboard
@@ -82,11 +82,13 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="🤖 Авто-шорты"),
             ],
             [
-                KeyboardButton(text="📊 Статистика"),
+                KeyboardButton(text="⚙️ Статус бота"),
                 KeyboardButton(text="📋 История"),
             ],
             [
-                KeyboardButton(text="⚙️ Статус"),
+                KeyboardButton(text="🔧 Настройки"),
+            ],
+            [
                 KeyboardButton(text="❓ Помощь"),
             ],
         ],
@@ -373,7 +375,7 @@ async def btn_trades(msg: Message) -> None:
     await msg.answer("\n\n".join(lines))
 
 
-@router.message(F.text == "⚙️ Статус")
+@router.message(F.text == "⚙️ Статус бота")
 async def btn_status(msg: Message) -> None:
     text = await _build_status_dashboard()
     await msg.answer(text)
@@ -390,6 +392,36 @@ async def btn_history(msg: Message) -> None:
 @router.message(F.text == "❓ Помощь")
 async def btn_help(msg: Message) -> None:
     await msg.answer(HELP_TEXT)
+
+
+@router.message(F.text == "🔧 Настройки")
+async def btn_settings_menu(msg: Message) -> None:
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Глобальные настройки авто-шорт-сервиса", callback_data="settings:strategy")],
+        [InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="settings:notifications")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:back")],
+    ])
+    await msg.answer("🔧 <b>Настройки</b>\n\nВыберите раздел:", reply_markup=kb)
+
+
+@router.callback_query(F.data == "settings:strategy")
+async def cb_settings_strategy(callback: CallbackQuery) -> None:
+    from app.bot.handlers.strategy import cmd_strategy
+    await callback.answer()
+    await cmd_strategy(callback.message)
+
+
+@router.callback_query(F.data == "settings:notifications")
+async def cb_settings_notifications(callback: CallbackQuery) -> None:
+    from app.bot.handlers.settings import cmd_settings
+    await callback.answer()
+    await cmd_settings(callback.message)
+
+
+@router.callback_query(F.data == "settings:back")
+async def cb_settings_back(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.delete()
 
 
 @router.message(F.text == "🤖 Авто-шорты")

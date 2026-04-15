@@ -108,11 +108,13 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="🤖 Авто-шорты"),
             ],
             [
-                KeyboardButton(text="📊 Статистика"),
+                KeyboardButton(text="⚙️ Статус бота"),
                 KeyboardButton(text="📋 История"),
             ],
             [
-                KeyboardButton(text="⚙️ Статус"),
+                KeyboardButton(text="🔧 Настройки"),
+            ],
+            [
                 KeyboardButton(text="❓ Помощь"),
             ],
         ],
