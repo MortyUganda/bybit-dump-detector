@@ -42,6 +42,7 @@ MAX_TRADE_DURATION = 60 * 60 * 4
 REDIS_ACTIVE_SHORTS_KEY = "active_shorts"
 
 # Multi-level BTC entry filter — block short if BTC pumps on ANY timeframe
+BTC_ENTRY_FILTER_1M = 0.25
 BTC_ENTRY_FILTER_5M = 0.3
 BTC_ENTRY_FILTER_15M = 0.45
 BTC_ENTRY_FILTER_1H = 0.8
@@ -1011,11 +1012,14 @@ class AutoShortService:
             if self._market_context:
                 try:
                     await self._market_context.refresh()
+                    btc_1m = self._market_context.btc_change_1m
                     btc_5m = self._market_context.btc_change_5m
                     btc_15m = self._market_context.btc_change_15m
                     btc_1h = self._market_context.btc_change_1h
                     blocked_window = None
-                    if btc_5m >= BTC_ENTRY_FILTER_5M:
+                    if btc_1m >= BTC_ENTRY_FILTER_1M:
+                        blocked_window = ("1m", btc_1m, BTC_ENTRY_FILTER_1M)
+                    elif btc_5m >= BTC_ENTRY_FILTER_5M:
                         blocked_window = ("5m", btc_5m, BTC_ENTRY_FILTER_5M)
                     elif btc_15m >= BTC_ENTRY_FILTER_15M:
                         blocked_window = ("15m", btc_15m, BTC_ENTRY_FILTER_15M)
@@ -1030,6 +1034,7 @@ class AutoShortService:
                             blocked_by=window,
                             btc_change=round(value, 2),
                             threshold=threshold,
+                            btc_1m=round(btc_1m, 2),
                             btc_5m=round(btc_5m, 2),
                             btc_15m=round(btc_15m, 2),
                             btc_1h=round(btc_1h, 2),

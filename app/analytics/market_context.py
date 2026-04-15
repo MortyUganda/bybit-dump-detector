@@ -24,6 +24,7 @@ class MarketContext:
 
     def __init__(self, rest_client) -> None:
         self._rest = rest_client
+        self._btc_change_1m: float = 0.0
         self._btc_change_5m: float = 0.0
         self._btc_change_15m: float = 0.0
         self._btc_change_1h: float = 0.0
@@ -35,8 +36,11 @@ class MarketContext:
         if now - self._last_update < 60:
             return
         try:
-            # Fetch all three intervals in parallel
-            candles_5m, candles_15m, candles_1h = await asyncio.gather(
+            # Fetch all four intervals in parallel
+            candles_1m, candles_5m, candles_15m, candles_1h = await asyncio.gather(
+                self._rest.get_klines(
+                    "BTCUSDT", interval="1", limit=4, category="linear",
+                ),
                 self._rest.get_klines(
                     "BTCUSDT", interval="5", limit=4, category="linear",
                 ),
@@ -47,6 +51,7 @@ class MarketContext:
                     "BTCUSDT", interval="60", limit=4, category="linear",
                 ),
             )
+            self._btc_change_1m = self._calc_change(candles_1m)
             self._btc_change_5m = self._calc_change(candles_5m)
             self._btc_change_15m = self._calc_change(candles_15m)
             self._btc_change_1h = self._calc_change(candles_1h)
@@ -63,6 +68,10 @@ class MarketContext:
             if prev_close > 0:
                 return (curr_close - prev_close) / prev_close * 100
         return 0.0
+
+    @property
+    def btc_change_1m(self) -> float:
+        return self._btc_change_1m
 
     @property
     def btc_change_5m(self) -> float:
