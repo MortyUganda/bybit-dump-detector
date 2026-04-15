@@ -61,7 +61,7 @@ async def strategy_keyboard() -> InlineKeyboardMarkup:
             callback_data=f"strategy:signal:{signal_type}",
         )
 
-    for score in [45, 50, 55, 60]:
+    for score in [40, 45, 50, 55]:
         marker = "✅ " if cfg["min_score_to_enter"] == score else ""
         builder.button(
             text=f"{marker}Entry score ≥{score}",
