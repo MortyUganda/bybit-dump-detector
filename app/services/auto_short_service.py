@@ -42,7 +42,7 @@ MAX_TRADE_DURATION = 60 * 60 * 4
 REDIS_ACTIVE_SHORTS_KEY = "active_shorts"
 
 # Multi-level BTC entry filter — block short if BTC pumps on ANY timeframe
-BTC_ENTRY_FILTER_1M = 0.25
+BTC_ENTRY_FILTER_1M = 0.15
 BTC_ENTRY_FILTER_5M = 0.3
 BTC_ENTRY_FILTER_15M = 0.45
 BTC_ENTRY_FILTER_1H = 0.8

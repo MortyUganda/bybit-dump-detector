@@ -174,7 +174,7 @@ async def _build_status_dashboard() -> str:
             btc_snap = {}
 
         btc_windows = [
-            ("1m", btc_snap.get("btc_change_1m", 0), 0.25),
+            ("1m", btc_snap.get("btc_change_1m", 0), 0.15),
             ("5m", btc_snap.get("btc_change_5m", 0), 0.30),
             ("15m", btc_snap.get("btc_change_15m", 0), 0.45),
             ("1h", btc_snap.get("btc_change_1h", 0), 0.80),
