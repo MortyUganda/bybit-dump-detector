@@ -162,22 +162,36 @@ async def _build_status_dashboard() -> str:
             pass
         lines.append(f"📡 Мониторинг: <b>{symbol_count}</b> монет\n")
 
-        # ── BTC context ──────────────────────────────────────────────
+        # ── BTC filter ───────────────────────────────────────────────
         try:
             btc_raw = await redis.get("score:BTCUSDT")
             if btc_raw:
                 btc_data = json.loads(btc_raw)
                 btc_snap = btc_data.get("features_snapshot") or {}
-                btc_change = btc_snap.get("btc_change_15m", 0)
             else:
-                btc_change = 0
+                btc_snap = {}
         except Exception:
-            btc_change = 0
+            btc_snap = {}
 
-        lines.append(
-            f"📈 <b>BTC контекст:</b>\n"
-            f"  BTC 15m: <b>{btc_change:+.1f}%</b>\n"
-        )
+        btc_windows = [
+            ("1m", btc_snap.get("btc_change_1m", 0), 0.25),
+            ("5m", btc_snap.get("btc_change_5m", 0), 0.30),
+            ("15m", btc_snap.get("btc_change_15m", 0), 0.45),
+            ("1h", btc_snap.get("btc_change_1h", 0), 0.80),
+        ]
+        filter_active = False
+        btc_lines = "📈 <b>BTC фильтр:</b>\n"
+        for label, change, threshold in btc_windows:
+            exceeded = change >= threshold
+            if exceeded:
+                filter_active = True
+            warn = " ⚠️" if exceeded else ""
+            btc_lines += f"  {label}: <b>{change:+.2f}%</b>{warn} (порог ≥{threshold:.2f}%)\n"
+        if filter_active:
+            btc_lines += "  🔴 Фильтр активен — входы заблокированы\n"
+        else:
+            btc_lines += "  🟢 Фильтр неактивен\n"
+        lines.append(btc_lines)
 
         # ── Active shorts ────────────────────────────────────────────
         active_count = 0
