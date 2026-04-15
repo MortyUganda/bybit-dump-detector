@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+
 from datetime import datetime, timedelta, timezone
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import F, Router
@@ -10,12 +11,16 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+
 from app.utils.logging import get_logger
+
 
 logger = get_logger(__name__)
 router = Router()
 
+
 PAGE_SIZE = 10
+
 
 
 def history_keyboard(
@@ -25,6 +30,7 @@ def history_keyboard(
     period: str = "all",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+
 
     # Row 1: Filter by result
     filters = [
@@ -41,6 +47,7 @@ def history_keyboard(
         ))
     rows.append(filter_row)
 
+
     # Row 2: Filter by period
     periods = [
         ("Сегодня", "today"),
@@ -55,6 +62,7 @@ def history_keyboard(
             callback_data=f"history:{filter_type}:{p}:0",
         ))
     rows.append(period_row)
+
 
     # Row 3: Pagination (Назад / page indicator / Вперёд)
     has_prev = page > 0
@@ -76,7 +84,9 @@ def history_keyboard(
             ))
         rows.append(nav_row)
 
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 async def _fetch_history(
@@ -90,8 +100,10 @@ async def _fetch_history(
         from app.db.models.auto_short import AutoShort
         from sqlalchemy import select
 
+
         async with AsyncSessionLocal() as session:
             query = select(AutoShort).where(AutoShort.status != "open")
+
 
             # Фильтр по периоду
             now = datetime.now(timezone.utc)
@@ -106,27 +118,34 @@ async def _fetch_history(
                     AutoShort.entry_ts >= now - timedelta(days=7)
                 )
 
+
             # Фильтр по результату
             if filter_type == "wins":
                 query = query.where(AutoShort.ml_label == 1)
             elif filter_type == "losses":
                 query = query.where(AutoShort.ml_label == 0)
 
+
             query = query.order_by(AutoShort.entry_ts.desc())
+
 
             result = await session.execute(query)
             all_trades = result.scalars().all()
+
 
         start = page * PAGE_SIZE
         end = start + PAGE_SIZE
         page_trades = all_trades[start:end]
         has_next = end < len(all_trades)
 
+
         return page_trades, has_next
+
 
     except Exception as e:
         logger.error("History fetch failed", error=str(e))
         return [], False
+
 
 
 def _format_history(trades: list, filter_type: str, period: str, page: int) -> str:
@@ -135,6 +154,7 @@ def _format_history(trades: list, filter_type: str, period: str, page: int) -> s
             "📋 <b>История авто-шортов</b>\n\n"
             "<i>Нет закрытых сделок по выбранным фильтрам.</i>"
         )
+
 
     period_labels = {
         "today": "сегодня",
@@ -147,15 +167,18 @@ def _format_history(trades: list, filter_type: str, period: str, page: int) -> s
         "losses": "убыточные",
     }
 
+
     lines = [
         f"📋 <b>История авто-шортов</b>\n"
         f"Фильтр: {filter_labels.get(filter_type, 'все')} | "
         f"Период: {period_labels.get(period, 'всё время')}\n"
     ]
 
+
     for trade in trades:
         pnl = trade.pnl_pct or 0
         pnl_em = "🟢" if pnl > 0 else "🔴"
+
 
         status_labels = {
             "tp_hit": "🎯 TP",
@@ -165,15 +188,17 @@ def _format_history(trades: list, filter_type: str, period: str, page: int) -> s
             "closed_manual": "✋ Вручную",
             "manual": "✋ Вручную",
         }
-        status_label = status_labels.get(trade.status, trade.status)
+        status_label = status_labels.get(trade.close_reason, trade.close_reason or trade.status)
+
 
         try:
             ts = trade.entry_ts.strftime("%d.%m %H:%M")
         except Exception:
             ts = "—"
 
-        base = trade.symbol.replace("USDT", "")
+
         bybit_url = f"https://www.bybit.com/trade/usdt/{trade.symbol}"
+
 
         lines.append(
             f"{pnl_em} <a href=\"{bybit_url}\">{trade.symbol}</a> | "
@@ -182,17 +207,48 @@ def _format_history(trades: list, filter_type: str, period: str, page: int) -> s
             f"Вход: ${trade.entry_price:.6g} | {ts}"
         )
 
+
     return "\n\n".join(lines)
+
+
+
+def _split_text(text: str, max_len: int = 4096) -> list[str]:
+    """Разбивает текст на части по max_len, не разрывая блоки сделок."""
+    if len(text) <= max_len:
+        return [text]
+
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # ищем последний разделитель "\n\n" в пределах лимита
+        cut = text.rfind("\n\n", 0, max_len)
+        if cut == -1:
+            cut = text.rfind("\n", 0, max_len)
+        if cut == -1:
+            cut = max_len
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return chunks
+
 
 
 @router.message(Command("history"))
 async def cmd_history(msg: Message) -> None:
     trades, has_next = await _fetch_history()
     text = _format_history(trades, "all", "all", 0)
-    await msg.answer(
-        text,
-        reply_markup=history_keyboard(0, has_next, "all", "all"),
-    )
+
+    chunks = _split_text(text)
+    for i, chunk in enumerate(chunks):
+        if i == len(chunks) - 1:
+            await msg.answer(
+                chunk,
+                reply_markup=history_keyboard(0, has_next, "all", "all"),
+            )
+        else:
+            await msg.answer(chunk)
+
 
 
 @router.callback_query(F.data.startswith("history:"))
@@ -202,18 +258,37 @@ async def cb_history(query: CallbackQuery) -> None:
     except Exception:
         pass
 
+
     parts = query.data.split(":")
     filter_type = parts[1]
     period = parts[2]
     page = int(parts[3])
 
+
     trades, has_next = await _fetch_history(filter_type, period, page)
     text = _format_history(trades, filter_type, period, page)
 
+
+    chunks = _split_text(text)
     try:
+        # первый чанк — edit существующего сообщения
         await query.message.edit_text(
-            text,
-            reply_markup=history_keyboard(page, has_next, filter_type, period),
+            chunks[0],
+            reply_markup=(
+                history_keyboard(page, has_next, filter_type, period)
+                if len(chunks) == 1
+                else None
+            ),
         )
+        # остальные чанки — новыми сообщениями
+        for i, chunk in enumerate(chunks[1:], 1):
+            await query.message.answer(
+                chunk,
+                reply_markup=(
+                    history_keyboard(page, has_next, filter_type, period)
+                    if i == len(chunks) - 1
+                    else None
+                ),
+            )
     except Exception:
         pass
