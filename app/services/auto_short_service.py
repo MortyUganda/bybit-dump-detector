@@ -278,6 +278,7 @@ class AutoShortService:
             price_change_pct=round(price_change_pct, 3),
             score=round(current_score, 1),
             min_score=min_score_to_enter,
+            allowed_min_score=allowed_min_score,
             max_entry_drop_pct=max_entry_drop_pct,
             max_rise_pct=max_rise_pct,
             stabilization_threshold_pct=stabilization_threshold_pct,
@@ -359,12 +360,14 @@ class AutoShortService:
                 return current_price, price_change_pct, float(current_score)
 
             if decision == "cancel_score":
+                _min = await self._get_min_score_to_enter()
                 logger.info(
                     "Canceled because score dropped",
                     symbol=symbol,
                     attempt=attempt + 1,
                     score=round(current_score, 1),
-                    min_score=await self._get_min_score_to_enter(),
+                    min_score=_min,
+                    allowed_min_score=max(_min - SCORE_RECHECK_TOLERANCE, SCORE_RECHECK_FLOOR),
                 )
                 await self._save_canceled_signal(
                     risk_score=risk_score,
@@ -506,7 +509,7 @@ class AutoShortService:
             allowed_min_score = max(min_score_to_enter - SCORE_RECHECK_TOLERANCE, SCORE_RECHECK_FLOOR)
             reason_details = {
                 "score_dropped": (
-                    f"⚠️ Score: <b>{score:.0f}</b> (допустимый мин. {allowed_min_score:.0f}, порог {min_score_to_enter:.0f})\n\n"
+                    f"⚠️ Допустимый мин.: <b>{allowed_min_score:.0f}</b> (порог {min_score_to_enter:.0f} − толеранс {SCORE_RECHECK_TOLERANCE})\n\n"
                     f"<i>Score упал ниже допустимого минимума — вход отменён</i>"
                 ),
                 "price_dropped": (
@@ -1147,12 +1150,14 @@ class AutoShortService:
 
             if decision == "cancel_score":
                 current_price = entry_price
+                allowed_min_score = max(min_score_to_enter - SCORE_RECHECK_TOLERANCE, SCORE_RECHECK_FLOOR)
                 logger.info(
                     "Canceled because score dropped before entry",
                     symbol=symbol,
                     signal_type=signal_type,
                     score=round(effective_score, 1),
                     min_score=min_score_to_enter,
+                    allowed_min_score=allowed_min_score,
                 )
                 await self._save_canceled_signal(
                     risk_score=risk_score,
