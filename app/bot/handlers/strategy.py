@@ -61,21 +61,21 @@ async def strategy_keyboard() -> InlineKeyboardMarkup:
             callback_data=f"strategy:signal:{signal_type}",
         )
 
-    for score in [45, 50, 55, 60]:
+    for score in [40, 45, 50, 55]:
         marker = "✅ " if cfg["min_score_to_enter"] == score else ""
         builder.button(
             text=f"{marker}Entry score ≥{score}",
             callback_data=f"strategy:min_score:{score}",
         )
 
-    for delay in [15, 30, 60, 90]:
+    for delay in [10, 15, 30, 40]:
         marker = "✅ " if cfg["entry_delay_sec"] == delay else ""
         builder.button(
             text=f"{marker}Delay {delay}s",
             callback_data=f"strategy:delay:{delay}",
         )
 
-    for value in [10, 15, 20, 25]:
+    for value in [5, 10, 12, 15]:
         marker = "✅ " if int(cfg["target_pnl_pct"]) == value else ""
         builder.button(
             text=f"{marker}TP {value}%",

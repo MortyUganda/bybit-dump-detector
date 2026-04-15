@@ -22,7 +22,7 @@ REDIS_USER_SETTINGS_PREFIX = "user_settings"
 
 DEFAULT_SETTINGS = {
     "alerts_enabled": True,
-    "min_score": 50,
+    "min_score": 45,
     "notify_early_warning": False,
     "notify_overheated": True,
     "notify_reversal_risk": True,
@@ -99,7 +99,7 @@ async def settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder.button(text=alerts_label, callback_data="settings:toggle:alerts_enabled")
 
     # Минимальный score
-    score_options = [45, 50, 55, 60]
+    score_options = [40, 45, 50, 55]
     for score in score_options:
         marker = "✅ " if s["min_score"] == score else ""
         builder.button(
