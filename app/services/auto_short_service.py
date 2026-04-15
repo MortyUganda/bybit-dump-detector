@@ -1031,6 +1031,21 @@ class AutoShortService:
                     btc_5m = self._market_context.btc_change_5m
                     btc_15m = self._market_context.btc_change_15m
                     btc_1h = self._market_context.btc_change_1h
+                    # Persist BTC changes to Redis for /status handler
+                    try:
+                        await self._redis.set(
+                            "btc_filter",
+                            json.dumps({
+                                "btc_change_1m": btc_1m,
+                                "btc_change_5m": btc_5m,
+                                "btc_change_15m": btc_15m,
+                                "btc_change_1h": btc_1h,
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
+                            }),
+                            ex=120,
+                        )
+                    except Exception:
+                        pass
                     blocked_window = None
                     # Skip window if value is None (API error) — don't block on missing data
                     if btc_1m is not None and btc_1m >= BTC_ENTRY_FILTER_1M:

@@ -166,20 +166,16 @@ async def _build_status_dashboard() -> str:
 
         # ── BTC filter ───────────────────────────────────────────────
         try:
-            btc_raw = await redis.get("score:BTCUSDT")
-            if btc_raw:
-                btc_data = json.loads(btc_raw)
-                btc_snap = btc_data.get("features_snapshot") or {}
-            else:
-                btc_snap = {}
+            btc_raw = await redis.get("btc_filter")
+            btc_snap = json.loads(btc_raw) if btc_raw else {}
         except Exception:
             btc_snap = {}
 
         btc_windows = [
-            ("1m", btc_snap.get("btc_change_1m", 0), 0.15),
-            ("5m", btc_snap.get("btc_change_5m", 0), 0.30),
-            ("15m", btc_snap.get("btc_change_15m", 0), 0.45),
-            ("1h", btc_snap.get("btc_change_1h", 0), 0.80),
+            ("1m", btc_snap.get("btc_change_1m") or 0, 0.15),
+            ("5m", btc_snap.get("btc_change_5m") or 0, 0.30),
+            ("15m", btc_snap.get("btc_change_15m") or 0, 0.45),
+            ("1h", btc_snap.get("btc_change_1h") or 0, 0.80),
         ]
         filter_active = False
         btc_lines = "📈 <b>BTC фильтр:</b>\n"
