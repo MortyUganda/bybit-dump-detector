@@ -32,6 +32,8 @@ ENTRY_DELAY_SEC = 60
 MONITOR_ATTEMPTS = 24
 MONITOR_INTERVAL_SEC = 5
 MIN_SCORE_TO_ENTER = 55
+SCORE_RECHECK_TOLERANCE = 5
+SCORE_RECHECK_FLOOR = 40
 STABILIZATION_THRESHOLD_PCT = 0.2
 MAX_RISE_PCT = 0.8
 MAX_ENTRY_DROP_PCT = -0.3
@@ -232,12 +234,14 @@ class AutoShortService:
         max_rise_pct = await self._get_max_rise_pct()
         stabilization_threshold_pct = await self._get_stabilization_threshold_pct()
 
-        if current_score < min_score_to_enter:
+        allowed_min_score = max(min_score_to_enter - SCORE_RECHECK_TOLERANCE, SCORE_RECHECK_FLOOR)
+        if current_score < allowed_min_score:
             logger.debug(
-                "Entry check: score below minimum",
+                "Entry check: score below allowed minimum",
                 symbol=symbol,
                 score=round(current_score, 1),
                 min_score=min_score_to_enter,
+                allowed_min_score=allowed_min_score,
             )
             decision = "cancel_score"
         elif price_change_pct < max_entry_drop_pct:
@@ -499,10 +503,11 @@ class AutoShortService:
             monitor_attempts = int(strategy.get("monitor_attempts", MONITOR_ATTEMPTS))
             monitor_interval_sec = int(strategy.get("monitor_interval_sec", MONITOR_INTERVAL_SEC))
 
+            allowed_min_score = max(min_score_to_enter - SCORE_RECHECK_TOLERANCE, SCORE_RECHECK_FLOOR)
             reason_details = {
                 "score_dropped": (
-                    f"⚠️ Score: <b>{score:.0f}</b> (мин. {min_score_to_enter})\n\n"
-                    f"<i>Score упал ниже порога входа — вход отменён</i>"
+                    f"⚠️ Score: <b>{score:.0f}</b> (допустимый мин. {allowed_min_score:.0f}, порог {min_score_to_enter:.0f})\n\n"
+                    f"<i>Score упал ниже допустимого минимума — вход отменён</i>"
                 ),
                 "price_dropped": (
                     f"📉 Изменение: <b>{price_change_pct:+.2f}%</b> "
