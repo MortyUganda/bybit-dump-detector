@@ -13,7 +13,6 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
-from app.analytics.market_context import MarketContext
 from app.config import get_settings
 from app.scoring.engine import RiskScore
 from app.services.runtime_config import get_runtime_strategy_config
@@ -69,7 +68,6 @@ class AutoShortService:
         self._redis = redis
         self._bot = bot
         self._rest_client = rest_client
-        self._market_context = MarketContext(rest_client) if rest_client else None
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._trade_tasks: dict[int, asyncio.Task] = {}
         self._canceled_price_tasks: set[asyncio.Task] = set()
@@ -1024,28 +1022,16 @@ class AutoShortService:
                 return
 
             # ── BTC multi-level rally filter at entry ────────────
-            if self._market_context:
-                try:
-                    await self._market_context.refresh()
-                    btc_1m = self._market_context.btc_change_1m
-                    btc_5m = self._market_context.btc_change_5m
-                    btc_15m = self._market_context.btc_change_15m
-                    btc_1h = self._market_context.btc_change_1h
-                    # Persist BTC changes to Redis for /status handler
-                    try:
-                        await self._redis.set(
-                            "btc_filter",
-                            json.dumps({
-                                "btc_change_1m": btc_1m,
-                                "btc_change_5m": btc_5m,
-                                "btc_change_15m": btc_15m,
-                                "btc_change_1h": btc_1h,
-                                "updated_at": datetime.now(timezone.utc).isoformat(),
-                            }),
-                            ex=120,
-                        )
-                    except Exception:
-                        pass
+            # Read pre-computed BTC data from Redis (updated by analyzer btc_filter_loop)
+            try:
+                btc_raw = await self._redis.get("btc_filter")
+                if btc_raw:
+                    btc_snap = json.loads(btc_raw)
+                    btc_1m = btc_snap.get("btc_change_1m")
+                    btc_5m = btc_snap.get("btc_change_5m")
+                    btc_15m = btc_snap.get("btc_change_15m")
+                    btc_1h = btc_snap.get("btc_change_1h")
+
                     blocked_window = None
                     # Skip window if value is None (API error) — don't block on missing data
                     if btc_1m is not None and btc_1m >= BTC_ENTRY_FILTER_1M:
@@ -1090,11 +1076,13 @@ class AutoShortService:
                                 reason=f"btc_filter_{window}",
                             )
                         return
-                except Exception as e:
-                    logger.warning(
-                        "BTC entry filter check failed — proceeding",
-                        error=str(e),
-                    )
+                else:
+                    logger.debug("BTC filter data not in Redis — skipping BTC check")
+            except Exception as e:
+                logger.warning(
+                    "BTC entry filter check failed — proceeding",
+                    error=str(e),
+                )
 
             if not await self._check_trend_filter(risk_score):
                 logger.info(

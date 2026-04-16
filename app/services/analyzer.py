@@ -38,6 +38,8 @@ REDIS_SCORE_TTL = 300
 REDIS_COOLDOWN_KEY = "cooldown:{symbol}:{signal_type}"
 REDIS_OVERVALUED_KEY = "overvalued:latest"
 REDIS_OVERVALUED_TTL = 600  # 10 min
+REDIS_BTC_FILTER_KEY = "btc_filter"
+REDIS_BTC_FILTER_TTL = 30  # 30 sec
 
 
 class AnalyzerService:
@@ -71,6 +73,7 @@ class AnalyzerService:
         logger.info("Analyzer service started")
         self._launch_task("scoring_loop", self._scoring_loop())
         self._launch_task("overvalued_loop", self._overvalued_loop())
+        self._launch_task("btc_filter_loop", self._btc_filter_loop())
 
     def _launch_task(self, name: str, coro) -> None:
         """Create a named task with a done-callback that logs + auto-restarts."""
@@ -101,6 +104,7 @@ class AnalyzerService:
             coro_map = {
                 "scoring_loop": self._scoring_loop,
                 "overvalued_loop": self._overvalued_loop,
+                "btc_filter_loop": self._btc_filter_loop,
             }
             factory = coro_map.get(name)
             if factory:
@@ -112,6 +116,38 @@ class AnalyzerService:
         for task in self._tasks.values():
             task.cancel()
         self._tasks.clear()
+
+    # ── BTC filter background loop ─────────────────────────────────
+
+    async def _btc_filter_loop(self) -> None:
+        """Fetch BTC candles every 10s and persist to Redis for /status and entry filter."""
+        # Dedicated MarketContext with no internal cache (we control the interval)
+        btc_ctx = MarketContext(self._ingestion._rest)
+        btc_ctx._last_update = 0.0  # force first refresh immediately
+
+        while self._running:
+            try:
+                # Force refresh by resetting internal cache timer
+                btc_ctx._last_update = 0.0
+                await btc_ctx.refresh()
+
+                payload = json.dumps({
+                    "btc_change_1m": btc_ctx.btc_change_1m,
+                    "btc_change_5m": btc_ctx.btc_change_5m,
+                    "btc_change_15m": btc_ctx.btc_change_15m,
+                    "btc_change_1h": btc_ctx.btc_change_1h,
+                    "updated_at": utcnow().isoformat(),
+                })
+                await self._redis.set(
+                    REDIS_BTC_FILTER_KEY, payload, ex=REDIS_BTC_FILTER_TTL,
+                )
+            except asyncio.CancelledError:
+                logger.info("BTC filter loop cancelled")
+                return
+            except Exception:
+                logger.exception("BTC filter loop error — will retry in 10s")
+
+            await asyncio.sleep(10)
 
     # ── Main scoring loop ─────────────────────────────────────────
 
