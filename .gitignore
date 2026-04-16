@@ -1,5 +1,7 @@
 dd_venv
 .env
+.env.dev
+logs_dev
 ml_dumps
 ./ml/data/raw/current/canceled_signals.csv
 canceled_signals.csv

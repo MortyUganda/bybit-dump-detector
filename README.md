@@ -71,6 +71,61 @@ Open Telegram, find your bot, send `/start`
 
 ***
 
+## Dev Environment (тестовый экземпляр)
+
+Dev-экземпляр работает параллельно со стабильным (prod) на том же сервере. Используется отдельный Telegram-бот, отдельная БД и Redis.
+
+### 1. Настройка
+
+```bash
+cp .env.dev.example .env.dev
+# Отредактируйте .env.dev:
+#   TELEGRAM_BOT_TOKEN=<токен ВТОРОГО бота из @BotFather>
+#   BYBIT_API_KEY=...
+#   BYBIT_API_SECRET=...
+```
+
+### 2. Запуск dev
+
+```bash
+docker compose -f docker/docker-compose.dev.yml up -d --build
+```
+
+### 3. Логи dev
+
+```bash
+docker compose -f docker/docker-compose.dev.yml logs -f bot
+docker compose -f docker/docker-compose.dev.yml logs -f analyzer
+```
+
+### 4. Работа с веткой dev
+
+```bash
+# Переключиться на dev-ветку и пересобрать
+git checkout dev
+docker compose -f docker/docker-compose.dev.yml up -d --build
+
+# Перенести изменения в стабильный
+git checkout main
+git merge dev
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
+### 5. Остановка dev
+
+```bash
+docker compose -f docker/docker-compose.dev.yml down
+```
+
+### Порты dev vs prod
+
+| Сервис   | Prod  | Dev   |
+|----------|-------|-------|
+| Postgres | 5433  | 5434  |
+| Redis    | 6380  | 6381  |
+
+***
+
 ## Local Development
 
 ```bash
