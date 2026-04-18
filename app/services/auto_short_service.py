@@ -1430,7 +1430,234 @@ class AutoShortService:
 
         return True
 
+    # ── Reversal risk checker ────────────────────────────────────
 
+    async def _check_reversal_risk(
+        self,
+        trade: dict[str, Any],
+        symbol: str,
+        current_price: float,
+        pnl: float,
+    ) -> tuple[int, list[str]]:
+        """Check 8 reversal risk factors for an open short position.
+
+        Returns (score, triggered_factors).  Max score ~11.
+        """
+        score = 0
+        triggered: list[str] = []
+
+        try:
+            # Fetch features from Redis
+            features_raw = await self._redis.get(f"features:{symbol}")
+            feat: dict[str, Any] = json.loads(features_raw) if features_raw else {}
+
+            score_raw = await self._redis.get(f"score:{symbol}")
+            score_data: dict[str, Any] = json.loads(score_raw) if score_raw else {}
+            snapshot: dict[str, Any] = score_data.get("features_snapshot") or {}
+
+            # Merge: features take priority, snapshot as fallback
+            def _val(key: str, default=None):
+                v = feat.get(key)
+                if v is not None:
+                    return v
+                return snapshot.get(key, default)
+
+            # ── Factor 1: volume_exhaustion (1 pt) ───────────────
+            volume_zscore = _val("volume_zscore_candle")
+            if volume_zscore is not None:
+                try:
+                    if float(volume_zscore) < -1.0:
+                        score += 1
+                        triggered.append("volume_exhaustion")
+                except (TypeError, ValueError):
+                    pass
+            else:
+                volume_decline = _val("volume_decline_after_spike")
+                if volume_decline and str(volume_decline).lower() in ("true", "1"):
+                    score += 1
+                    triggered.append("volume_exhaustion")
+
+            # ── Factor 2: large_buy_cluster (2 pts) ──────────────
+            large_buy_count = _val("large_buy_count_5m", 0)
+            large_sell_count = _val("large_sell_count_5m", 0)
+            try:
+                large_buy_count = int(large_buy_count)
+                large_sell_count = int(large_sell_count)
+            except (TypeError, ValueError):
+                large_buy_count = 0
+                large_sell_count = 0
+            if large_buy_count >= 3 and large_buy_count > large_sell_count * 1.5:
+                score += 2
+                triggered.append("large_buy_cluster")
+            elif large_buy_count >= 2 and large_buy_count > large_sell_count:
+                score += 1
+                triggered.append("large_buy_cluster")
+
+            # ── Factor 3: rsi_oversold (1 pt) ────────────────────
+            rsi_5m = _val("rsi_14_5m")
+            if rsi_5m is not None:
+                try:
+                    if float(rsi_5m) < 30:
+                        score += 1
+                        triggered.append("rsi_oversold")
+                except (TypeError, ValueError):
+                    pass
+
+            # ── Factor 4: bid_depth_recovery (1 pt) ──────────────
+            bid_depth_change = _val("bid_depth_change_5m")
+            if bid_depth_change is not None:
+                try:
+                    if float(bid_depth_change) > 10.0:
+                        score += 1
+                        triggered.append("bid_depth_recovery")
+                except (TypeError, ValueError):
+                    pass
+
+            # ── Factor 5: funding_negative (2 pts) ───────────────
+            funding_rate = _val("funding_rate")
+            if funding_rate is not None:
+                try:
+                    fr = float(funding_rate)
+                    if fr < -0.0001:
+                        score += 2
+                        triggered.append("funding_negative")
+                    elif fr < 0:
+                        score += 1
+                        triggered.append("funding_negative")
+                except (TypeError, ValueError):
+                    pass
+
+            # ── Factor 6: cvd_reversal (2 pts) ───────────────────
+            cvd_divergence = _val("cvd_divergence")
+            cvd_5m = _val("cvd_5m")
+            if cvd_divergence is not None:
+                try:
+                    cvd_div = float(cvd_divergence)
+                    if cvd_div > 0.3:
+                        score += 2
+                        triggered.append("cvd_reversal")
+                    elif cvd_div > 0.1:
+                        score += 1
+                        triggered.append("cvd_reversal")
+                except (TypeError, ValueError):
+                    pass
+            elif cvd_5m is not None:
+                try:
+                    if float(cvd_5m) > 0:
+                        score += 1
+                        triggered.append("cvd_reversal")
+                except (TypeError, ValueError):
+                    pass
+
+            # ── Factor 7: consecutive_greens (1 pt) ──────────────
+            consec_greens = _val("consecutive_green_candles", 0)
+            try:
+                if int(consec_greens) >= 3:
+                    score += 1
+                    triggered.append("consecutive_greens")
+            except (TypeError, ValueError):
+                pass
+
+            # ── Factor 8: spread_normalization (1 pt) ────────────
+            spread_pct = _val("spread_pct")
+            if spread_pct is not None:
+                try:
+                    if float(spread_pct) < 0.02:
+                        score += 1
+                        triggered.append("spread_normalization")
+                except (TypeError, ValueError):
+                    pass
+
+        except Exception as e:
+            logger.warning(
+                "Reversal risk check error — returning 0",
+                trade_id=trade.get("id"),
+                symbol=symbol,
+                error=str(e),
+            )
+            return 0, []
+
+        if score > 0:
+            logger.debug(
+                "Reversal risk score",
+                trade_id=trade.get("id"),
+                symbol=symbol,
+                score=score,
+                factors=triggered,
+                pnl=f"{pnl:+.2f}%",
+            )
+
+        return score, triggered
+
+    # ── Reversal risk notification ───────────────────────────────
+
+    async def _notify_reversal_risk(
+        self,
+        trade_id: int,
+        symbol: str,
+        score: int,
+        level: str,
+        factors: str,
+        pnl: float,
+        current_price: float,
+    ) -> None:
+        if not self._bot:
+            return
+
+        try:
+            from app.bot.user_store import get_active_users
+
+            user_ids = await get_active_users(self._redis)
+            if not user_ids:
+                return
+
+            bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
+            level_emoji = "🔴" if level == "CRITICAL" else "🟡"
+            pnl_emoji = "🟢" if pnl > 0 else "🔴"
+
+            text = (
+                f"{level_emoji} <b>Reversal Risk — {level}</b>\n\n"
+                f"📌 <a href=\"{bybit_url}\">{symbol}</a> | Сделка #{trade_id}\n"
+                f"⚡ Score: <b>{score}</b>\n"
+                f"P&L: {pnl_emoji} <b>{pnl:+.2f}%</b>\n"
+                f"💹 Цена: <b>${current_price:.6g}</b>\n\n"
+                f"<b>Факторы:</b>\n"
+            )
+
+            factor_labels = {
+                "volume_exhaustion": "📉 Объёмы продаж истощены",
+                "large_buy_cluster": "🐋 Крупные покупки в стакане",
+                "rsi_oversold": "📊 RSI перепродан (<30)",
+                "funding_negative": "💰 Funding отрицательный",
+                "cvd_reversal": "🔄 CVD разворачивается вверх",
+                "consecutive_greens": "🟢 3+ зелёных свечей подряд",
+                "spread_normalization": "📏 Спред нормализовался",
+                "bid_depth_recovery": "📈 Bid depth восстанавливается",
+            }
+
+            for f in factors.split(", "):
+                label = factor_labels.get(f.strip(), f.strip())
+                text += f"  • {label}\n"
+
+            if level == "CRITICAL":
+                text += "\n⚠️ <i>Trailing stop ужесточён (drawdown /2)</i>"
+
+            for user_id in user_ids:
+                try:
+                    await self._bot.send_message(
+                        chat_id=user_id,
+                        text=text,
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Reversal risk notify failed",
+                        user_id=user_id,
+                        error=str(e),
+                    )
+
+        except Exception as e:
+            logger.error("Reversal risk notification error", error=str(e))
 
     # ── Monitor trade ─────────────────────────────────────────────
 
@@ -1449,7 +1676,7 @@ class AutoShortService:
         # Трейлинг задаём в долях от целевого TP
         TRAILING_FROM_TP_FRACTION = 0.4   # включаем трейлинг, когда достигнуто 40% от TP
         LOCK_IN_FROM_TP_FRACTION  = 0.8   # при 80% от TP фиксируем минимум безубыток
-        MAX_DRAWDOWN_FRACTION     = 0.5   # допускаем откат не больше 50% от max_pnl
+        max_drawdown_fraction     = 0.5   # допускаем откат не больше 50% от max_pnl
 
         trailing_activated = False
         max_pnl_seen = 0.0
@@ -1457,6 +1684,10 @@ class AutoShortService:
         # Funding rate tracking: accumulate funding fees across the trade
         accumulated_funding_pct = 0.0
         last_funding_hour: int | None = None
+
+        # Reversal risk tracking
+        last_reversal_notification_ts: float = 0.0
+        trailing_tightened = False
 
         while trade["status"] == "open":
             trade_monitor_interval = await self._get_trade_monitor_interval()
@@ -1515,6 +1746,56 @@ class AutoShortService:
                 await self._close_trade(trade_id, current_price, "sl_hit", pnl, accumulated_funding_pct)
                 return
 
+            # ── Reversal risk check ──────────────────────────────
+            try:
+                cfg = await self._get_strategy()
+                rr_enabled = cfg.get("reversal_risk_enabled", True)
+                if rr_enabled:
+                    rr_score, rr_factors = await self._check_reversal_risk(
+                        trade, symbol, current_price, pnl,
+                    )
+                    rr_warning = int(cfg.get("reversal_risk_warning_threshold", 4))
+                    rr_critical = int(cfg.get("reversal_risk_critical_threshold", 7))
+                    rr_action = cfg.get("reversal_risk_action", "tighten_trailing")
+
+                    if rr_score >= rr_warning:
+                        now_ts = now.timestamp()
+                        if now_ts - last_reversal_notification_ts >= 60:
+                            last_reversal_notification_ts = now_ts
+                            level = "CRITICAL" if rr_score >= rr_critical else "WARNING"
+                            factors_text = ", ".join(rr_factors)
+                            await self._notify_reversal_risk(
+                                trade_id=trade_id,
+                                symbol=symbol,
+                                score=rr_score,
+                                level=level,
+                                factors=factors_text,
+                                pnl=pnl,
+                                current_price=current_price,
+                            )
+
+                    if (
+                        rr_score >= rr_critical
+                        and rr_action == "tighten_trailing"
+                        and not trailing_tightened
+                    ):
+                        max_drawdown_fraction = max_drawdown_fraction / 2.0
+                        trailing_tightened = True
+                        logger.info(
+                            "Reversal risk: trailing tightened",
+                            trade_id=trade_id,
+                            symbol=symbol,
+                            rr_score=rr_score,
+                            new_max_drawdown_fraction=max_drawdown_fraction,
+                        )
+            except Exception as e:
+                logger.warning(
+                    "Reversal risk check failed — skipping",
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    error=str(e),
+                )
+
             # Обновляем максимум профита
             if pnl > max_pnl_seen:
                 max_pnl_seen = pnl
@@ -1522,11 +1803,11 @@ class AutoShortService:
             # Трейлинг: как только профит достиг части TP, начинаем подтягивать SL
             if max_pnl_seen >= trailing_activate_pnl:
                 # желаемый минимальный PnL, который хотим гарантировать
-                # допускаем откат не больше MAX_DRAWDOWN_FRACTION от max_pnl_seen,
+                # допускаем откат не больше max_drawdown_fraction от max_pnl_seen,
                 # но не хуже исходного SL (‑target_sl_pct)
                 desired_min_pnl = max(
                     -target_sl_pct,
-                    max_pnl_seen * (1.0 - MAX_DRAWDOWN_FRACTION),
+                    max_pnl_seen * (1.0 - max_drawdown_fraction),
                 )
 
                 # если почти достигли TP — гарантируем минимум безубыток

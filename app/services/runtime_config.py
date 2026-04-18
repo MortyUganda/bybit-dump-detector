@@ -38,6 +38,11 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "max_entry_drop_pct": -0.3,
     "trade_monitor_interval": 5,
     "max_trade_duration_sec": 60 * 60 * 4,
+    # Reversal risk settings
+    "reversal_risk_enabled": True,
+    "reversal_risk_warning_threshold": 4,
+    "reversal_risk_critical_threshold": 7,
+    "reversal_risk_action": "tighten_trailing",
 }
 
 
@@ -76,6 +81,19 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
     merged["max_trade_duration_sec"] = max(
         60, int(merged.get("max_trade_duration_sec", 60 * 60 * 4))
     )
+
+    # Reversal risk settings
+    merged["reversal_risk_enabled"] = bool(merged.get("reversal_risk_enabled", True))
+    merged["reversal_risk_warning_threshold"] = max(
+        1, min(11, int(merged.get("reversal_risk_warning_threshold", 4)))
+    )
+    merged["reversal_risk_critical_threshold"] = max(
+        1, min(11, int(merged.get("reversal_risk_critical_threshold", 7)))
+    )
+    rr_action = merged.get("reversal_risk_action", "tighten_trailing")
+    if rr_action not in ("notify_only", "tighten_trailing"):
+        rr_action = "tighten_trailing"
+    merged["reversal_risk_action"] = rr_action
 
     return merged
 
