@@ -89,52 +89,9 @@ async def strategy_keyboard() -> InlineKeyboardMarkup:
             callback_data=f"strategy:sl:{value}",
         )
 
-    # ── Reversal Risk section ────────────────────────────────
-    rev_enabled = cfg.get("reversal_enabled", True)
-    rev_label = "🔄 Риск разворота: ВКЛ ✅" if rev_enabled else "🔄 Риск разворота: ВЫКЛ ❌"
-    builder.button(text=rev_label, callback_data="strategy:reversal:toggle")
-
-    for thr in [3, 4, 5]:
-        marker = "✅ " if cfg.get("reversal_warning_threshold", 4) == thr else ""
-        builder.button(
-            text=f"{marker}⚠️ Порог {thr}",
-            callback_data=f"strategy:reversal:warn:{thr}",
-        )
-
-    for thr in [6, 7, 8]:
-        marker = "✅ " if cfg.get("reversal_critical_threshold", 7) == thr else ""
-        builder.button(
-            text=f"{marker}🔴 Порог {thr}",
-            callback_data=f"strategy:reversal:crit:{thr}",
-        )
-
-    action_labels = {
-        "notify_only": "Уведомление",
-        "tighten_trailing": "Trailing",
-        "auto_close": "Авто-закрытие",
-    }
-    cur_action = cfg.get("reversal_action", "tighten_trailing")
-    for action_key, action_label in action_labels.items():
-        marker = "✅ " if cur_action == action_key else ""
-        builder.button(
-            text=f"{marker}{action_label}",
-            callback_data=f"strategy:reversal:action:{action_key}",
-        )
-
-    pnl_labels = {"profit_only": "В плюсе", "always": "Всегда"}
-    cur_pnl = cfg.get("reversal_pnl_filter", "always")
-    for pnl_key, pnl_label in pnl_labels.items():
-        marker = "✅ " if cur_pnl == pnl_key else ""
-        builder.button(
-            text=f"{marker}PnL: {pnl_label}",
-            callback_data=f"strategy:reversal:pnl:{pnl_key}",
-        )
-
     builder.button(text="🔄 Сбросить стратегию", callback_data="strategy:reset")
 
-    # Row layout: enabled(1), signals(2,2), scores(2,2), delays(2,2), TP(2,2), SL(2,2),
-    # rev_toggle(1), rev_warn(3), rev_crit(3), rev_action(3), rev_pnl(2), reset(1)
-    builder.adjust(1, 2, 2, 2, 2, 2, 2, 1, 3, 3, 3, 2, 1)
+    builder.adjust(1, 2, 2, 2, 2, 2, 2, 1)
     return builder.as_markup()
 
 
@@ -148,17 +105,6 @@ async def _format_strategy_text() -> str:
     allowed = cfg.get("allowed_signal_types", [])
     allowed_str = ", ".join(allowed) if allowed else "ничего"
 
-    # Reversal config
-    rev_enabled = "ВКЛ" if cfg.get("reversal_enabled", True) else "ВЫКЛ"
-    rev_action_labels = {
-        "notify_only": "Уведомление",
-        "tighten_trailing": "Подтянуть trailing",
-        "auto_close": "Авто-закрытие",
-    }
-    rev_pnl_labels = {"profit_only": "В плюсе", "always": "Всегда"}
-    rev_action = rev_action_labels.get(cfg.get("reversal_action", "tighten_trailing"), "?")
-    rev_pnl = rev_pnl_labels.get(cfg.get("reversal_pnl_filter", "always"), "?")
-
     return (
         f"🎛 <b>Глобальная стратегия авто-шорта</b>\n\n"
         f"🤖 Enabled: <b>{'YES' if cfg['enabled'] else 'NO'}</b>\n"
@@ -171,11 +117,6 @@ async def _format_strategy_text() -> str:
         f"📈 Max rise: <b>{cfg['max_rise_pct']}%</b>\n"
         f"📉 Max entry drop: <b>{cfg['max_entry_drop_pct']}%</b>\n"
         f"📌 Stabilization threshold: <b>{cfg['stabilization_threshold_pct']}%</b>\n\n"
-        f"🔄 <b>Риск разворота:</b> {rev_enabled}\n"
-        f"⚠️ Порог предупреждения: <b>{cfg.get('reversal_warning_threshold', 4)}</b>\n"
-        f"🔴 Порог критический: <b>{cfg.get('reversal_critical_threshold', 7)}</b>\n"
-        f"⚡ Действие: <b>{rev_action}</b>\n"
-        f"💰 PnL фильтр: <b>{rev_pnl}</b>\n\n"
         f"<i>Изменения применяются на лету через Redis</i>"
     )
 
@@ -340,131 +281,6 @@ async def cb_sl(query: CallbackQuery) -> None:
     try:
         await patch_runtime_strategy_config(redis, {"target_sl_pct": value})
         logger.info("Strategy target_sl_pct updated", value=value)
-    finally:
-        await redis.aclose()
-
-    try:
-        await query.message.edit_text(
-            await _format_strategy_text(),
-            reply_markup=await strategy_keyboard(),
-        )
-    except Exception:
-        pass
-
-
-@router.callback_query(F.data == "strategy:reversal:toggle")
-async def cb_reversal_toggle(query: CallbackQuery) -> None:
-    try:
-        await query.answer()
-    except Exception:
-        pass
-
-    redis = await _get_redis()
-    try:
-        cfg = await get_runtime_strategy_config(redis)
-        new_value = not cfg.get("reversal_enabled", True)
-        await patch_runtime_strategy_config(redis, {"reversal_enabled": new_value})
-        logger.info("Reversal enabled toggled", value=new_value)
-    finally:
-        await redis.aclose()
-
-    try:
-        await query.message.edit_text(
-            await _format_strategy_text(),
-            reply_markup=await strategy_keyboard(),
-        )
-    except Exception:
-        pass
-
-
-@router.callback_query(F.data.startswith("strategy:reversal:warn:"))
-async def cb_reversal_warn(query: CallbackQuery) -> None:
-    try:
-        await query.answer()
-    except Exception:
-        pass
-
-    value = int(query.data.split(":")[-1])
-
-    redis = await _get_redis()
-    try:
-        await patch_runtime_strategy_config(redis, {"reversal_warning_threshold": value})
-        logger.info("Reversal warning threshold updated", value=value)
-    finally:
-        await redis.aclose()
-
-    try:
-        await query.message.edit_text(
-            await _format_strategy_text(),
-            reply_markup=await strategy_keyboard(),
-        )
-    except Exception:
-        pass
-
-
-@router.callback_query(F.data.startswith("strategy:reversal:crit:"))
-async def cb_reversal_crit(query: CallbackQuery) -> None:
-    try:
-        await query.answer()
-    except Exception:
-        pass
-
-    value = int(query.data.split(":")[-1])
-
-    redis = await _get_redis()
-    try:
-        await patch_runtime_strategy_config(redis, {"reversal_critical_threshold": value})
-        logger.info("Reversal critical threshold updated", value=value)
-    finally:
-        await redis.aclose()
-
-    try:
-        await query.message.edit_text(
-            await _format_strategy_text(),
-            reply_markup=await strategy_keyboard(),
-        )
-    except Exception:
-        pass
-
-
-@router.callback_query(F.data.startswith("strategy:reversal:action:"))
-async def cb_reversal_action(query: CallbackQuery) -> None:
-    try:
-        await query.answer()
-    except Exception:
-        pass
-
-    value = query.data.split(":")[-1]
-
-    redis = await _get_redis()
-    try:
-        await patch_runtime_strategy_config(redis, {"reversal_action": value})
-        logger.info("Reversal action updated", value=value)
-    finally:
-        await redis.aclose()
-
-    try:
-        await query.message.edit_text(
-            await _format_strategy_text(),
-            reply_markup=await strategy_keyboard(),
-        )
-    except Exception:
-        pass
-
-
-@router.callback_query(F.data.startswith("strategy:reversal:pnl:"))
-async def cb_reversal_pnl(query: CallbackQuery) -> None:
-    try:
-        await query.answer()
-    except Exception:
-        pass
-
-    value = query.data.split(":")[-1]
-
-    redis = await _get_redis()
-    try:
-        await patch_runtime_strategy_config(redis, {"reversal_pnl_filter": value})
-        logger.info("Reversal PnL filter updated", value=value)
     finally:
         await redis.aclose()
 

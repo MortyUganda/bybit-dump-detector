@@ -38,12 +38,6 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "max_entry_drop_pct": -0.3,
     "trade_monitor_interval": 5,
     "max_trade_duration_sec": 60 * 60 * 4,
-    # Reversal Risk settings
-    "reversal_enabled": True,
-    "reversal_warning_threshold": 4,
-    "reversal_critical_threshold": 7,
-    "reversal_action": "tighten_trailing",  # notify_only | tighten_trailing | auto_close
-    "reversal_pnl_filter": "always",        # profit_only | always
 }
 
 
@@ -82,24 +76,6 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
     merged["max_trade_duration_sec"] = max(
         60, int(merged.get("max_trade_duration_sec", 60 * 60 * 4))
     )
-
-    # Reversal Risk normalization
-    merged["reversal_enabled"] = bool(merged.get("reversal_enabled", True))
-    merged["reversal_warning_threshold"] = max(
-        1, min(11, int(merged.get("reversal_warning_threshold", 4)))
-    )
-    merged["reversal_critical_threshold"] = max(
-        merged["reversal_warning_threshold"] + 1,
-        min(11, int(merged.get("reversal_critical_threshold", 7))),
-    )
-    reversal_action = merged.get("reversal_action", "tighten_trailing")
-    if reversal_action not in ("notify_only", "tighten_trailing", "auto_close"):
-        reversal_action = "tighten_trailing"
-    merged["reversal_action"] = reversal_action
-    reversal_pnl_filter = merged.get("reversal_pnl_filter", "always")
-    if reversal_pnl_filter not in ("profit_only", "always"):
-        reversal_pnl_filter = "always"
-    merged["reversal_pnl_filter"] = reversal_pnl_filter
 
     return merged
 

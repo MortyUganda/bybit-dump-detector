@@ -298,162 +298,6 @@ class AutoShortService:
             logger.debug("Redis score fetch failed", symbol=symbol, error=str(e))
         return None
 
-    # ── Reversal risk detection ──────────────────────────────────
-
-    async def _get_reversal_config(self) -> dict[str, Any]:
-        cfg = await self._get_strategy()
-        return {
-            "enabled": cfg.get("reversal_enabled", True),
-            "warning_threshold": int(cfg.get("reversal_warning_threshold", 4)),
-            "critical_threshold": int(cfg.get("reversal_critical_threshold", 7)),
-            "action": cfg.get("reversal_action", "tighten_trailing"),
-            "pnl_filter": cfg.get("reversal_pnl_filter", "always"),
-        }
-
-    async def _get_entry_snapshot(self, symbol: str) -> dict[str, Any]:
-        """Capture feature values at entry for reversal comparison."""
-        snapshot: dict[str, Any] = {}
-        try:
-            raw = await self._redis.get(f"score:{symbol}")
-            if raw:
-                data = json.loads(raw)
-                factors = {f["name"]: f["raw_value"] for f in data.get("factors", [])}
-                snapshot["volume_zscore"] = factors.get("volume_zscore", 0.0)
-                snapshot["large_buy_cluster"] = factors.get("large_buy_cluster", 0.0)
-                snapshot["rsi_1m"] = factors.get("rsi_1m", 50.0)
-                snapshot["ob_bid_thinning"] = factors.get("ob_bid_thinning", 0.0)
-                snapshot["funding_rate"] = factors.get("funding_rate", 0.0)
-                snapshot["cvd_divergence"] = factors.get("cvd_divergence", 0.0)
-                snapshot["consecutive_greens"] = factors.get("consecutive_greens", 0.0)
-                snapshot["spread_expansion"] = factors.get("spread_expansion", 0.0)
-        except Exception as e:
-            logger.debug("Entry snapshot capture failed", symbol=symbol, error=str(e))
-        return snapshot
-
-    async def _calc_reversal_score(
-        self, symbol: str, entry_snapshot: dict[str, Any],
-    ) -> tuple[int, list[str]]:
-        """
-        Calculate reversal risk score (0-11) by evaluating factors
-        that suggest the dump may be reversing.
-        Returns (score, list of triggered factor descriptions).
-        """
-        score = 0
-        triggered: list[str] = []
-
-        try:
-            raw = await self._redis.get(f"score:{symbol}")
-            if not raw:
-                return 0, []
-            data = json.loads(raw)
-        except Exception:
-            return 0, []
-
-        factors = {f["name"]: f["raw_value"] for f in data.get("factors", [])}
-        entry_vol = entry_snapshot.get("volume_zscore", 0.0)
-
-        # 1. Volume exhaustion: current volume < 50% of entry volume (weight 1)
-        cur_vol = factors.get("volume_zscore", 0.0)
-        if entry_vol > 0 and cur_vol < entry_vol * 0.5:
-            score += 1
-            triggered.append(f"Объём упал ({cur_vol:.1f} vs {entry_vol:.1f} при входе)")
-
-        # 2. Large buy cluster appeared (weight 2)
-        cur_large_buy = factors.get("large_buy_cluster", 0.0)
-        if cur_large_buy > 0:
-            score += 2
-            triggered.append(f"Крупные покупки ({cur_large_buy:.0f})")
-
-        # 3. RSI oversold < 30 (weight 1)
-        cur_rsi = factors.get("rsi_1m", 50.0)
-        if cur_rsi < 30:
-            score += 1
-            triggered.append(f"RSI перепродан ({cur_rsi:.1f})")
-
-        # 4. Bid depth recovery: ob_bid_thinning improved 20%+ (weight 1)
-        entry_bid = entry_snapshot.get("ob_bid_thinning", 0.0)
-        cur_bid = factors.get("ob_bid_thinning", 0.0)
-        # ob_bid_thinning is negative when bids thin; recovery = less negative / positive
-        if entry_bid < -5 and (cur_bid - entry_bid) >= abs(entry_bid) * 0.2:
-            score += 1
-            triggered.append(f"Bid depth восстановился ({cur_bid:.1f}% vs {entry_bid:.1f}%)")
-
-        # 5. Funding rate negative < -0.01% — squeeze risk (weight 2)
-        cur_funding = factors.get("funding_rate", 0.0)
-        if cur_funding < -0.0001:
-            score += 2
-            triggered.append(f"Funding отрицательный ({cur_funding * 100:.4f}%)")
-
-        # 6. CVD reversal: was negative, turned positive (weight 2)
-        entry_cvd = entry_snapshot.get("cvd_divergence", 0.0)
-        cur_cvd = factors.get("cvd_divergence", 0.0)
-        if entry_cvd < 0 and cur_cvd > 0:
-            score += 2
-            triggered.append(f"CVD развернулся вверх ({cur_cvd:.2f})")
-
-        # 7. Consecutive green candles >= 2 after reds (weight 1)
-        cur_greens = factors.get("consecutive_greens", 0.0)
-        entry_greens = entry_snapshot.get("consecutive_greens", 0.0)
-        if cur_greens >= 2 and entry_greens < 2:
-            score += 1
-            triggered.append(f"Зелёные свечи подряд ({int(cur_greens)})")
-
-        # 8. Spread normalization: spread returned to normal (weight 1)
-        entry_spread = entry_snapshot.get("spread_expansion", 0.0)
-        cur_spread = factors.get("spread_expansion", 0.0)
-        if entry_spread > 0.1 and cur_spread < entry_spread * 0.5:
-            score += 1
-            triggered.append("Спред нормализовался")
-
-        return score, triggered
-
-    async def _notify_reversal_risk(
-        self,
-        trade_id: int,
-        symbol: str,
-        reversal_score: int,
-        pnl: float,
-        triggered_factors: list[str],
-        level: str,
-        action_text: str,
-    ) -> None:
-        if not self._bot:
-            return
-
-        try:
-            from app.bot.user_store import get_active_users
-
-            user_ids = await get_active_users(self._redis)
-            if not user_ids:
-                return
-
-            emoji = "⚠️" if level == "warning" else "🔴"
-            level_text = "Риск разворота" if level == "warning" else "КРИТИЧЕСКИЙ риск разворота"
-
-            factors_text = "\n".join(f"• {f}" for f in triggered_factors)
-
-            text = (
-                f"{emoji} <b>{level_text} {symbol}</b>\n\n"
-                f"📊 Reversal score: <b>{reversal_score}/11</b>\n"
-                f"💰 Текущий PnL: <b>{pnl:+.1f}%</b>\n\n"
-                f"Сработавшие факторы:\n{factors_text}\n\n"
-                f"Действие: <b>{action_text}</b>\n\n"
-                f"<i>Сделка #{trade_id}</i>"
-            )
-
-            for user_id in user_ids:
-                try:
-                    await self._bot.send_message(
-                        chat_id=user_id,
-                        text=text,
-                        parse_mode="HTML",
-                    )
-                except Exception as e:
-                    logger.warning("Reversal notify failed", user_id=user_id, error=str(e))
-
-        except Exception as e:
-            logger.error("Reversal notification failed", error=str(e))
-
     # ── Entry monitoring ──────────────────────────────────────────
 
     async def _monitor_entry(
@@ -1467,9 +1311,6 @@ class AutoShortService:
                     )
                     return
 
-                # Capture entry snapshot for reversal risk detection
-                entry_snapshot = await self._get_entry_snapshot(symbol)
-
                 trade_payload = {
                     "id": trade_id,
                     "symbol": symbol,
@@ -1486,7 +1327,6 @@ class AutoShortService:
                     "price_15m_saved": False,
                     "price_30m_saved": False,
                     "price_60m_saved": False,
-                    "entry_snapshot": entry_snapshot,
                 }
 
                 await self._set_active_short(trade_id, trade_payload)
@@ -1606,11 +1446,6 @@ class AutoShortService:
         accumulated_funding_pct = 0.0
         last_funding_hour: int | None = None
 
-        # Reversal risk tracking
-        last_reversal_notify_ts: float = 0.0
-        REVERSAL_COOLDOWN_SEC = 60
-        entry_snapshot: dict[str, Any] = trade.get("entry_snapshot", {})
-
         while trade["status"] == "open":
             trade_monitor_interval = await self._get_trade_monitor_interval()
             max_trade_duration = await self._get_max_trade_duration()
@@ -1710,104 +1545,6 @@ class AutoShortService:
                         new_sl=round(new_sl_price, 6),
                     )
 
-            # ── Reversal risk check ───────────────────────────────
-            reversal_cfg = await self._get_reversal_config()
-            if reversal_cfg["enabled"] and entry_snapshot:
-                should_check = (
-                    reversal_cfg["pnl_filter"] == "always"
-                    or pnl > 0
-                )
-                if should_check:
-                    rev_score, rev_factors = await self._calc_reversal_score(
-                        symbol, entry_snapshot,
-                    )
-
-                    now_ts = now.timestamp()
-                    can_notify = (now_ts - last_reversal_notify_ts) >= REVERSAL_COOLDOWN_SEC
-
-                    if rev_score >= reversal_cfg["critical_threshold"] and can_notify:
-                        action_text = "мониторинг"
-
-                        if reversal_cfg["action"] == "tighten_trailing":
-                            # Подтянуть trailing stop вдвое
-                            leverage = await self._get_leverage()
-                            if max_pnl_seen > 0:
-                                old_drawdown = MAX_DRAWDOWN_FRACTION
-                                new_drawdown = old_drawdown / 2
-                                desired_min_pnl = max(
-                                    -target_sl_pct,
-                                    max_pnl_seen * (1.0 - new_drawdown),
-                                )
-                                pnl_factor = desired_min_pnl / (leverage * 100.0)
-                                new_sl_price = entry_price * (1.0 - pnl_factor)
-                                if new_sl_price < trade["sl_price"]:
-                                    old_sl = trade["sl_price"]
-                                    trade["sl_price"] = new_sl_price
-                                    await self._set_active_short(trade_id, trade)
-                                    trailing_activated = True
-                                    action_text = f"trailing stop подтянут (SL {old_sl:.6g} → {new_sl_price:.6g})"
-                                else:
-                                    action_text = "trailing stop уже оптимален"
-                            else:
-                                action_text = "trailing stop не активирован (нет профита)"
-
-                        elif reversal_cfg["action"] == "auto_close":
-                            action_text = "авто-закрытие позиции"
-                            await self._notify_reversal_risk(
-                                trade_id=trade_id,
-                                symbol=symbol,
-                                reversal_score=rev_score,
-                                pnl=pnl,
-                                triggered_factors=rev_factors,
-                                level="critical",
-                                action_text=action_text,
-                            )
-                            await self._close_trade(
-                                trade_id, current_price, "reversal_close", pnl, accumulated_funding_pct,
-                            )
-                            return
-
-                        else:
-                            action_text = "только уведомление"
-
-                        await self._notify_reversal_risk(
-                            trade_id=trade_id,
-                            symbol=symbol,
-                            reversal_score=rev_score,
-                            pnl=pnl,
-                            triggered_factors=rev_factors,
-                            level="critical",
-                            action_text=action_text,
-                        )
-                        last_reversal_notify_ts = now_ts
-                        logger.info(
-                            "Reversal risk CRITICAL",
-                            trade_id=trade_id,
-                            symbol=symbol,
-                            reversal_score=rev_score,
-                            pnl=f"{pnl:+.2f}%",
-                            action=reversal_cfg["action"],
-                        )
-
-                    elif rev_score >= reversal_cfg["warning_threshold"] and can_notify:
-                        await self._notify_reversal_risk(
-                            trade_id=trade_id,
-                            symbol=symbol,
-                            reversal_score=rev_score,
-                            pnl=pnl,
-                            triggered_factors=rev_factors,
-                            level="warning",
-                            action_text="мониторинг",
-                        )
-                        last_reversal_notify_ts = now_ts
-                        logger.info(
-                            "Reversal risk WARNING",
-                            trade_id=trade_id,
-                            symbol=symbol,
-                            reversal_score=rev_score,
-                            pnl=f"{pnl:+.2f}%",
-                        )
-
             # TP/SL/expiry логика остаётся как была
             if current_price <= trade["tp_price"]:
                 await self._close_trade(trade_id, current_price, "tp_hit", pnl, accumulated_funding_pct)
@@ -1844,7 +1581,6 @@ class AutoShortService:
             "manual",
             "expired",
             "closed_manual",
-            "reversal_close",
         }
         if reason not in allowed_reasons:
             logger.warning(
