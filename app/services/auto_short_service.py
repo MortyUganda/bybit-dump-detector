@@ -1774,6 +1774,17 @@ class AutoShortService:
                                 current_price=current_price,
                             )
 
+                    if rr_score >= rr_critical and rr_action == "auto_close":
+                        logger.info(
+                            "Reversal risk: auto-closing position",
+                            trade_id=trade_id,
+                            symbol=symbol,
+                            rr_score=rr_score,
+                            pnl=f"{pnl:+.2f}%",
+                        )
+                        await self._close_trade(trade_id, current_price, "reversal_close", pnl, accumulated_funding_pct)
+                        return
+
                     if (
                         rr_score >= rr_critical
                         and rr_action == "tighten_trailing"
@@ -1874,6 +1885,7 @@ class AutoShortService:
             "manual",
             "expired",
             "closed_manual",
+            "reversal_close",
         }
         if reason not in allowed_reasons:
             logger.warning(
@@ -1885,7 +1897,7 @@ class AutoShortService:
 
         # ── Slippage on exit (shorts: slippage pushes price up = worse) ──
         slippage_pct = 0.0
-        if reason in ("sl_hit", "trailing_sl"):
+        if reason in ("sl_hit", "trailing_sl", "reversal_close"):
             slip = random.uniform(0.0001, 0.001)  # 0.01-0.1%
             exit_price *= (1 + slip)
             slippage_pct = slip * 100  # as percentage
@@ -2331,6 +2343,7 @@ class AutoShortService:
                 "expired": "⏰ Время сделки истекло (4 часа)",
                 "closed_manual": "✋ Закрыта вручную",
                 "manual": "✋ Закрыта вручную",
+                "reversal_close": "⬇️ Автозакрытие по Reversal Risk",
             }.get(reason, reason)
 
             pnl_em = "🟢" if pnl > 0 else "🔴"

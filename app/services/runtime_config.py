@@ -91,7 +91,7 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
         1, min(11, int(merged.get("reversal_risk_critical_threshold", 7)))
     )
     rr_action = merged.get("reversal_risk_action", "tighten_trailing")
-    if rr_action not in ("notify_only", "tighten_trailing"):
+    if rr_action not in ("notify_only", "tighten_trailing", "auto_close"):
         rr_action = "tighten_trailing"
     merged["reversal_risk_action"] = rr_action
 

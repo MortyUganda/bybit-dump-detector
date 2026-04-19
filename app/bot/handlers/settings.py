@@ -284,6 +284,7 @@ async def _reversal_risk_keyboard() -> InlineKeyboardMarkup:
     actions = [
         ("notify_only", "🔔 Только уведомление"),
         ("tighten_trailing", "🔧 Ужесточить trailing"),
+        ("auto_close", "🚪 Закрыть сделку"),
     ]
     for act_val, act_label in actions:
         marker = "✅ " if action == act_val else ""
@@ -292,7 +293,7 @@ async def _reversal_risk_keyboard() -> InlineKeyboardMarkup:
     # Back
     builder.button(text="◀️ Назад", callback_data="rr:back")
 
-    builder.adjust(1, 4, 4, 2, 1)
+    builder.adjust(1, 4, 4, 3, 1)
     return builder.as_markup()
 
 
@@ -309,7 +310,17 @@ async def _format_reversal_risk() -> str:
     action = cfg.get("reversal_risk_action", "tighten_trailing")
 
     en_em = "✅ ВКЛ" if enabled else "❌ ВЫКЛ"
-    action_text = "🔧 Ужесточить trailing" if action == "tighten_trailing" else "🔔 Только уведомление"
+    action_map = {
+        "tighten_trailing": "🔧 Ужесточить trailing",
+        "auto_close": "🚪 Закрыть сделку",
+    }
+    action_text = action_map.get(action, "🔔 Только уведомление")
+
+    critical_desc = {
+        "tighten_trailing": "ужесточение trailing stop",
+        "auto_close": "автозакрытие позиции",
+    }
+    critical_action = critical_desc.get(action, "только уведомление")
 
     return (
         f"⬇️ <b>Reversal Risk — настройки</b>\n\n"
@@ -318,7 +329,7 @@ async def _format_reversal_risk() -> str:
         f"🔴 Critical порог: <b>≥{critical_th}</b>\n"
         f"Действие: <b>{action_text}</b>\n\n"
         f"<i>Warning — уведомление в Telegram\n"
-        f"Critical — уведомление + ужесточение trailing stop</i>"
+        f"Critical — уведомление + {critical_action}</i>"
     )
 
 
