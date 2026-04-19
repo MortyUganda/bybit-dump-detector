@@ -1,0 +1,141 @@
+services:
+  # ─── Infrastructure ──────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: dd_postgres_dev2
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dumpdetector}
+      POSTGRES_USER: ${POSTGRES_USER:-dumpuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-strongpassword123}
+    volumes:
+      - postgres_data_dev2:/var/lib/postgresql/data
+      - ../scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dumpuser} -d ${POSTGRES_DB:-dumpdetector}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dd_network_dev2
+
+  redis:
+    image: redis:7-alpine
+    container_name: dd_redis_dev2
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data_dev2:/data
+    ports:
+      - "6382:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - dd_network_dev2
+
+  # ─── App Services ────────────────────────────────────────────
+  ingestion:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: dd_ingestion_dev2
+    restart: unless-stopped
+    command: python -m app.main ingestion
+    env_file: ../.env.dev2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../logs_dev2:/app/logs
+    environment:
+      SERVICE_NAME: ingestion
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis as r, os; c = r.from_url(os.environ.get('REDIS_URL','redis://redis:6379')); c.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - dd_network_dev2
+
+  analyzer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: dd_analyzer_dev2
+    restart: unless-stopped
+    command: python -m app.main analyzer
+    env_file: ../.env.dev2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../logs_dev2:/app/logs
+    environment:
+      SERVICE_NAME: analyzer
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis as r, os; c = r.from_url(os.environ.get('REDIS_URL','redis://redis:6379')); c.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - dd_network_dev2
+
+  bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: dd_bot_dev2
+    restart: unless-stopped
+    command: python -m app.main bot
+    env_file: ../.env.dev2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../logs_dev2:/app/logs
+    environment:
+      SERVICE_NAME: bot
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis as r, os; c = r.from_url(os.environ.get('REDIS_URL','redis://redis:6379')); c.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - dd_network_dev2
+
+  # ─── Migration runner (runs once then exits) ─────────────────
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: dd_migrate_dev2
+    restart: "no"
+    command: python -m app.db.migrations.run_migrations
+    env_file: ../.env.dev2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dd_network_dev2
+
+volumes:
+  postgres_data_dev2:
+  redis_data_dev2:
+
+networks:
+  dd_network_dev2:
+    driver: bridge
