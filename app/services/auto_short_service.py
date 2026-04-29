@@ -349,24 +349,24 @@ class AutoShortService:
                     "Canceled because score dropped",
                     symbol=symbol,
                     attempt=attempt + 1,
-                    score=round(current_score, 1),
+                    score=round(effective_score, 1),
                     min_score=await self._get_min_score_to_enter(),
                 )
                 await self._save_canceled_signal(
                     risk_score=risk_score,
                     signal_price=signal_price,
-                    final_price=current_price,
+                    final_price=entry_price,
                     price_change_pct=price_change_pct,
-                    final_score=current_score,
+                    final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=current_price,
+                    entry_price=entry_price,
                     price_change_pct=price_change_pct,
-                    score=current_score,
+                    score=effective_score,
                     reason="score_dropped",
                 )
                 return None
@@ -381,18 +381,18 @@ class AutoShortService:
                 await self._save_canceled_signal(
                     risk_score=risk_score,
                     signal_price=signal_price,
-                    final_price=current_price,
+                    final_price=entry_price,
                     price_change_pct=price_change_pct,
-                    final_score=current_score,
+                    final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=current_price,
+                    entry_price=entry_price,
                     price_change_pct=price_change_pct,
-                    score=current_score,
+                    score=effective_score,
                     reason="score_dropped",
                 )
                 return None
@@ -408,18 +408,18 @@ class AutoShortService:
                 await self._save_canceled_signal(
                     risk_score=risk_score,
                     signal_price=signal_price,
-                    final_price=current_price,
+                    final_price=entry_price,
                     price_change_pct=price_change_pct,
-                    final_score=current_score,
+                    final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=current_price,
+                    entry_price=entry_price,
                     price_change_pct=price_change_pct,
-                    score=current_score,
+                    score=effective_score,
                     reason="score_dropped",
                 )
                 return None
@@ -433,7 +433,7 @@ class AutoShortService:
         )
 
         last_price = await self._get_price(symbol)
-        last_score = await self._get_current_score(symbol) or initial_score
+        last_score = await self._get_effective_score(symbol) or initial_score
         last_change = (
             self._calc_price_move_pct(signal_price, last_price)
             if last_price
@@ -443,18 +443,18 @@ class AutoShortService:
         await self._save_canceled_signal(
             risk_score=risk_score,
             signal_price=signal_price,
-            final_price=current_price,
+            final_price=entry_price,
             price_change_pct=price_change_pct,
-            final_score=current_score,
+            final_score=effective_score,
             cancel_reason="score_dropped",
             entry_mode_candidate="after_monitor",
         )
         await self._notify_entry_canceled(
             symbol=symbol,
             signal_price=signal_price,
-            current_price=current_price,
+            entry_price=entry_price,
             price_change_pct=price_change_pct,
-            score=current_score,
+            score=effective_score,
             reason="score_dropped",
         )
         return None
@@ -464,7 +464,7 @@ class AutoShortService:
         self,
         symbol: str,
         signal_price: float,
-        current_price: float,
+        entry_price: float,
         price_change_pct: float,
         score: float,
         reason: str,
@@ -516,7 +516,7 @@ class AutoShortService:
                 f"📌 <a href=\"{bybit_url}\">{symbol}</a>\n"
                 f"📊 Score: <b>{score:.0f}</b>\n\n"
                 f"📍 Цена сигнала: <b>${signal_price:.6g}</b>\n"
-                f"📍 Текущая цена: <b>${current_price:.6g}</b>\n"
+                f"📍 Текущая цена: <b>${entry_price:.6g}</b>\n"
                 f"{detail}"
             )
 
@@ -573,15 +573,15 @@ class AutoShortService:
                 elapsed = (now - trade.entry_ts).total_seconds()
 
                 if elapsed >= max_trade_duration:
-                    current_price = await self._get_price(trade.symbol)
-                    if current_price:
+                    entry_price = await self._get_price(trade.symbol)
+                    if entry_price:
                         pnl = await self._calc_short_pnl_pct(
                             trade.entry_price,
-                            current_price,
+                            entry_price,
                         )
                         await self._update_db(
                             trade_id=trade.id,
-                            exit_price=current_price,
+                            exit_price=entry_price,
                             exit_ts=now,
                             status="closed",
                             close_reason="expired",
@@ -886,9 +886,9 @@ class AutoShortService:
                 )
                 return
 
-            current_score = await self._get_current_score(symbol)
+            effective_score = await self._get_effective_score(symbol)
             effective_score = (
-                float(current_score) if current_score is not None else float(risk_score.score)
+                float(effective_score) if effective_score is not None else float(risk_score.score)
             )
             price_change_pct = self._calc_price_move_pct(signal_price, entry_price)
 
@@ -899,12 +899,12 @@ class AutoShortService:
                 signal_price=signal_price,
                 entry_price=entry_price,
                 change_pct=round(price_change_pct, 3),
-                current_score=round(effective_score, 1),
+                effective_score=round(effective_score, 1),
             )
 
             decision = await self._evaluate_entry_conditions(
                 price_change_pct=price_change_pct,
-                current_score=effective_score,
+                effective_score=effective_score,
                 symbol=symbol,
             )
 
@@ -919,18 +919,18 @@ class AutoShortService:
                 await self._save_canceled_signal(
                     risk_score=risk_score,
                     signal_price=signal_price,
-                    final_price=current_price,
+                    final_price=entry_price,
                     price_change_pct=price_change_pct,
-                    final_score=current_score,
+                    final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=current_price,
+                    entry_price=entry_price,
                     price_change_pct=price_change_pct,
-                    score=current_score,
+                    score=effective_score,
                     reason="score_dropped",
                 )
                 return
@@ -945,18 +945,18 @@ class AutoShortService:
                 await self._save_canceled_signal(
                     risk_score=risk_score,
                     signal_price=signal_price,
-                    final_price=current_price,
+                    final_price=entry_price,
                     price_change_pct=price_change_pct,
-                    final_score=current_score,
+                    final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=current_price,
+                    entry_price=entry_price,
                     price_change_pct=price_change_pct,
-                    score=current_score,
+                    score=effective_score,
                     reason="score_dropped",
                 )
                 return
@@ -971,18 +971,18 @@ class AutoShortService:
                 await self._save_canceled_signal(
                     risk_score=risk_score,
                     signal_price=signal_price,
-                    final_price=current_price,
+                    final_price=entry_price,
                     price_change_pct=price_change_pct,
-                    final_score=current_score,
+                    final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=current_price,
+                    entry_price=entry_price,
                     price_change_pct=price_change_pct,
-                    score=current_score,
+                    score=effective_score,
                     reason="score_dropped",
                 )
                 return
