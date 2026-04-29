@@ -50,7 +50,9 @@ async def get_user_settings(user_id: int, redis: aioredis.Redis | None = None) -
         raw = await redis.hgetall(f"{REDIS_USER_SETTINGS_PREFIX}:{user_id}")
         if not raw:
             return DEFAULT_SETTINGS.copy()
-        return {k: json.loads(v) for k, v in raw.items()}
+        merged = DEFAULT_SETTINGS.copy()
+        merged.update({k: json.loads(v) for k, v in raw.items()})
+        return merged
     finally:
         if close_after:
             await redis.aclose()
