@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, Float, Integer, String
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import Column, String, Float
 from app.db.models.base import Base
@@ -97,3 +98,14 @@ class AutoShort(Base):
     f_cvd_divergence: Mapped[float | None] = mapped_column(Float, nullable=True)
     f_liquidation_cascade: Mapped[float | None] = mapped_column(Float, nullable=True)
     realized_vol_1h: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Order book snapshot при входе (для ML) ────────────────────
+    ob_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    ob_bid_volume_top10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_ask_volume_top10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_imbalance_top10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_spread_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_bid_wall_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_bid_wall_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_ask_wall_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_ask_wall_size: Mapped[float | None] = mapped_column(Float, nullable=True)

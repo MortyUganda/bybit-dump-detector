@@ -137,6 +137,12 @@ class IngestionService:
         if snapshot:
             calc = self._get_or_create_calculator(symbol)
             calc.update_orderbook(snapshot)
+            # Сохраняем raw orderbook top-20 в Redis для auto_short_service
+            try:
+                ob_key = f"ob:{symbol}"
+                await self._redis.setex(ob_key, 60, json.dumps(snapshot))
+            except Exception:
+                pass
 
     # ── REST refresh loops ────────────────────────────────────────
 

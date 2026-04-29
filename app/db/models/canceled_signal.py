@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, Float, Integer, String
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -74,3 +75,14 @@ class CanceledSignal(Base):
     funding_rate_at_signal: Mapped[float | None] = mapped_column(Float, nullable=True)
     oi_change_pct_at_signal: Mapped[float | None] = mapped_column(Float, nullable=True)
     trend_strength_1h: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Order book snapshot при сигнале (для ML) ───────────────────
+    ob_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    ob_bid_volume_top10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_ask_volume_top10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_imbalance_top10: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_spread_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_bid_wall_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_bid_wall_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_ask_wall_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ob_ask_wall_size: Mapped[float | None] = mapped_column(Float, nullable=True)
