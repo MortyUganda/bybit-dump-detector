@@ -2,3 +2,5 @@ dd_venv
 .env
 .env.dev2
 .env.dev__pycache__/
+exports
+.env.dev
