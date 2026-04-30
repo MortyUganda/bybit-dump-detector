@@ -6,7 +6,7 @@ from sqlalchemy import DateTime, Float, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.models.base import Base
 
 
 class CanceledSignal(Base):

@@ -7,6 +7,7 @@ from app.db.models.user import UserSettings, Watchlist
 from app.db.models.alert import AlertHistory
 from app.db.models.paper_trade import PaperTrade
 from app.db.models.auto_short import AutoShort  # ← новая таблица
+from app.db.models.canceled_signal import CanceledSignal
 
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "AlertHistory",
     "PaperTrade",
     "AutoShort",
+    "CanceledSignal",
 ]
