@@ -54,6 +54,13 @@ async def strategy_keyboard() -> InlineKeyboardMarkup:
     enabled_label = "🤖 Авто-шорт: ВКЛ ✅" if cfg["enabled"] else "🤖 Авто-шорт: ВЫКЛ ❌"
     builder.button(text=enabled_label, callback_data="strategy:toggle:enabled")
 
+    shadow_label = (
+        "👻 Shadow trades: ВКЛ ✅"
+        if cfg.get("shadow_trades_enabled", True)
+        else "👻 Shadow trades: ВЫКЛ ❌"
+    )
+    builder.button(text=shadow_label, callback_data="strategy:toggle:shadow")
+
     for signal_type in ["early_warning", "overheated", "reversal_risk", "dump_started"]:
         is_enabled = signal_type in cfg.get("allowed_signal_types", [])
         builder.button(
@@ -91,7 +98,7 @@ async def strategy_keyboard() -> InlineKeyboardMarkup:
 
     builder.button(text="🔄 Сбросить стратегию", callback_data="strategy:reset")
 
-    builder.adjust(1, 2, 2, 2, 2, 2, 2, 1)
+    builder.adjust(1, 1, 2, 2, 2, 2, 2, 2, 1)
     return builder.as_markup()
 
 
@@ -116,7 +123,8 @@ async def _format_strategy_text() -> str:
         f"⚡ Leverage: <b>{cfg['leverage']}x</b>\n"
         f"📈 Max rise: <b>{cfg['max_rise_pct']}%</b>\n"
         f"📉 Max entry drop: <b>{cfg['max_entry_drop_pct']}%</b>\n"
-        f"📌 Stabilization threshold: <b>{cfg['stabilization_threshold_pct']}%</b>\n\n"
+        f"📌 Stabilization threshold: <b>{cfg['stabilization_threshold_pct']}%</b>\n"
+        f"👻 Shadow trades: <b>{'YES' if cfg.get('shadow_trades_enabled', True) else 'NO'}</b>\n\n"
         f"<i>Изменения применяются на лету через Redis</i>"
     )
 
@@ -127,6 +135,35 @@ async def cmd_strategy(msg: Message) -> None:
         await _format_strategy_text(),
         reply_markup=await strategy_keyboard(),
     )
+
+
+@router.callback_query(F.data == "strategy:toggle:shadow")
+async def cb_toggle_shadow(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+        new_value = not cfg.get("shadow_trades_enabled", True)
+        await patch_runtime_strategy_config(redis, {"shadow_trades_enabled": new_value})
+        logger.info(
+            "Strategy shadow_trades_enabled toggled",
+            value=new_value,
+            user_id=query.from_user.id if query.from_user else None,
+        )
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_strategy_text(),
+            reply_markup=await strategy_keyboard(),
+        )
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "strategy:toggle:enabled")

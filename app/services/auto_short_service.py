@@ -665,6 +665,47 @@ class AutoShortService:
             logger.exception("Failed to restore trades", error=str(e))
 
 
+    async def _maybe_save_shadow_trade(
+        self,
+        risk_score: RiskScore,
+        cancel_reason: str,
+    ) -> None:
+        """
+        Сохраняет shadow trade — сигнал, который отфильтрован по служебной логике
+        (уже открытый символ, дубль, стратегия выкл., тип отключён).
+        Синтетический PnL посчитается автоматически через _track_canceled_signal_price.
+        """
+        try:
+            strategy = await self._get_strategy()
+            if not strategy.get("shadow_trades_enabled", True):
+                return
+
+            symbol = risk_score.symbol
+            signal_price = await self._get_price(symbol)
+            if not signal_price and risk_score.features_snapshot:
+                signal_price = risk_score.features_snapshot.last_price
+            if not signal_price:
+                return
+
+            ob_snap = await self._get_ob_snapshot(symbol, float(signal_price))
+
+            await self._save_canceled_signal(
+                risk_score=risk_score,
+                signal_price=float(signal_price),
+                final_price=float(signal_price),
+                price_change_pct=0.0,
+                final_score=float(risk_score.score),
+                cancel_reason=cancel_reason,
+                entry_mode_candidate="shadow",
+                ob_snapshot_data=ob_snap,
+            )
+        except Exception as e:
+            logger.debug(
+                "Shadow trade save failed",
+                cancel_reason=cancel_reason,
+                error=str(e),
+            )
+
     async def _save_canceled_signal(
         self,
         risk_score: RiskScore,
@@ -1177,6 +1218,10 @@ class AutoShortService:
                     symbol=symbol,
                     signal_type=signal_type,
                 )
+                await self._maybe_save_shadow_trade(
+                    risk_score=risk_score,
+                    cancel_reason="already_open",
+                )
                 return
 
             if symbol in self._pending_symbols:
@@ -1184,6 +1229,10 @@ class AutoShortService:
                     "Skipping short — symbol already pending entry",
                     symbol=symbol,
                     signal_type=signal_type,
+                )
+                await self._maybe_save_shadow_trade(
+                    risk_score=risk_score,
+                    cancel_reason="pending_duplicate",
                 )
                 return
 
@@ -1196,6 +1245,10 @@ class AutoShortService:
                     "Skipping short — strategy disabled",
                     symbol=symbol,
                     signal_type=signal_type,
+                )
+                await self._maybe_save_shadow_trade(
+                    risk_score=risk_score,
+                    cancel_reason="strategy_disabled",
                 )
                 return
 

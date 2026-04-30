@@ -100,6 +100,16 @@ class AlertManager:
                 score=risk_score.score,
                 signal_type=signal_type,
             )
+            try:
+                await self._auto_short._maybe_save_shadow_trade(
+                    risk_score=risk_score,
+                    cancel_reason="strategy_disabled",
+                )
+            except Exception as e:
+                logger.debug(
+                    "Shadow trade (strategy_disabled) save failed",
+                    error=str(e),
+                )
             return
 
         if not risk_score.is_alertable:
@@ -109,6 +119,7 @@ class AlertManager:
                 score=risk_score.score,
                 signal_type=signal_type,
             )
+            # Не фиксируем shadow trade для неалёртабельных score — слишком большой поток.
             return
 
         allowed_signal_types = set(strategy.get("allowed_signal_types", []))
@@ -120,6 +131,17 @@ class AlertManager:
                 signal_type=signal_type,
                 allowed_signal_types=sorted(allowed_signal_types),
             )
+            # Shadow trade: сигнал, отфильтрованный по типу.
+            try:
+                await self._auto_short._maybe_save_shadow_trade(
+                    risk_score=risk_score,
+                    cancel_reason="signal_type_filtered",
+                )
+            except Exception as e:
+                logger.debug(
+                    "Shadow trade (signal_type_filtered) save failed",
+                    error=str(e),
+                )
             return
 
         try:

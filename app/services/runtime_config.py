@@ -38,6 +38,7 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "max_entry_drop_pct": -0.3,
     "trade_monitor_interval": 5,
     "max_trade_duration_sec": 60 * 60 * 4,
+    "shadow_trades_enabled": True,
 }
 
 
@@ -76,6 +77,7 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
     merged["max_trade_duration_sec"] = max(
         60, int(merged.get("max_trade_duration_sec", 60 * 60 * 4))
     )
+    merged["shadow_trades_enabled"] = bool(merged.get("shadow_trades_enabled", True))
 
     return merged
 
