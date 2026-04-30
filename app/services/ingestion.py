@@ -132,17 +132,32 @@ class IngestionService:
     async def _on_orderbook(self, symbol: str, msg: dict) -> None:
         """Called on orderbook update from WS."""
         if not self._universe.is_active(symbol):
+            if not getattr(self, "_ob_inactive_logged", False):
+                logger.warning("OB skipped: symbol inactive", symbol=symbol)
+                self._ob_inactive_logged = True
             return
         snapshot = self._ob_analyzer.handle_ws_message(symbol, msg)
-        if snapshot:
-            calc = self._get_or_create_calculator(symbol)
-            calc.update_orderbook(snapshot)
-            # Сохраняем raw orderbook top-20 в Redis для auto_short_service
-            try:
-                ob_key = f"ob:{symbol}"
-                await self._redis.setex(ob_key, 60, json.dumps(snapshot))
-            except Exception:
-                pass
+        if not snapshot:
+            if not getattr(self, "_ob_no_snapshot_logged", False):
+                logger.warning("OB no snapshot returned", symbol=symbol, msg_type=msg.get("type"))
+                self._ob_no_snapshot_logged = True
+            return
+        calc = self._get_or_create_calculator(symbol)
+        calc.update_orderbook(snapshot)
+        # Сохраняем raw orderbook top-20 в Redis для auto_short_service
+        try:
+            ob_key = f"ob:{symbol}"
+            await self._redis.setex(ob_key, 60, json.dumps(snapshot, default=str))
+            if not getattr(self, "_ob_first_logged", False):
+                logger.info(
+                    "OB first write to Redis",
+                    symbol=symbol,
+                    bids=len(snapshot.get("bids", [])),
+                    asks=len(snapshot.get("asks", [])),
+                )
+                self._ob_first_logged = True
+        except Exception as e:
+            logger.error("OB Redis write failed", symbol=symbol, error=str(e), exc_info=True)
 
     # ── REST refresh loops ────────────────────────────────────────
 
