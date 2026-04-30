@@ -103,6 +103,16 @@ class AnalyzerService:
         scored = []
         for features in features_list:
             try:
+                # Подтягиваем OB-фичи из Redis (публикует ingestion-контейнер)
+                try:
+                    ob_raw = await self._redis.get(f"ob_features:{features.symbol}")
+                    if ob_raw:
+                        ob_data = json.loads(ob_raw)
+                        features.spread_pct = ob_data.get("spread_pct", 0.0)
+                        features.bid_depth_change_5m = ob_data.get("bid_depth_change_5m", 0.0)
+                except Exception:
+                    pass  # оставляем текущие значения (0)
+
                 # Populate BTC context on each feature
                 features.btc_change_15m = self._market_context.btc_change_15m
 

@@ -159,6 +159,21 @@ class IngestionService:
         except Exception as e:
             logger.error("OB Redis write failed", symbol=symbol, error=str(e), exc_info=True)
 
+        # Публикуем вычисленные OB-фичи в Redis для analyzer (межконтейнерная передача)
+        try:
+            tmp_f = CoinFeatures(symbol=symbol, ts=0, last_price=0)
+            calc._compute_ob_features(tmp_f)
+            spread = tmp_f.spread_pct if tmp_f.spread_pct is not None else 0.0
+            depth_change = tmp_f.bid_depth_change_5m if tmp_f.bid_depth_change_5m is not None else 0.0
+            ob_features_payload = json.dumps({
+                "spread_pct": spread,
+                "bid_depth_change_5m": depth_change,
+                "ts": utcnow_ts(),
+            })
+            await self._redis.setex(f"ob_features:{symbol}", 60, ob_features_payload)
+        except Exception as e:
+            logger.debug("OB features Redis write failed", symbol=symbol, error=str(e))
+
     # ── REST refresh loops ────────────────────────────────────────
 
     async def _candle_refresh_loop(self) -> None:
