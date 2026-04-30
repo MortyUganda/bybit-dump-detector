@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -86,3 +86,23 @@ class CanceledSignal(Base):
     ob_bid_wall_size: Mapped[float | None] = mapped_column(Float, nullable=True)
     ob_ask_wall_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     ob_ask_wall_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Post-cancel price tracking (для synthetic PnL и ML) ────────
+    price_15m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_30m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_60m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_15m_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    price_30m_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    price_60m_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Мин/макс цены в окне 60 мин — чтобы не терять касание TP/SL между точками
+    price_min_60m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_max_60m: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Synthetic PnL (что было бы, если бы вошли)
+    synthetic_pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    would_hit_tp: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    would_hit_sl: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    synthetic_close_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    time_to_tp_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    time_to_sl_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)

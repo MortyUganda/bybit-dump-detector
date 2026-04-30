@@ -570,6 +570,15 @@ class AutoShortService:
     # ── Restore open trades ───────────────────────────────────────
 
     async def restore_active_trades(self) -> None:
+        # Разовый backfill synthetic PnL для потерянных при рестарте воркеров
+        try:
+            await self._backfill_canceled_signals_pnl()
+        except Exception as e:
+            logger.warning("Initial canceled signals backfill failed", error=str(e))
+        # Периодический backfill раз в 5 минут
+        if not hasattr(self, "_canceled_backfill_task") or self._canceled_backfill_task.done():
+            self._canceled_backfill_task = asyncio.create_task(self._canceled_backfill_loop())
+
         try:
             from sqlalchemy import select
             from app.db.models.auto_short import AutoShort
@@ -750,7 +759,30 @@ class AutoShortService:
                 session.add(row)
                 await session.commit()
                 await session.refresh(row)
-                return row.id
+                canceled_id = row.id
+
+            # Запускаем фоновый мониторинг цены для synthetic PnL
+            try:
+                task = asyncio.create_task(
+                    self._track_canceled_signal_price(
+                        canceled_id=canceled_id,
+                        symbol=risk_score.symbol,
+                        signal_price=signal_price,
+                    )
+                )
+                # Сохраняем ссылку на task, чтобы GC не убил
+                if not hasattr(self, "_canceled_tracker_tasks"):
+                    self._canceled_tracker_tasks = set()
+                self._canceled_tracker_tasks.add(task)
+                task.add_done_callback(self._canceled_tracker_tasks.discard)
+            except Exception as e:
+                logger.warning(
+                    "Failed to start canceled signal tracker",
+                    canceled_id=canceled_id,
+                    error=str(e),
+                )
+
+            return canceled_id
 
         except Exception as e:
             logger.exception(
@@ -760,6 +792,275 @@ class AutoShortService:
                 error=str(e),
             )
             return None
+
+    # ── Post-cancel price tracking ──────────────────────────────
+
+    async def _track_canceled_signal_price(
+        self,
+        canceled_id: int,
+        symbol: str,
+        signal_price: float,
+    ) -> None:
+        """Отслеживает цену после отмены: 15/30/60 мин и min/max в окне.
+
+        Опрашивает цену каждые 30 секунд, чтобы не терять касания TP/SL.
+        По истечении 60 минут вызывает _compute_synthetic_pnl.
+        """
+        from sqlalchemy import update
+        from app.db.models.canceled_signal import CanceledSignal
+        from app.db.session import AsyncSessionLocal
+
+        try:
+            tp_pct = await self._get_tp_price_move_pct()
+            sl_pct = await self._get_sl_price_move_pct()
+        except Exception:
+            tp_pct, sl_pct = 10.0, 10.0
+
+        tp_price = signal_price * (1 - tp_pct / 100.0)
+        sl_price = signal_price * (1 + sl_pct / 100.0)
+
+        start_ts = datetime.now(timezone.utc)
+        price_min = signal_price
+        price_max = signal_price
+        time_to_tp_sec: int | None = None
+        time_to_sl_sec: int | None = None
+        saved_15m = saved_30m = saved_60m = False
+        poll_interval = 30  # секунд
+        end_sec = 60 * 60
+
+        try:
+            elapsed = 0
+            while elapsed < end_sec:
+                await asyncio.sleep(poll_interval)
+                elapsed = int((datetime.now(timezone.utc) - start_ts).total_seconds())
+
+                price = await self._get_price(symbol)
+                if price is None or price <= 0:
+                    continue
+
+                if price < price_min:
+                    price_min = price
+                if price > price_max:
+                    price_max = price
+                if time_to_tp_sec is None and price <= tp_price:
+                    time_to_tp_sec = elapsed
+                if time_to_sl_sec is None and price >= sl_price:
+                    time_to_sl_sec = elapsed
+
+                # Достигли следующей точки — сохраняем в БД
+                updates: dict[str, Any] = {}
+                now = datetime.now(timezone.utc)
+                if not saved_15m and elapsed >= 15 * 60:
+                    updates["price_15m"] = price
+                    updates["price_15m_ts"] = now
+                    saved_15m = True
+                if not saved_30m and elapsed >= 30 * 60:
+                    updates["price_30m"] = price
+                    updates["price_30m_ts"] = now
+                    saved_30m = True
+                if not saved_60m and elapsed >= 60 * 60:
+                    updates["price_60m"] = price
+                    updates["price_60m_ts"] = now
+                    saved_60m = True
+                if updates:
+                    try:
+                        async with AsyncSessionLocal() as session:
+                            await session.execute(
+                                update(CanceledSignal)
+                                .where(CanceledSignal.id == canceled_id)
+                                .values(**updates)
+                            )
+                            await session.commit()
+                    except Exception as e:
+                        logger.warning(
+                            "Canceled price snapshot save failed",
+                            canceled_id=canceled_id,
+                            error=str(e),
+                        )
+
+            # Окно закрыто — сохраняем min/max и time_to_tp/sl, считаем synthetic PnL
+            try:
+                async with AsyncSessionLocal() as session:
+                    await session.execute(
+                        update(CanceledSignal)
+                        .where(CanceledSignal.id == canceled_id)
+                        .values(
+                            price_min_60m=price_min,
+                            price_max_60m=price_max,
+                            time_to_tp_sec=time_to_tp_sec,
+                            time_to_sl_sec=time_to_sl_sec,
+                        )
+                    )
+                    await session.commit()
+            except Exception as e:
+                logger.warning(
+                    "Canceled min/max save failed",
+                    canceled_id=canceled_id,
+                    error=str(e),
+                )
+
+            await self._compute_synthetic_pnl(canceled_id)
+
+            logger.info(
+                "Canceled signal tracking finished",
+                canceled_id=canceled_id,
+                symbol=symbol,
+                price_min=price_min,
+                price_max=price_max,
+                hit_tp=time_to_tp_sec is not None,
+                hit_sl=time_to_sl_sec is not None,
+            )
+
+        except asyncio.CancelledError:
+            logger.info(
+                "Canceled signal tracker cancelled",
+                canceled_id=canceled_id,
+                symbol=symbol,
+            )
+            raise
+        except Exception as e:
+            logger.exception(
+                "Canceled signal tracker failed",
+                canceled_id=canceled_id,
+                symbol=symbol,
+                error=str(e),
+            )
+
+    async def _compute_synthetic_pnl(self, canceled_id: int) -> None:
+        """Считает synthetic PnL для отменённого сигнала.
+
+        Логика:
+        - Если time_to_sl_sec и time_to_tp_sec оба есть — берём раньше по времени.
+        - Если только точка (15/30/60) показывает касание — используем min/max для проверки.
+        - Иначе по price_60m — фактический исход.
+        """
+        from sqlalchemy import update
+        from app.db.models.canceled_signal import CanceledSignal
+        from app.db.session import AsyncSessionLocal
+
+        try:
+            async with AsyncSessionLocal() as session:
+                row = await session.get(CanceledSignal, canceled_id)
+                if row is None:
+                    return
+
+                signal_price = row.signal_price
+                if not signal_price or signal_price <= 0:
+                    return
+
+                try:
+                    tp_pct = await self._get_tp_price_move_pct()
+                    sl_pct = await self._get_sl_price_move_pct()
+                except Exception:
+                    tp_pct, sl_pct = 10.0, 10.0
+
+                tp_price = signal_price * (1 - tp_pct / 100.0)
+                sl_price = signal_price * (1 + sl_pct / 100.0)
+
+                hit_tp = (
+                    row.time_to_tp_sec is not None
+                    or (row.price_min_60m is not None and row.price_min_60m <= tp_price)
+                )
+                hit_sl = (
+                    row.time_to_sl_sec is not None
+                    or (row.price_max_60m is not None and row.price_max_60m >= sl_price)
+                )
+
+                close_reason = "expired_60m"
+                pnl_pct: float | None = None
+
+                if hit_tp and hit_sl:
+                    # Берём раньше по времени; если одно из time_* None — считаем консервативно (SL)
+                    if row.time_to_tp_sec is not None and row.time_to_sl_sec is not None:
+                        if row.time_to_tp_sec < row.time_to_sl_sec:
+                            close_reason = "tp_hit"
+                            pnl_pct = tp_pct
+                        else:
+                            close_reason = "sl_hit"
+                            pnl_pct = -sl_pct
+                    else:
+                        close_reason = "sl_hit"
+                        pnl_pct = -sl_pct
+                elif hit_tp:
+                    close_reason = "tp_hit"
+                    pnl_pct = tp_pct
+                elif hit_sl:
+                    close_reason = "sl_hit"
+                    pnl_pct = -sl_pct
+                else:
+                    if row.price_60m and row.price_60m > 0:
+                        pnl_pct = (signal_price - row.price_60m) / signal_price * 100.0
+                        close_reason = "expired_60m"
+                    else:
+                        close_reason = "no_data"
+
+                await session.execute(
+                    update(CanceledSignal)
+                    .where(CanceledSignal.id == canceled_id)
+                    .values(
+                        synthetic_pnl_pct=pnl_pct,
+                        would_hit_tp=hit_tp,
+                        would_hit_sl=hit_sl,
+                        synthetic_close_reason=close_reason,
+                    )
+                )
+                await session.commit()
+
+                logger.info(
+                    "Synthetic PnL computed",
+                    canceled_id=canceled_id,
+                    pnl_pct=pnl_pct,
+                    reason=close_reason,
+                )
+
+        except Exception as e:
+            logger.warning(
+                "Synthetic PnL compute failed",
+                canceled_id=canceled_id,
+                error=str(e),
+            )
+
+    async def _canceled_backfill_loop(self) -> None:
+        """Периодический backfill для canceled_signals без synthetic PnL."""
+        while True:
+            try:
+                await asyncio.sleep(300)  # 5 минут
+                await self._backfill_canceled_signals_pnl()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("Canceled backfill loop iter failed", error=str(e))
+
+    async def _backfill_canceled_signals_pnl(self) -> int:
+        """Добивает сигналы, у которых окно 60 мин истекло, но synthetic_pnl_pct = NULL.
+
+        Используется для сигналов, чьи воркеры потерялись при рестарте бота.
+        """
+        from datetime import timedelta
+        from sqlalchemy import select
+        from app.db.models.canceled_signal import CanceledSignal
+        from app.db.session import AsyncSessionLocal
+
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=60)
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(CanceledSignal.id).where(
+                        CanceledSignal.decision_ts < cutoff,
+                        CanceledSignal.synthetic_pnl_pct.is_(None),
+                    ).limit(50)
+                )
+                ids = [r[0] for r in result.all()]
+
+            for cid in ids:
+                await self._compute_synthetic_pnl(cid)
+
+            if ids:
+                logger.info("Canceled signals backfill done", count=len(ids))
+            return len(ids)
+        except Exception as e:
+            logger.warning("Canceled signals backfill failed", error=str(e))
+            return 0
 
 
     async def save_to_db(
