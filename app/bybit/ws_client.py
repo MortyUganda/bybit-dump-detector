@@ -92,14 +92,14 @@ class BybitWSClient:
         topics = [f"tickers.{sym}" for sym in symbols]
         await self._subscribe(topics)
 
-    async def subscribe_orderbook(self, symbols: list[str], depth: int = 25) -> None:
+    async def subscribe_orderbook(self, symbols: list[str], depth: int = 50) -> None:
         topics = [f"orderbook.{depth}.{sym}" for sym in symbols]
         await self._subscribe(topics)
 
     async def unsubscribe(self, symbols: list[str]) -> None:
         topics = []
         for sym in symbols:
-            for prefix in ["publicTrade.", "tickers.", "orderbook.25."]:
+            for prefix in ["publicTrade.", "tickers.", "orderbook.50."]:
                 topics.append(f"{prefix}{sym}")
         if self._ws and not self._ws.closed:
             payload = {"op": "unsubscribe", "args": topics}
