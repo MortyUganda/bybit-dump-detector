@@ -188,6 +188,23 @@ class BybitWSClient:
         if not topic or msg_data is None:
             return
 
+        # Диагностика: логируем первый вход каждого префикса топика
+        if not hasattr(self, "_seen_topic_prefixes"):
+            self._seen_topic_prefixes = set()
+        prefix = topic.split(".", 1)[0]
+        if prefix not in self._seen_topic_prefixes:
+            self._seen_topic_prefixes.add(prefix)
+            logger.info(
+                "WS: first message for topic prefix",
+                prefix=prefix,
+                topic=topic,
+                has_callback={
+                    "publicTrade": self._on_trade is not None,
+                    "tickers": self._on_ticker is not None,
+                    "orderbook": self._on_orderbook is not None,
+                }.get(prefix, "unknown"),
+            )
+
         if topic.startswith("publicTrade.") and self._on_trade:
             symbol = topic.split(".", 1)[1]
             for tick in (msg_data if isinstance(msg_data, list) else [msg_data]):
