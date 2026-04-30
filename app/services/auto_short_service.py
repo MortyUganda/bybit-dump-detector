@@ -952,7 +952,7 @@ class AutoShortService:
 
             decision = await self._evaluate_entry_conditions(
                 price_change_pct=price_change_pct,
-                effective_score=effective_score,
+                current_score=effective_score,
                 symbol=symbol,
             )
 
