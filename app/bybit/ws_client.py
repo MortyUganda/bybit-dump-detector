@@ -183,17 +183,6 @@ class BybitWSClient:
             logger.warning("WS: failed to decode message", raw=raw[:100])
             return
 
-        # Диагностика: первые 5 сырых сообщений и счётчик
-        if not hasattr(self, "_msg_count"):
-            self._msg_count = 0
-            self._raw_dump_count = 0
-        self._msg_count += 1
-        if self._raw_dump_count < 5:
-            logger.info("WS raw msg sample", keys=list(data.keys()), preview=str(data)[:200])
-            self._raw_dump_count += 1
-        if self._msg_count % 500 == 0:
-            logger.info("WS msg counter", total=self._msg_count)
-
         topic = data.get("topic", "")
         msg_data = data.get("data")
         if not topic or msg_data is None:
