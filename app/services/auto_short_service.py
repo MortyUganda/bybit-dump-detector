@@ -209,6 +209,21 @@ class AutoShortService:
 
         task.add_done_callback(_cleanup)
 
+    # ── Order book snapshot ────────────────────────────────────────
+
+    async def _get_ob_snapshot(self, symbol: str, current_price: float) -> dict | None:
+        """Fetch raw orderbook from Redis and build ML snapshot."""
+        try:
+            raw = await self._redis.get(f"ob:{symbol}")
+            if not raw:
+                return None
+            from app.analytics.orderbook import make_ob_snapshot
+            ob_data = json.loads(raw)
+            return make_ob_snapshot(ob_data, current_price)
+        except Exception as e:
+            logger.debug("OB snapshot fetch failed", symbol=symbol, error=str(e))
+            return None
+
     # ── Entry conditions ──────────────────────────────────────────
 
     async def _evaluate_entry_conditions(
@@ -344,6 +359,9 @@ class AutoShortService:
                 )
                 return current_price, price_change_pct, float(current_score)
 
+            if decision in ("cancel_score", "cancel_drop", "cancel_rise"):
+                mon_ob_snap = await self._get_ob_snapshot(symbol, current_price)
+
             if decision == "cancel_score":
                 logger.info(
                     "Canceled because score dropped",
@@ -360,6 +378,7 @@ class AutoShortService:
                     final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
+                    ob_snapshot_data=mon_ob_snap,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -386,6 +405,7 @@ class AutoShortService:
                     final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
+                    ob_snapshot_data=mon_ob_snap,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -413,6 +433,7 @@ class AutoShortService:
                     final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
+                    ob_snapshot_data=mon_ob_snap,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -439,6 +460,7 @@ class AutoShortService:
             if last_price
             else 0.0
         )
+        timeout_ob_snap = await self._get_ob_snapshot(symbol, last_price or signal_price)
 
         await self._save_canceled_signal(
             risk_score=risk_score,
@@ -448,6 +470,7 @@ class AutoShortService:
             final_score=effective_score,
             cancel_reason="score_dropped",
             entry_mode_candidate="after_monitor",
+            ob_snapshot_data=timeout_ob_snap,
         )
         await self._notify_entry_canceled(
             symbol=symbol,
@@ -642,6 +665,7 @@ class AutoShortService:
         final_score: float,
         cancel_reason: str,
         entry_mode_candidate: str = "direct",
+        ob_snapshot_data: dict | None = None,
     ) -> int | None:
         try:
             from app.db.models.canceled_signal import CanceledSignal
@@ -710,6 +734,16 @@ class AutoShortService:
                     if features and features.trend_context
                     else None
                 ),
+                # ── OB snapshot ───────────────────────────────────
+                ob_snapshot=ob_snapshot_data.get("snapshot") if ob_snapshot_data else None,
+                ob_bid_volume_top10=ob_snapshot_data.get("bid_volume_top10") if ob_snapshot_data else None,
+                ob_ask_volume_top10=ob_snapshot_data.get("ask_volume_top10") if ob_snapshot_data else None,
+                ob_imbalance_top10=ob_snapshot_data.get("imbalance_top10") if ob_snapshot_data else None,
+                ob_spread_bps=ob_snapshot_data.get("spread_bps") if ob_snapshot_data else None,
+                ob_bid_wall_price=ob_snapshot_data.get("bid_wall_price") if ob_snapshot_data else None,
+                ob_bid_wall_size=ob_snapshot_data.get("bid_wall_size") if ob_snapshot_data else None,
+                ob_ask_wall_price=ob_snapshot_data.get("ask_wall_price") if ob_snapshot_data else None,
+                ob_ask_wall_size=ob_snapshot_data.get("ask_wall_size") if ob_snapshot_data else None,
             )
 
             async with AsyncSessionLocal() as session:
@@ -726,7 +760,7 @@ class AutoShortService:
                 error=str(e),
             )
             return None
-        
+
 
     async def save_to_db(
             self,
@@ -738,6 +772,7 @@ class AutoShortService:
             sl_price: float,
             entry_score: float,
             entry_mode: str = "direct",
+            ob_snapshot_data: dict | None = None,
         ) -> int | None:
             try:
                 from app.db.models.auto_short import AutoShort
@@ -804,6 +839,16 @@ class AutoShortService:
                         if features and features.trend_context
                         else None
                     ),
+                    # ── OB snapshot ───────────────────────────────────
+                    ob_snapshot=ob_snapshot_data.get("snapshot") if ob_snapshot_data else None,
+                    ob_bid_volume_top10=ob_snapshot_data.get("bid_volume_top10") if ob_snapshot_data else None,
+                    ob_ask_volume_top10=ob_snapshot_data.get("ask_volume_top10") if ob_snapshot_data else None,
+                    ob_imbalance_top10=ob_snapshot_data.get("imbalance_top10") if ob_snapshot_data else None,
+                    ob_spread_bps=ob_snapshot_data.get("spread_bps") if ob_snapshot_data else None,
+                    ob_bid_wall_price=ob_snapshot_data.get("bid_wall_price") if ob_snapshot_data else None,
+                    ob_bid_wall_size=ob_snapshot_data.get("bid_wall_size") if ob_snapshot_data else None,
+                    ob_ask_wall_price=ob_snapshot_data.get("ask_wall_price") if ob_snapshot_data else None,
+                    ob_ask_wall_size=ob_snapshot_data.get("ask_wall_size") if ob_snapshot_data else None,
                 )
 
                 async with AsyncSessionLocal() as session:
@@ -886,6 +931,9 @@ class AutoShortService:
                 )
                 return
 
+            # OB snapshot для сохранения в canceled / trade
+            ob_snap = await self._get_ob_snapshot(symbol, entry_price)
+
             effective_score = await self._get_current_score(symbol)
             effective_score = (
                 float(effective_score) if effective_score is not None else float(risk_score.score)
@@ -924,6 +972,7 @@ class AutoShortService:
                     final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
+                    ob_snapshot_data=ob_snap,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -950,6 +999,7 @@ class AutoShortService:
                     final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
+                    ob_snapshot_data=ob_snap,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -976,6 +1026,7 @@ class AutoShortService:
                     final_score=effective_score,
                     cancel_reason="score_dropped",
                     entry_mode_candidate="after_monitor",
+                    ob_snapshot_data=ob_snap,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -1027,6 +1078,9 @@ class AutoShortService:
                     entry_mode=entry_mode,
                 )
 
+            # Обновляем OB snapshot перед финальным открытием (после мониторинга мог измениться)
+            ob_snap = await self._get_ob_snapshot(symbol, entry_price)
+
             async with lock:
                 if await self._is_symbol_already_open(symbol):
                     logger.info(
@@ -1048,6 +1102,7 @@ class AutoShortService:
                     sl_price=sl_price,
                     entry_score=effective_score,
                     entry_mode=entry_mode,
+                    ob_snapshot_data=ob_snap,
                 )
 
                 if not trade_id:
