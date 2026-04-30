@@ -1,4 +1,4 @@
 dd_venv
 .env
 .env.dev2
-.env.dev
+.env.dev__pycache__/
