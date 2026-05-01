@@ -37,7 +37,7 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "max_rise_pct": 0.8,
     "max_entry_drop_pct": -0.3,
     "trade_monitor_interval": 5,
-    "max_trade_duration_sec": 60 * 60 * 4,
+    "max_trade_duration_sec": 0,  # disabled: автозакрытие по таймауту отключено
     "shadow_trades_enabled": True,
     # BTC trend filter settings
     "btc_filter_enabled": True,
@@ -79,9 +79,8 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
     merged["trade_monitor_interval"] = max(
         1, int(merged.get("trade_monitor_interval", 5))
     )
-    merged["max_trade_duration_sec"] = max(
-        60, int(merged.get("max_trade_duration_sec", 60 * 60 * 4))
-    )
+    # 0 = disabled (автозакрытие по таймауту отключено)
+    merged["max_trade_duration_sec"] = int(merged.get("max_trade_duration_sec", 0))
     merged["shadow_trades_enabled"] = bool(merged.get("shadow_trades_enabled", True))
 
     # BTC trend filter settings

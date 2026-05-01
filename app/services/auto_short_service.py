@@ -604,35 +604,13 @@ class AutoShortService:
 
             logger.info("Restoring open trades", count=len(open_trades))
             restored_count = 0
-            max_trade_duration = await self._get_max_trade_duration()
+            # Автозакрытие по таймауту при рестарте отключено:
+            # expired давал ~16% шумных сделок, мешал ML.
+            # Все открытые позиции восстанавливаются как есть.
 
             for trade in open_trades:
                 now = datetime.now(timezone.utc)
                 elapsed = (now - trade.entry_ts).total_seconds()
-
-                if elapsed >= max_trade_duration:
-                    entry_price = await self._get_price(trade.symbol)
-                    if entry_price:
-                        pnl = await self._calc_short_pnl_pct(
-                            trade.entry_price,
-                            entry_price,
-                        )
-                        await self._update_db(
-                            trade_id=trade.id,
-                            exit_price=entry_price,
-                            exit_ts=now,
-                            status="closed",
-                            close_reason="expired",
-                            pnl=pnl,
-                            ml_label=1 if pnl > 0 else 0,
-                        )
-                        logger.info(
-                            "Expired trade closed on restore",
-                            trade_id=trade.id,
-                            symbol=trade.symbol,
-                            pnl=f"{pnl:+.2f}%",
-                        )
-                    continue
 
                 trade_payload = {
                     "id": trade.id,
@@ -1684,7 +1662,6 @@ class AutoShortService:
 
         while trade["status"] == "open":
             trade_monitor_interval = await self._get_trade_monitor_interval()
-            max_trade_duration = await self._get_max_trade_duration()
 
             await asyncio.sleep(trade_monitor_interval)
 
@@ -1734,9 +1711,9 @@ class AutoShortService:
                 await self._close_trade(trade_id, current_price, reason, pnl)
                 return
 
-            if elapsed >= max_trade_duration:
-                await self._close_trade(trade_id, current_price, "expired", pnl)
-                return
+            # Автозакрытие по таймауту отключено:
+            # expired давал ~16% шумных сделок, мешал ML.
+            # Позиция закрывается только по TP/SL/manual/reversal_signal.
 
     # ── Close trade ───────────────────────────────────────────────
 
