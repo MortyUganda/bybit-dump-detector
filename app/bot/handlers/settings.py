@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import get_settings
+from app.services.runtime_config import get_runtime_strategy_config, patch_runtime_strategy_config
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -242,6 +243,208 @@ async def cb_settings_reset(query: CallbackQuery) -> None:
         await query.message.edit_text(
             await _format_settings(user_id),
             reply_markup=await settings_keyboard(user_id),
+        )
+    except Exception:
+        pass
+
+
+# ── BTC trend filter submenu ────────────────────────────────────
+
+
+async def _btc_filter_keyboard() -> InlineKeyboardMarkup:
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+    finally:
+        await redis.aclose()
+
+    enabled = cfg.get("btc_filter_enabled", True)
+    threshold_15m = float(cfg.get("btc_filter_change_15m_threshold", 0.5))
+    threshold_1h = float(cfg.get("btc_filter_change_1h_threshold", 1.0))
+    mode = cfg.get("btc_filter_mode", "any")
+
+    builder = InlineKeyboardBuilder()
+
+    # Toggle on/off
+    en_label = "🟢 BTC фильтр: ВКЛ" if enabled else "🔴 BTC фильтр: ВЫКЛ"
+    builder.button(text=en_label, callback_data="btcf:toggle")
+
+    # 15m threshold options
+    for val in [0.3, 0.5, 0.7, 1.0, 1.5, 2.0]:
+        marker = "✅ " if abs(threshold_15m - val) < 0.01 else ""
+        builder.button(text=f"{marker}{val}%", callback_data=f"btcf:t15:{val}")
+
+    # 1h threshold options
+    for val in [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]:
+        marker = "✅ " if abs(threshold_1h - val) < 0.01 else ""
+        builder.button(text=f"{marker}{val}%", callback_data=f"btcf:t1h:{val}")
+
+    # Mode toggle
+    mode_label = "🔀 Режим: any (хотя бы один)" if mode == "any" else "🔀 Режим: both (оба)"
+    builder.button(text=mode_label, callback_data="btcf:mode")
+
+    # Back
+    builder.button(text="⬅️ Назад", callback_data="btcf:back")
+
+    builder.adjust(1, 6, 6, 1, 1)
+    return builder.as_markup()
+
+
+async def _format_btc_filter() -> str:
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+    finally:
+        await redis.aclose()
+
+    enabled = cfg.get("btc_filter_enabled", True)
+    threshold_15m = float(cfg.get("btc_filter_change_15m_threshold", 0.5))
+    threshold_1h = float(cfg.get("btc_filter_change_1h_threshold", 1.0))
+    mode = cfg.get("btc_filter_mode", "any")
+
+    en_em = "🟢 ВКЛ" if enabled else "🔴 ВЫКЛ"
+    mode_text = "any (хотя бы один порог)" if mode == "any" else "both (оба порога)"
+
+    return (
+        f"📊 <b>BTC trend filter — настройки</b>\n\n"
+        f"Статус: <b>{en_em}</b>\n"
+        f"⚙️ Порог 15m: <b>{threshold_15m}%</b>\n"
+        f"⚙️ Порог 1h: <b>{threshold_1h}%</b>\n"
+        f"🔀 Режим: <b>{mode_text}</b>\n\n"
+        f"<i>Если BTC растёт выше порога — шорт блокируется.\n"
+        f"any = хотя бы один порог пробит → блок\n"
+        f"both = оба порога пробиты → блок</i>"
+    )
+
+
+async def show_btc_filter_menu(query: CallbackQuery) -> None:
+    try:
+        await query.message.edit_text(
+            await _format_btc_filter(),
+            reply_markup=await _btc_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "btcf:toggle")
+async def cb_btcf_toggle(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+        new_val = not cfg.get("btc_filter_enabled", True)
+        await patch_runtime_strategy_config(redis, {"btc_filter_enabled": new_val})
+        logger.info("BTC filter toggled", user_id=query.from_user.id if query.from_user else None, value=new_val)
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_btc_filter(),
+            reply_markup=await _btc_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("btcf:t15:"))
+async def cb_btcf_threshold_15m(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    val = float(query.data.split(":")[-1])
+    redis = await _get_redis()
+    try:
+        await patch_runtime_strategy_config(redis, {"btc_filter_change_15m_threshold": val})
+        logger.info("BTC filter 15m threshold changed", user_id=query.from_user.id if query.from_user else None, value=val)
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_btc_filter(),
+            reply_markup=await _btc_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("btcf:t1h:"))
+async def cb_btcf_threshold_1h(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    val = float(query.data.split(":")[-1])
+    redis = await _get_redis()
+    try:
+        await patch_runtime_strategy_config(redis, {"btc_filter_change_1h_threshold": val})
+        logger.info("BTC filter 1h threshold changed", user_id=query.from_user.id if query.from_user else None, value=val)
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_btc_filter(),
+            reply_markup=await _btc_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "btcf:mode")
+async def cb_btcf_mode(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+        current_mode = cfg.get("btc_filter_mode", "any")
+        new_mode = "both" if current_mode == "any" else "any"
+        await patch_runtime_strategy_config(redis, {"btc_filter_mode": new_mode})
+        logger.info("BTC filter mode changed", user_id=query.from_user.id if query.from_user else None, value=new_mode)
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_btc_filter(),
+            reply_markup=await _btc_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "btcf:back")
+async def cb_btcf_back(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    from aiogram.types import InlineKeyboardButton
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Глобальные настройки авто-шорта", callback_data="settings:strategy")],
+        [InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="settings:notifications")],
+        [InlineKeyboardButton(text="📊 BTC trend filter", callback_data="settings:btc_filter")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:back_main")],
+    ])
+    try:
+        await query.message.edit_text(
+            "🔧 <b>Настройки</b>\n\nВыберите раздел:",
+            reply_markup=kb,
         )
     except Exception:
         pass

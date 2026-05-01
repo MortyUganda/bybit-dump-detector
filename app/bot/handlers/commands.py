@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, KeyboardButton
 
 from app.bot.handlers.auto_shorts import _format_active_shorts, auto_shorts_keyboard
 from app.bot.keyboards import main_menu_keyboard
@@ -87,6 +87,9 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(text="⚙️ Статус"),
+                KeyboardButton(text="🔧 Настройки"),
+            ],
+            [
                 KeyboardButton(text="❓ Помощь"),
             ],
         ],
@@ -393,3 +396,41 @@ async def btn_stats(msg: Message) -> None:
     from app.bot.handlers.auto_shorts import _format_stats, stats_keyboard
     text = await _format_stats()
     await msg.answer(text, reply_markup=stats_keyboard())
+
+
+@router.message(F.text == "🔧 Настройки")
+async def btn_settings_menu(msg: Message) -> None:
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Глобальные настройки авто-шорта", callback_data="settings:strategy")],
+        [InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="settings:notifications")],
+        [InlineKeyboardButton(text="📊 BTC trend filter", callback_data="settings:btc_filter")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:back_main")],
+    ])
+    await msg.answer("🔧 <b>Настройки</b>\n\nВыберите раздел:", reply_markup=kb)
+
+
+@router.callback_query(F.data == "settings:strategy")
+async def cb_settings_strategy(callback: CallbackQuery) -> None:
+    from app.bot.handlers.strategy import cmd_strategy
+    await callback.answer()
+    await cmd_strategy(callback.message)
+
+
+@router.callback_query(F.data == "settings:notifications")
+async def cb_settings_notifications(callback: CallbackQuery) -> None:
+    from app.bot.handlers.settings import cmd_settings
+    await callback.answer()
+    await cmd_settings(callback.message)
+
+
+@router.callback_query(F.data == "settings:btc_filter")
+async def cb_settings_btc_filter(callback: CallbackQuery) -> None:
+    from app.bot.handlers.settings import show_btc_filter_menu
+    await callback.answer()
+    await show_btc_filter_menu(callback)
+
+
+@router.callback_query(F.data == "settings:back_main")
+async def cb_settings_back(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.delete()

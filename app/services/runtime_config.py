@@ -39,6 +39,11 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "trade_monitor_interval": 5,
     "max_trade_duration_sec": 60 * 60 * 4,
     "shadow_trades_enabled": True,
+    # BTC trend filter settings
+    "btc_filter_enabled": True,
+    "btc_filter_change_15m_threshold": 0.5,
+    "btc_filter_change_1h_threshold": 1.0,
+    "btc_filter_mode": "any",
 }
 
 
@@ -78,6 +83,19 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
         60, int(merged.get("max_trade_duration_sec", 60 * 60 * 4))
     )
     merged["shadow_trades_enabled"] = bool(merged.get("shadow_trades_enabled", True))
+
+    # BTC trend filter settings
+    merged["btc_filter_enabled"] = bool(merged.get("btc_filter_enabled", True))
+    merged["btc_filter_change_15m_threshold"] = max(
+        0.0, float(merged.get("btc_filter_change_15m_threshold", 0.5))
+    )
+    merged["btc_filter_change_1h_threshold"] = max(
+        0.0, float(merged.get("btc_filter_change_1h_threshold", 1.0))
+    )
+    btc_mode = merged.get("btc_filter_mode", "any")
+    if btc_mode not in ("any", "both"):
+        btc_mode = "any"
+    merged["btc_filter_mode"] = btc_mode
 
     return merged
 

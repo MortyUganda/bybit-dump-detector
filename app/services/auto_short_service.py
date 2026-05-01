@@ -532,6 +532,12 @@ class AutoShortService:
                 ),
             }
 
+            # Trend filter reason
+            reason_details["trend_filter_blocked"] = (
+                "📈 Trend filter заблокировал вход\n\n"
+                "<i>Обнаружен сильный аптренд (BTC / price / RSI / свечи) — шорт опасен</i>"
+            )
+
             detail = reason_details.get(reason, f"<i>Причина: {reason}</i>")
 
             text = (
@@ -1252,6 +1258,34 @@ class AutoShortService:
                 )
                 return
 
+            # ── Trend filter (BTC + price/RSI/candles) ────────────
+            if not await self._check_trend_filter(risk_score):
+                logger.info(
+                    "auto_short_service.open_short_blocked_by_trend_filter",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                )
+                signal_price_for_tf = await self._get_price(symbol)
+                if signal_price_for_tf:
+                    await self._save_canceled_signal(
+                        risk_score=risk_score,
+                        signal_price=signal_price_for_tf,
+                        final_price=signal_price_for_tf,
+                        price_change_pct=0.0,
+                        final_score=float(risk_score.score),
+                        cancel_reason="trend_filter_blocked",
+                        entry_mode_candidate="direct",
+                    )
+                    await self._notify_entry_canceled(
+                        symbol=symbol,
+                        signal_price=signal_price_for_tf,
+                        entry_price=signal_price_for_tf,
+                        price_change_pct=0.0,
+                        score=float(risk_score.score),
+                        reason="trend_filter_blocked",
+                    )
+                return
+
             signal_price = await self._get_price(symbol)
             if not signal_price:
                 logger.warning(
@@ -1529,6 +1563,61 @@ class AutoShortService:
     # ── Trend filter ──────────────────────────────────────────────
 
     async def _check_trend_filter(self, risk_score: RiskScore) -> bool:
+        """Проверяет BTC trend filter + price/RSI/candles.
+
+        Возвращает True если вход разрешён, False если заблокирован.
+        """
+        strategy = await self._get_strategy()
+
+        # ── BTC trend filter (runtime-configurable) ───────────────
+        btc_filter_enabled = strategy.get("btc_filter_enabled", True)
+        if btc_filter_enabled:
+            threshold_15m = float(strategy.get("btc_filter_change_15m_threshold", 0.5))
+            threshold_1h = float(strategy.get("btc_filter_change_1h_threshold", 1.0))
+            btc_mode = strategy.get("btc_filter_mode", "any")
+
+            # Берём BTC данные из Redis (обновляются analyzer btc_filter_loop)
+            btc_15m_val: float | None = None
+            btc_1h_val: float | None = None
+            try:
+                btc_raw = await self._redis.get("btc_filter")
+                if btc_raw:
+                    btc_snap = json.loads(btc_raw)
+                    btc_15m_val = btc_snap.get("btc_change_15m")
+                    btc_1h_val = btc_snap.get("btc_change_1h")
+            except Exception:
+                pass
+
+            hit_15m = btc_15m_val is not None and btc_15m_val >= threshold_15m
+            hit_1h = btc_1h_val is not None and btc_1h_val >= threshold_1h
+
+            blocked = False
+            if btc_mode == "both":
+                # Блокируем только если оба порога пробиты
+                # Если 1h недоступен — используем только 15m
+                if btc_1h_val is not None:
+                    blocked = hit_15m and hit_1h
+                else:
+                    blocked = hit_15m
+            else:  # "any"
+                blocked = hit_15m or hit_1h
+
+            if blocked:
+                symbol = risk_score.features_snapshot.symbol if risk_score.features_snapshot else risk_score.symbol
+                logger.info(
+                    "BTC trend filter blocked short entry",
+                    symbol=symbol,
+                    btc_15m=round(btc_15m_val or 0, 3),
+                    btc_1h=round(btc_1h_val or 0, 3),
+                    threshold_15m=threshold_15m,
+                    threshold_1h=threshold_1h,
+                    mode=btc_mode,
+                    hit_15m=hit_15m,
+                    hit_1h=hit_1h,
+                )
+                return False
+
+        # ── Классический trend filter (price / candles / RSI) ─────
         features = risk_score.features_snapshot
         if not features:
             return True
