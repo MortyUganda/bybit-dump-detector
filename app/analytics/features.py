@@ -145,6 +145,21 @@ class CoinFeatures:
     # ── Liquidation cascade ───────────────────────────────────────
     liquidation_cascade_score: float = 0.0
 
+    # ── Z-score нормализация по символу (окно 200) ─────────────
+    spread_pct_z: float = 0.0
+    bid_depth_change_5m_z: float = 0.0
+    realized_vol_1h_z: float = 0.0
+    volume_24h_usdt_z: float = 0.0
+    oi_change_pct_z: float = 0.0
+
+    # ── BTC режимные фичи ────────────────────────────────────────
+    btc_change_1h: float = 0.0
+    btc_change_4h: float = 0.0
+    btc_change_24h: float = 0.0
+    btc_adx_1h: float = 0.0           # ADX сила тренда (0-100)
+    btc_atr_pct_1h: float = 0.0       # ATR / price (нормализованная волатильность)
+    recent_wr_20: float = 0.5          # winrate последних 20 закрытых auto_shorts
+
     # ── Metadata ─────────────────────────────────────────────────
     last_price: float = 0.0
     market_cap_proxy: float = 0.0     # price * circulating_supply (if available)
@@ -228,6 +243,8 @@ class FeatureCalculator:
     CANDLE_BUFFER_5M = 144      # 12 hours of 5m candles
     OB_HISTORY_SLOTS = 12       # 12 * 5s = 60s of OB snapshots (5s interval assumed)
 
+    ZSCORE_WINDOW = 200  # окно для z-score нормализации по символу
+
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol
         self._trades: Deque[TradeTick] = deque(maxlen=self.TRADE_BUFFER_SIZE)
@@ -240,6 +257,13 @@ class FeatureCalculator:
         self._trend_context: TrendContext = TrendContext()
         self._oi_history: Deque[float] = deque(maxlen=12)  # 12 * 5min = 1 hour
         self._funding_rate: float | None = None
+
+        # Z-score history deques (per-symbol, window 200)
+        self._hist_spread_pct: Deque[float] = deque(maxlen=self.ZSCORE_WINDOW)
+        self._hist_bid_depth_change_5m: Deque[float] = deque(maxlen=self.ZSCORE_WINDOW)
+        self._hist_realized_vol_1h: Deque[float] = deque(maxlen=self.ZSCORE_WINDOW)
+        self._hist_volume_24h_usdt: Deque[float] = deque(maxlen=self.ZSCORE_WINDOW)
+        self._hist_oi_change_pct: Deque[float] = deque(maxlen=self.ZSCORE_WINDOW)
 
     def update_trade(self, tick: TradeTick) -> None:
         self._trades.append(tick)
@@ -305,8 +329,49 @@ class FeatureCalculator:
         self._compute_candle_features(features)
         self._compute_ob_features(features)
         self._compute_oi_features(features)
+        self._compute_zscore_features(features)
 
         return features
+
+    # ── Z-score нормализация по символу ──────────────────────────
+
+    @staticmethod
+    def _zscore(value: float, history: Deque[float]) -> float:
+        """Z-score текущего значения относительно истории."""
+        if len(history) < 10:
+            return 0.0
+        arr = np.array(history)
+        mu = float(np.mean(arr))
+        sigma = float(np.std(arr))
+        if sigma > 0:
+            return (value - mu) / sigma
+        return 0.0
+
+    def _compute_zscore_features(self, f: CoinFeatures) -> None:
+        """Обновить deque'и истории и посчитать z-score."""
+        # Append current values to history
+        self._hist_spread_pct.append(f.spread_pct)
+        self._hist_bid_depth_change_5m.append(f.bid_depth_change_5m)
+        self._hist_realized_vol_1h.append(f.realized_vol_1h)
+        if f.volume_24h_usdt > 0:
+            self._hist_volume_24h_usdt.append(f.volume_24h_usdt)
+        self._hist_oi_change_pct.append(f.oi_change_pct)
+
+        # Compute z-scores
+        f.spread_pct_z = self._zscore(f.spread_pct, self._hist_spread_pct)
+        f.bid_depth_change_5m_z = self._zscore(
+            f.bid_depth_change_5m, self._hist_bid_depth_change_5m,
+        )
+        f.realized_vol_1h_z = self._zscore(
+            f.realized_vol_1h, self._hist_realized_vol_1h,
+        )
+        if f.volume_24h_usdt > 0:
+            f.volume_24h_usdt_z = self._zscore(
+                f.volume_24h_usdt, self._hist_volume_24h_usdt,
+            )
+        f.oi_change_pct_z = self._zscore(
+            f.oi_change_pct, self._hist_oi_change_pct,
+        )
 
     async def save_to_redis(self, redis) -> None:
         """Сохранить свечи в Redis для восстановления при перезапуске."""

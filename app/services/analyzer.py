@@ -26,6 +26,7 @@ from app.analytics.market_context import MarketContext
 from app.analytics.ml_scorer import MLScorer
 from app.config import get_settings
 from app.scoring.engine import RiskScore, ScoringEngine
+from app.services.auto_short_service import get_recent_wr_20
 from app.services.ingestion import IngestionService
 from app.utils.logging import get_logger
 from app.utils.time_utils import utcnow
@@ -100,6 +101,12 @@ class AnalyzerService:
             logger.debug("No features available yet")
             return
 
+        # Fetch recent winrate once per cycle (cached in Redis 60s)
+        try:
+            recent_wr = await get_recent_wr_20(self._redis)
+        except Exception:
+            recent_wr = 0.5
+
         scored = []
         for features in features_list:
             try:
@@ -115,6 +122,12 @@ class AnalyzerService:
 
                 # Populate BTC context on each feature
                 features.btc_change_15m = self._market_context.btc_change_15m
+                features.btc_change_1h = self._market_context.btc_change_1h
+                features.btc_change_4h = self._market_context.btc_change_4h
+                features.btc_change_24h = self._market_context.btc_change_24h
+                features.btc_adx_1h = self._market_context.btc_adx_1h
+                features.btc_atr_pct_1h = self._market_context.btc_atr_pct_1h
+                features.recent_wr_20 = recent_wr
 
                 risk_score = self._scoring.score(features)
 

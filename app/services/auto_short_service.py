@@ -39,6 +39,44 @@ MAX_TRADE_DURATION = 60 * 60 * 4
 
 REDIS_ACTIVE_SHORTS_KEY = "active_shorts"
 
+REDIS_RECENT_WR_KEY = "recent_wr_20"
+REDIS_RECENT_WR_TTL = 60  # 60s кеш
+
+
+async def get_recent_wr_20(redis_client: aioredis.Redis) -> float:
+    """Winrate последних 20 закрытых auto_shorts (кеш Redis 60s)."""
+    cached = await redis_client.get(REDIS_RECENT_WR_KEY)
+    if cached is not None:
+        try:
+            return float(cached)
+        except (ValueError, TypeError):
+            pass
+    try:
+        from sqlalchemy import text
+        from app.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    "SELECT pnl_pct FROM auto_shorts "
+                    "WHERE status='closed' "
+                    "AND close_reason IN ('tp_hit','sl_hit') "
+                    "ORDER BY entry_ts DESC LIMIT 20"
+                )
+            )
+            rows = result.fetchall()
+        if not rows:
+            wr = 0.5
+        else:
+            wins = sum(1 for r in rows if r[0] is not None and r[0] > 0)
+            wr = wins / len(rows)
+    except Exception as e:
+        logger.warning("recent_wr_20 query failed", error=str(e))
+        wr = 0.5
+
+    await redis_client.setex(REDIS_RECENT_WR_KEY, REDIS_RECENT_WR_TTL, str(wr))
+    return wr
+
 
 def _serialize_trade(trade: dict[str, Any]) -> str:
     data = dict(trade)
@@ -778,6 +816,19 @@ class AutoShortService:
                 ob_bid_wall_size=ob_snapshot_data.get("bid_wall_size") if ob_snapshot_data else None,
                 ob_ask_wall_price=ob_snapshot_data.get("ask_wall_price") if ob_snapshot_data else None,
                 ob_ask_wall_size=ob_snapshot_data.get("ask_wall_size") if ob_snapshot_data else None,
+                # Z-score нормализация
+                spread_pct_z=features.spread_pct_z if features else None,
+                bid_depth_change_5m_z=features.bid_depth_change_5m_z if features else None,
+                realized_vol_1h_z=features.realized_vol_1h_z if features else None,
+                volume_24h_usdt_z=features.volume_24h_usdt_z if features else None,
+                oi_change_pct_z=features.oi_change_pct_z if features else None,
+                # Режимные BTC-фичи
+                btc_change_1h=features.btc_change_1h if features else None,
+                btc_change_4h=features.btc_change_4h if features else None,
+                btc_change_24h=features.btc_change_24h if features else None,
+                btc_adx_1h=features.btc_adx_1h if features else None,
+                btc_atr_pct_1h=features.btc_atr_pct_1h if features else None,
+                recent_wr_20=features.recent_wr_20 if features else None,
             )
 
             async with AsyncSessionLocal() as session:
@@ -1175,6 +1226,19 @@ class AutoShortService:
                     ob_bid_wall_size=ob_snapshot_data.get("bid_wall_size") if ob_snapshot_data else None,
                     ob_ask_wall_price=ob_snapshot_data.get("ask_wall_price") if ob_snapshot_data else None,
                     ob_ask_wall_size=ob_snapshot_data.get("ask_wall_size") if ob_snapshot_data else None,
+                    # Z-score нормализация
+                    spread_pct_z=features.spread_pct_z if features else None,
+                    bid_depth_change_5m_z=features.bid_depth_change_5m_z if features else None,
+                    realized_vol_1h_z=features.realized_vol_1h_z if features else None,
+                    volume_24h_usdt_z=features.volume_24h_usdt_z if features else None,
+                    oi_change_pct_z=features.oi_change_pct_z if features else None,
+                    # Режимные BTC-фичи
+                    btc_change_1h=features.btc_change_1h if features else None,
+                    btc_change_4h=features.btc_change_4h if features else None,
+                    btc_change_24h=features.btc_change_24h if features else None,
+                    btc_adx_1h=features.btc_adx_1h if features else None,
+                    btc_atr_pct_1h=features.btc_atr_pct_1h if features else None,
+                    recent_wr_20=features.recent_wr_20 if features else None,
                 )
 
                 async with AsyncSessionLocal() as session:

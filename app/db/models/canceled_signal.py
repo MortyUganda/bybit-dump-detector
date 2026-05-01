@@ -87,6 +87,21 @@ class CanceledSignal(Base):
     ob_ask_wall_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     ob_ask_wall_size: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # ── Z-score нормализация по символу ───────────────────────────
+    spread_pct_z: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_depth_change_5m_z: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_vol_1h_z: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume_24h_usdt_z: Mapped[float | None] = mapped_column(Float, nullable=True)
+    oi_change_pct_z: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Режимные BTC-фичи ────────────────────────────────────────
+    btc_change_1h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    btc_change_4h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    btc_change_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    btc_adx_1h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    btc_atr_pct_1h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recent_wr_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # ── Post-cancel price tracking (для synthetic PnL и ML) ────────
     price_15m: Mapped[float | None] = mapped_column(Float, nullable=True)
     price_30m: Mapped[float | None] = mapped_column(Float, nullable=True)
