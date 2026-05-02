@@ -1,7 +1,15 @@
 """
-Decision Model: вход vs отмена сигнала.
-Positive class — auto_shorts (вошли).
-Negative class — canceled_signals (отменили).
+Унифицированная модель прибыльности.
+
+Объединяет:
+  - auto_shorts (реально открытые позиции) — label = ml_label
+  - canceled_signals (отменённые сигналы) — label из synthetic исхода:
+        would_hit_tp == True  → 1 (выиграл бы)
+        would_hit_sl == True  → 0 (проиграл бы)
+        neither               → skip (мутный класс, не учим)
+
+Цель: предсказать «был бы прибыльным сигнал» вне зависимости от того,
+вошёл бот или нет. Это даёт устойчивый ML-фильтр на полной выборке.
 """
 
 from __future__ import annotations
@@ -9,10 +17,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
-from sklearn.metrics import roc_auc_score, precision_recall_curve
+from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
 # === Настройки ===
@@ -21,7 +29,7 @@ CANCELED_CSV = "canceled_signals_20260501_054403.csv"
 N_SPLITS = 5
 RANDOM_STATE = 42
 
-# Общие фичи, которые есть в обеих таблицах в момент сигнала
+# Общие фичи (присутствуют в обеих таблицах в момент сигнала)
 COMMON_FEATURES = [
     "score",
     "f_rsi", "f_rsi_5m", "f_vwap_extension", "f_volume_zscore",
@@ -37,53 +45,76 @@ COMMON_FEATURES = [
     "ob_imbalance_top10", "ob_spread_bps",
 ]
 
-TARGET = "entered"
+TARGET = "label"
 
 
 def load_entered(path: str) -> pd.DataFrame:
+    """auto_shorts — берём только закрытые сделки с известным ml_label."""
     df = pd.read_csv(path)
-    print(f"auto_shorts: {len(df)} строк")
+    print(f"auto_shorts всего: {len(df)} строк")
 
-    # время сигнала — в auto_shorts его нет, берём entry_ts (момент сделки)
+    df = df[df["status"] == "closed"].copy()
+    df = df[df["ml_label"].notna()].copy()
     df["signal_ts"] = pd.to_datetime(df["entry_ts"])
-    df[TARGET] = 1
+    df[TARGET] = df["ml_label"].astype(int)
+    df["source"] = "auto_short"
 
-    # выравниваем имена со staring score
-    if "entry_score" in df.columns and "score" in df.columns:
-        # используем score как общий
-        pass
-
+    print(f"  закрытых с ml_label: {len(df)} "
+          f"(W={int(df[TARGET].sum())}, L={int((df[TARGET]==0).sum())})")
     return df
 
 
 def load_canceled(path: str) -> pd.DataFrame:
+    """
+    canceled_signals — синтетический исход:
+      would_hit_tp → 1
+      would_hit_sl → 0
+      neither      → отбрасываем
+    """
     df = pd.read_csv(path)
-    print(f"canceled_signals: {len(df)} строк")
+    print(f"canceled_signals всего: {len(df)} строк")
 
     df["signal_ts"] = pd.to_datetime(df["signal_ts"])
-    df[TARGET] = 0
 
-    return df
+    # Будем использовать только записи с однозначным исходом
+    tp = df["would_hit_tp"] == True   # noqa: E712
+    sl = df["would_hit_sl"] == True   # noqa: E712
+
+    out = df[tp | sl].copy()
+    out[TARGET] = tp[tp | sl].astype(int).values
+    out["source"] = "canceled"
+
+    skipped = len(df) - len(out)
+    print(f"  с однозначным исходом: {len(out)} "
+          f"(W={int(out[TARGET].sum())}, L={int((out[TARGET]==0).sum())})")
+    print(f"  пропущено мутных (neither/NaN): {skipped}")
+    return out
 
 
-def merge_datasets(df_entered: pd.DataFrame, df_canceled: pd.DataFrame) -> pd.DataFrame:
-    feature_cols = [c for c in COMMON_FEATURES
-                    if c in df_entered.columns and c in df_canceled.columns]
-
+def merge_datasets(
+    df_entered: pd.DataFrame, df_canceled: pd.DataFrame
+) -> tuple[pd.DataFrame, list[str]]:
+    feature_cols = [
+        c for c in COMMON_FEATURES
+        if c in df_entered.columns and c in df_canceled.columns
+    ]
     print(f"\nОбщих фичей: {len(feature_cols)}")
 
-    cols = feature_cols + ["signal_ts", TARGET]
-    df_e = df_entered[cols].copy()
-    df_c = df_canceled[cols].copy()
-
-    df = pd.concat([df_e, df_c], ignore_index=True)
+    cols = feature_cols + ["signal_ts", TARGET, "source"]
+    df = pd.concat(
+        [df_entered[cols], df_canceled[cols]],
+        ignore_index=True,
+    )
     df = df.sort_values("signal_ts").reset_index(drop=True)
 
-    print(f"Объединённый датасет: {len(df)} строк")
-    print(f"  entered=1: {int(df[TARGET].sum())}")
-    print(f"  canceled=0: {int((df[TARGET] == 0).sum())}")
+    print(f"\nОбъединённый датасет: {len(df)} сигналов")
+    print(f"  win  (label=1): {int(df[TARGET].sum())}")
+    print(f"  loss (label=0): {int((df[TARGET]==0).sum())}")
+    print(f"  WR общий:       {df[TARGET].mean():.1%}")
+    print("  по источникам:")
+    for src, g in df.groupby("source"):
+        print(f"    {src:12s} n={len(g):4d}, WR={g[TARGET].mean():.1%}")
 
-    # NaN -> 0 (некритичные фичи)
     df[feature_cols] = df[feature_cols].fillna(0.0)
     return df, feature_cols
 
@@ -95,6 +126,8 @@ def cross_val_auc(X: pd.DataFrame, y: pd.Series, n_splits: int) -> dict:
 
     tscv = TimeSeriesSplit(n_splits=n_splits)
     fold_aucs = []
+    oof_proba = np.zeros(len(X))
+    oof_mask = np.zeros(len(X), dtype=bool)
 
     for fold, (tr, te) in enumerate(tscv.split(X), 1):
         X_tr, X_te = X.iloc[tr], X.iloc[te]
@@ -115,7 +148,6 @@ def cross_val_auc(X: pd.DataFrame, y: pd.Series, n_splits: int) -> dict:
             "bagging_freq": 1,
             "verbose": -1,
             "seed": RANDOM_STATE,
-            "is_unbalance": True,
         }
 
         model = lgb.train(
@@ -129,22 +161,25 @@ def cross_val_auc(X: pd.DataFrame, y: pd.Series, n_splits: int) -> dict:
         proba = model.predict(X_te)
         auc = roc_auc_score(y_te, proba)
         fold_aucs.append(auc)
+        oof_proba[te] = proba
+        oof_mask[te] = True
         print(f"Fold {fold}: train={len(X_tr)}, test={len(X_te)}, AUC={auc:.3f}")
 
     return {
         "fold_aucs": fold_aucs,
         "mean_auc": float(np.mean(fold_aucs)) if fold_aucs else float("nan"),
         "std_auc": float(np.std(fold_aucs)) if fold_aucs else float("nan"),
+        "oof_proba": oof_proba,
+        "oof_mask": oof_mask,
     }
 
 
 def feature_importance(X: pd.DataFrame, y: pd.Series, n_top: int = 20) -> None:
-    print("\n=== Важности фичей (decision model) ===")
+    print("\n=== Важности фичей (модель на всех данных) ===")
     params = {
         "objective": "binary", "metric": "auc",
         "learning_rate": 0.05, "num_leaves": 31,
         "min_data_in_leaf": 10, "verbose": -1, "seed": RANDOM_STATE,
-        "is_unbalance": True,
     }
     model = lgb.train(params, lgb.Dataset(X, label=y), num_boost_round=300)
     imp = sorted(
@@ -155,36 +190,28 @@ def feature_importance(X: pd.DataFrame, y: pd.Series, n_top: int = 20) -> None:
         print(f"  {name:30s} {val:.1f}")
 
 
-def threshold_analysis(X: pd.DataFrame, y: pd.Series) -> None:
-    """Простая оценка: на каком threshold модель даёт лучший precision на 'входить'."""
-    print("\n=== Threshold analysis (как фильтр) ===")
-    params = {
-        "objective": "binary", "metric": "auc",
-        "learning_rate": 0.05, "num_leaves": 31,
-        "min_data_in_leaf": 10, "verbose": -1, "seed": RANDOM_STATE,
-        "is_unbalance": True,
-    }
-    # Простой train/test 80/20 по времени
-    split_idx = int(len(X) * 0.8)
-    X_tr, X_te = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_tr, y_te = y.iloc[:split_idx], y.iloc[split_idx:]
+def threshold_analysis(
+    df: pd.DataFrame, y: pd.Series, oof_proba: np.ndarray, oof_mask: np.ndarray
+) -> None:
+    """
+    OOF-симуляция ML-фильтра: при каком proba-пороге WR/EV выше всего.
+    """
+    print("\n=== ML-фильтр на OOF ===")
+    sub = df.loc[oof_mask].copy()
+    sub["proba"] = oof_proba[oof_mask]
+    sub["y"] = y.loc[oof_mask].values
 
-    if y_tr.nunique() < 2 or y_te.nunique() < 2:
-        print("Невозможно: один класс в выборке")
-        return
-
-    model = lgb.train(params, lgb.Dataset(X_tr, label=y_tr), num_boost_round=300)
-    proba = model.predict(X_te)
-
-    for thr in [0.50, 0.55, 0.60, 0.65, 0.70, 0.75]:
-        pred = (proba >= thr).astype(int)
-        if pred.sum() == 0:
-            print(f"  thr={thr:.2f}: нет сигналов")
+    base_wr = sub["y"].mean()
+    print(f"Без фильтра: n={len(sub)}, WR={base_wr:.1%}")
+    for thr in [0.45, 0.50, 0.55, 0.60, 0.65, 0.70]:
+        f = sub[sub["proba"] >= thr]
+        if len(f) == 0:
+            print(f"  proba>={thr:.2f}: нет сигналов")
             continue
-        precision = (pred & y_te.values).sum() / pred.sum()
-        recall = (pred & y_te.values).sum() / max(y_te.sum(), 1)
-        print(f"  thr={thr:.2f}: precision={precision:.2%} "
-              f"recall={recall:.2%} signals={int(pred.sum())}/{len(pred)}")
+        wr = f["y"].mean()
+        kept_pct = len(f) / len(sub) * 100
+        print(f"  proba>={thr:.2f}: n={len(f):4d} ({kept_pct:5.1f}%), "
+              f"WR={wr:.1%} (Δ={wr-base_wr:+.1%})")
 
 
 def main() -> None:
@@ -209,7 +236,7 @@ def main() -> None:
     print(f"По фолдам:   {[f'{a:.3f}' for a in res['fold_aucs']]}")
 
     feature_importance(X, y)
-    threshold_analysis(X, y)
+    threshold_analysis(df, y, res["oof_proba"], res["oof_mask"])
 
 
 if __name__ == "__main__":
