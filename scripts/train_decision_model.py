@@ -40,17 +40,19 @@ def find_latest_csv(pattern: str) -> str | None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Decision ML: прибыльность (auto_shorts + canceled_signals)"
+        description="Decision ML: прибыльность (auto_shorts + canceled_signals + all_opened_signals)"
     )
     p.add_argument("--auto-csv", default=None,
                    help="Путь к auto_shorts CSV (default: последний auto_shorts_*.csv)")
     p.add_argument("--canceled-csv", default=None,
                    help="Путь к canceled_signals CSV (default: последний canceled_signals_*.csv)")
+    p.add_argument("--all-opened-csv", default=None,
+                   help="Путь к all_opened_signals CSV (default: последний all_opened_signals_*.csv)")
     p.add_argument("--splits", type=int, default=DEFAULT_N_SPLITS,
                    help=f"Число фолдов (default {DEFAULT_N_SPLITS})")
     return p.parse_args()
 
-# Общие фичи (присутствуют в обеих таблицах в момент сигнала)
+# Общие фичи (присутствуют во всех таблицах в момент сигнала)
 COMMON_FEATURES = [
     "score",
     "f_rsi", "f_rsi_5m", "f_vwap_extension", "f_volume_zscore",
@@ -62,8 +64,19 @@ COMMON_FEATURES = [
     "price_change_5m", "price_change_1h", "spread_pct",
     "bid_depth_change_5m", "btc_change_15m",
     "funding_rate_at_signal", "oi_change_pct_at_signal", "trend_strength_1h",
+    # OB features
     "ob_bid_volume_top10", "ob_ask_volume_top10",
     "ob_imbalance_top10", "ob_spread_bps",
+    "ob_bid_wall_price", "ob_bid_wall_size",
+    "ob_ask_wall_price", "ob_ask_wall_size",
+    # Z-score нормализация
+    "spread_pct_z", "bid_depth_change_5m_z", "realized_vol_1h_z",
+    "volume_24h_usdt_z", "oi_change_pct_z",
+    # Режимные BTC-фичи
+    "btc_change_1h", "btc_change_4h", "btc_change_24h",
+    "btc_adx_1h", "btc_atr_pct_1h",
+    # Контекст
+    "recent_wr_20",
 ]
 
 TARGET = "label"
@@ -112,18 +125,60 @@ def load_canceled(path: str) -> pd.DataFrame:
     return out
 
 
+def load_all_opened(path: str) -> pd.DataFrame:
+    """
+    all_opened_signals — shadow-paper записи:
+      status == "closed", close_reason == "tp_hit" → 1, "sl_hit" → 0, rest → skip.
+      Dedup: исключаем записи с linked_auto_short_id или linked_canceled_signal_id
+      (они дублируют данные из auto_shorts / canceled_signals).
+    """
+    df = pd.read_csv(path)
+    print(f"all_opened_signals всего: {len(df)} строк")
+
+    # Только закрытые
+    df = df[df["status"] == "closed"].copy()
+    print(f"  закрытых: {len(df)}")
+
+    # Dedup: оставляем только «чистые» shadow-paper (не привязанные к auto_short/canceled)
+    if "linked_auto_short_id" in df.columns:
+        df = df[df["linked_auto_short_id"].isna()].copy()
+    if "linked_canceled_signal_id" in df.columns:
+        df = df[df["linked_canceled_signal_id"].isna()].copy()
+    print(f"  после dedup (без linked): {len(df)}")
+
+    # Метки: tp_hit → 1, sl_hit → 0, остальные → skip
+    mask_tp = df["close_reason"] == "tp_hit"
+    mask_sl = df["close_reason"] == "sl_hit"
+    df = df[mask_tp | mask_sl].copy()
+    df[TARGET] = mask_tp[mask_tp | mask_sl].astype(int).values
+
+    df["signal_ts"] = pd.to_datetime(df["entry_ts"])
+    df["source"] = "all_opened"
+
+    print(f"  с однозначным исходом: {len(df)} "
+          f"(W={int(df[TARGET].sum())}, L={int((df[TARGET] == 0).sum())})")
+    return df
+
+
 def merge_datasets(
-    df_entered: pd.DataFrame, df_canceled: pd.DataFrame
+    df_entered: pd.DataFrame,
+    df_canceled: pd.DataFrame,
+    df_all_opened: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
+    # Intersect фичей по всем доступным источникам
+    all_dfs = [df_entered, df_canceled]
+    if df_all_opened is not None and len(df_all_opened) > 0:
+        all_dfs.append(df_all_opened)
+
     feature_cols = [
         c for c in COMMON_FEATURES
-        if c in df_entered.columns and c in df_canceled.columns
+        if all(c in d.columns for d in all_dfs)
     ]
     print(f"\nОбщих фичей: {len(feature_cols)}")
 
     cols = feature_cols + ["signal_ts", TARGET, "source"]
     df = pd.concat(
-        [df_entered[cols], df_canceled[cols]],
+        [d[cols] for d in all_dfs],
         ignore_index=True,
     )
     df = df.sort_values("signal_ts").reset_index(drop=True)
@@ -240,6 +295,7 @@ def main() -> None:
 
     auto_csv = args.auto_csv or find_latest_csv("auto_shorts_*.csv")
     canceled_csv = args.canceled_csv or find_latest_csv("canceled_signals_*.csv")
+    all_opened_csv = args.all_opened_csv or find_latest_csv("all_opened_signals_*.csv")
 
     if not auto_csv or not Path(auto_csv).exists():
         print("Не найден auto_shorts CSV. Укажи через --auto-csv")
@@ -248,13 +304,20 @@ def main() -> None:
         print("Не найден canceled_signals CSV. Укажи через --canceled-csv")
         sys.exit(1)
 
-    print(f"auto_shorts CSV:      {auto_csv}")
-    print(f"canceled_signals CSV: {canceled_csv}")
+    print(f"auto_shorts CSV:          {auto_csv}")
+    print(f"canceled_signals CSV:     {canceled_csv}")
 
     df_e = load_entered(auto_csv)
     df_c = load_canceled(canceled_csv)
 
-    df, feature_cols = merge_datasets(df_e, df_c)
+    df_ao = None
+    if all_opened_csv and Path(all_opened_csv).exists():
+        print(f"all_opened_signals CSV:   {all_opened_csv}")
+        df_ao = load_all_opened(all_opened_csv)
+    else:
+        print("all_opened_signals CSV:   не найден — пропускаем")
+
+    df, feature_cols = merge_datasets(df_e, df_c, df_ao)
     if len(df) < 30:
         print("Слишком мало данных")
         sys.exit(1)

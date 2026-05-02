@@ -749,6 +749,7 @@ class AutoShortService:
         actual_blocked_by: str | None,
         linked_auto_short_id: int | None = None,
         linked_canceled_signal_id: int | None = None,
+        ob_snapshot_data: dict | None = None,
     ) -> None:
         """Создаёт shadow-paper запись в all_opened_signals.
 
@@ -770,6 +771,10 @@ class AutoShortService:
             if not entry_price:
                 logger.debug("Shadow-paper skipped — no price", symbol=symbol)
                 return
+
+            # Если OB snapshot не передан, попробуем получить сами
+            if ob_snapshot_data is None:
+                ob_snapshot_data = await self._get_ob_snapshot(symbol, entry_price)
 
             signal_price = entry_price
             leverage = LEVERAGE  # всегда 10x для shadow-paper
@@ -830,6 +835,29 @@ class AutoShortService:
                     if features and features.trend_context
                     else None
                 ),
+                # ── OB snapshot ───────────────────────────────────
+                ob_snapshot=ob_snapshot_data.get("snapshot") if ob_snapshot_data else None,
+                ob_bid_volume_top10=ob_snapshot_data.get("bid_volume_top10") if ob_snapshot_data else None,
+                ob_ask_volume_top10=ob_snapshot_data.get("ask_volume_top10") if ob_snapshot_data else None,
+                ob_imbalance_top10=ob_snapshot_data.get("imbalance_top10") if ob_snapshot_data else None,
+                ob_spread_bps=ob_snapshot_data.get("spread_bps") if ob_snapshot_data else None,
+                ob_bid_wall_price=ob_snapshot_data.get("bid_wall_price") if ob_snapshot_data else None,
+                ob_bid_wall_size=ob_snapshot_data.get("bid_wall_size") if ob_snapshot_data else None,
+                ob_ask_wall_price=ob_snapshot_data.get("ask_wall_price") if ob_snapshot_data else None,
+                ob_ask_wall_size=ob_snapshot_data.get("ask_wall_size") if ob_snapshot_data else None,
+                # Z-score нормализация
+                spread_pct_z=getattr(features, 'spread_pct_z', None) if features else None,
+                bid_depth_change_5m_z=getattr(features, 'bid_depth_change_5m_z', None) if features else None,
+                realized_vol_1h_z=getattr(features, 'realized_vol_1h_z', None) if features else None,
+                volume_24h_usdt_z=getattr(features, 'volume_24h_usdt_z', None) if features else None,
+                oi_change_pct_z=getattr(features, 'oi_change_pct_z', None) if features else None,
+                # Режимные BTC-фичи
+                btc_change_1h=getattr(features, 'btc_change_1h', None) if features else None,
+                btc_change_4h=getattr(features, 'btc_change_4h', None) if features else None,
+                btc_change_24h=getattr(features, 'btc_change_24h', None) if features else None,
+                btc_adx_1h=getattr(features, 'btc_adx_1h', None) if features else None,
+                btc_atr_pct_1h=getattr(features, 'btc_atr_pct_1h', None) if features else None,
+                recent_wr_20=getattr(features, 'recent_wr_20', None) if features else None,
             )
 
             async with AsyncSessionLocal() as session:
