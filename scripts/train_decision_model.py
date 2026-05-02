@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import argparse
+import glob
 import sys
 from pathlib import Path
 
@@ -23,11 +25,30 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
-# === Настройки ===
-AUTO_SHORTS_CSV = "auto_shorts_20260501_054403-2.csv"
-CANCELED_CSV = "canceled_signals_20260501_054403.csv"
-N_SPLITS = 5
+# === Настройки по умолчанию ===
+DEFAULT_N_SPLITS = 5
 RANDOM_STATE = 42
+
+
+def find_latest_csv(pattern: str) -> str | None:
+    """Найти самый свежий CSV по glob-паттерну."""
+    files = glob.glob(pattern)
+    if not files:
+        return None
+    return max(files, key=lambda p: Path(p).stat().st_mtime)
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Decision ML: прибыльность (auto_shorts + canceled_signals)"
+    )
+    p.add_argument("--auto-csv", default=None,
+                   help="Путь к auto_shorts CSV (default: последний auto_shorts_*.csv)")
+    p.add_argument("--canceled-csv", default=None,
+                   help="Путь к canceled_signals CSV (default: последний canceled_signals_*.csv)")
+    p.add_argument("--splits", type=int, default=DEFAULT_N_SPLITS,
+                   help=f"Число фолдов (default {DEFAULT_N_SPLITS})")
+    return p.parse_args()
 
 # Общие фичи (присутствуют в обеих таблицах в момент сигнала)
 COMMON_FEATURES = [
@@ -215,12 +236,23 @@ def threshold_analysis(
 
 
 def main() -> None:
-    if not Path(AUTO_SHORTS_CSV).exists() or not Path(CANCELED_CSV).exists():
-        print("Не найден один из CSV. Проверь пути.")
+    args = parse_args()
+
+    auto_csv = args.auto_csv or find_latest_csv("auto_shorts_*.csv")
+    canceled_csv = args.canceled_csv or find_latest_csv("canceled_signals_*.csv")
+
+    if not auto_csv or not Path(auto_csv).exists():
+        print("Не найден auto_shorts CSV. Укажи через --auto-csv")
+        sys.exit(1)
+    if not canceled_csv or not Path(canceled_csv).exists():
+        print("Не найден canceled_signals CSV. Укажи через --canceled-csv")
         sys.exit(1)
 
-    df_e = load_entered(AUTO_SHORTS_CSV)
-    df_c = load_canceled(CANCELED_CSV)
+    print(f"auto_shorts CSV:      {auto_csv}")
+    print(f"canceled_signals CSV: {canceled_csv}")
+
+    df_e = load_entered(auto_csv)
+    df_c = load_canceled(canceled_csv)
 
     df, feature_cols = merge_datasets(df_e, df_c)
     if len(df) < 30:
@@ -230,8 +262,8 @@ def main() -> None:
     X = df[feature_cols]
     y = df[TARGET].astype(int)
 
-    print(f"\n=== TimeSeriesSplit AUC (n_splits={N_SPLITS}) ===")
-    res = cross_val_auc(X, y, N_SPLITS)
+    print(f"\n=== TimeSeriesSplit AUC (n_splits={args.splits}) ===")
+    res = cross_val_auc(X, y, args.splits)
     print(f"\nСредний AUC: {res['mean_auc']:.3f} ± {res['std_auc']:.3f}")
     print(f"По фолдам:   {[f'{a:.3f}' for a in res['fold_aucs']]}")
 

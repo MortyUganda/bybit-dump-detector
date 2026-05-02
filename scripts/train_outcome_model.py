@@ -4,6 +4,8 @@ Time-based cross-validation для честной оценки.
 """
 from __future__ import annotations
 
+import argparse
+import glob
 import sys
 from pathlib import Path
 
@@ -13,11 +15,18 @@ import lightgbm as lgb
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
-# === Настройки ===
-AUTO_SHORTS_CSV = "auto_shorts_20260501_054403-2.csv"
-MIN_TRADE_ID = 449  # с какой сделки берём данные
-N_SPLITS = 5
+# === Настройки по умолчанию ===
+DEFAULT_MIN_TRADE_ID = 449  # с какой сделки берём данные (когда заработали OB-фичи)
+DEFAULT_N_SPLITS = 5
 RANDOM_STATE = 42
+
+
+def find_latest_csv(pattern: str) -> str | None:
+    """Найти самый свежий CSV по glob-паттерну."""
+    files = glob.glob(pattern)
+    if not files:
+        return None
+    return max(files, key=lambda p: Path(p).stat().st_mtime)
 
 # Ключевые фичи — без них дропаем строку
 KEY_FEATURES = [
@@ -44,6 +53,17 @@ FEATURE_COLS = [
 ]
 
 TARGET = "ml_label"
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Outcome ML: AUC по auto_shorts")
+    p.add_argument("--csv", default=None,
+                   help="Путь к auto_shorts CSV (по умолчанию — последний auto_shorts_*.csv)")
+    p.add_argument("--min-id", type=int, default=DEFAULT_MIN_TRADE_ID,
+                   help=f"Минимальный id сделки (default {DEFAULT_MIN_TRADE_ID})")
+    p.add_argument("--splits", type=int, default=DEFAULT_N_SPLITS,
+                   help=f"Число фолдов TimeSeriesSplit (default {DEFAULT_N_SPLITS})")
+    return p.parse_args()
 
 
 def load_and_prepare(path: str, min_id: int) -> pd.DataFrame:
@@ -142,11 +162,15 @@ def feature_importance(X: pd.DataFrame, y: pd.Series) -> None:
 
 
 def main() -> None:
-    if not Path(AUTO_SHORTS_CSV).exists():
-        print(f"Файл не найден: {AUTO_SHORTS_CSV}")
-        sys.exit(1)
+    args = parse_args()
 
-    df = load_and_prepare(AUTO_SHORTS_CSV, MIN_TRADE_ID)
+    csv_path = args.csv or find_latest_csv("auto_shorts_*.csv")
+    if not csv_path or not Path(csv_path).exists():
+        print("Не найден auto_shorts CSV. Укажи путь через --csv")
+        sys.exit(1)
+    print(f"CSV: {csv_path}")
+
+    df = load_and_prepare(csv_path, args.min_id)
     if len(df) < 20:
         print("Слишком мало сделок для обучения")
         sys.exit(1)
@@ -154,8 +178,8 @@ def main() -> None:
     X, y = filter_features(df)
     print(f"Фичей: {X.shape[1]}, сделок: {X.shape[0]}")
 
-    print(f"\n=== TimeSeriesSplit AUC (n_splits={N_SPLITS}) ===")
-    res = cross_val_auc(X, y, N_SPLITS)
+    print(f"\n=== TimeSeriesSplit AUC (n_splits={args.splits}) ===")
+    res = cross_val_auc(X, y, args.splits)
     print(f"\nСредний AUC: {res['mean_auc']:.3f} ± {res['std_auc']:.3f}")
     print(f"По фолдам:   {[f'{a:.3f}' for a in res['fold_aucs']]}")
 

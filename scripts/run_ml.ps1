@@ -1,0 +1,72 @@
+# === Удобный запуск ML-скриптов из PowerShell ===
+# Использование (из корня проекта):
+#   .\scripts\run_ml.ps1                  -> обе модели на последних CSV
+#   .\scripts\run_ml.ps1 -Mode outcome    -> только outcome
+#   .\scripts\run_ml.ps1 -Mode decision   -> только decision
+#   .\scripts\run_ml.ps1 -Mode export     -> только выгрузить CSV
+#   .\scripts\run_ml.ps1 -Mode all        -> выгрузить + обе модели
+#   .\scripts\run_ml.ps1 -MinId 700       -> outcome с другим min_id
+#   .\scripts\run_ml.ps1 -Splits 8        -> кастомное число фолдов
+#
+# Ищет последние auto_shorts_*.csv и canceled_signals_*.csv
+# в текущей директории.
+
+[CmdletBinding()]
+param(
+    [ValidateSet("run", "outcome", "decision", "export", "all")]
+    [string]$Mode = "run",
+    [int]$MinId = 449,
+    [int]$Splits = 5,
+    [string]$AutoCsv = "",
+    [string]$CanceledCsv = ""
+)
+
+$ErrorActionPreference = "Stop"
+
+function Export-TradesCsv {
+    Write-Host "=== Выгружаю свежие CSV из dev2 ===" -ForegroundColor Cyan
+    docker compose -p dev2 -f docker/docker-compose.dev2.yml `
+        exec bot python -m scripts.export_trades_csv
+    if ($LASTEXITCODE -ne 0) { throw "export_trades_csv упал" }
+
+    docker cp dd_bot_dev2:/app/exports/. .
+    if ($LASTEXITCODE -ne 0) { throw "docker cp упал" }
+
+    Write-Host "Файлы выгружены в $(Get-Location)" -ForegroundColor Green
+}
+
+function Invoke-Outcome {
+    Write-Host "=== Outcome model ===" -ForegroundColor Cyan
+    $args = @("--min-id", $MinId, "--splits", $Splits)
+    if ($AutoCsv) { $args += @("--csv", $AutoCsv) }
+    python -m scripts.train_outcome_model @args
+}
+
+function Invoke-Decision {
+    Write-Host "`n=== Decision model ===" -ForegroundColor Cyan
+    $args = @("--splits", $Splits)
+    if ($AutoCsv) { $args += @("--auto-csv", $AutoCsv) }
+    if ($CanceledCsv) { $args += @("--canceled-csv", $CanceledCsv) }
+    python -m scripts.train_decision_model @args
+}
+
+switch ($Mode) {
+    "export" {
+        Export-TradesCsv
+    }
+    "outcome" {
+        Invoke-Outcome
+    }
+    "decision" {
+        Invoke-Decision
+    }
+    "all" {
+        Export-TradesCsv
+        Invoke-Outcome
+        Invoke-Decision
+    }
+    "run" {
+        Invoke-Outcome
+        Invoke-Decision
+    }
+}
