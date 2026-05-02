@@ -38,6 +38,11 @@ TRADE_MONITOR_INTERVAL = 5
 MAX_TRADE_DURATION = 60 * 60 * 4
 
 REDIS_ACTIVE_SHORTS_KEY = "active_shorts"
+REDIS_SHADOW_PAPER_KEY = "shadow_paper"
+
+SHADOW_TP_PCT = 10.0   # TP на марже для shadow-paper
+SHADOW_SL_PCT = 10.0   # SL на марже для shadow-paper
+SHADOW_MONITOR_INTERVAL = 30  # секунд между проверками shadow-paper
 
 REDIS_RECENT_WR_KEY = "recent_wr_20"
 REDIS_RECENT_WR_TTL = 60  # 60s кеш
@@ -101,6 +106,7 @@ class AutoShortService:
         self._trade_tasks: dict[int, asyncio.Task] = {}
         self._pending_symbols: set[str] = set()
         self._price_cache: dict[str, float] = {}
+        self._shadow_paper_tasks: set[asyncio.Task] = set()
 
     # ── Runtime strategy config ───────────────────────────────────
 
@@ -623,6 +629,12 @@ class AutoShortService:
         if not hasattr(self, "_canceled_backfill_task") or self._canceled_backfill_task.done():
             self._canceled_backfill_task = asyncio.create_task(self._canceled_backfill_loop())
 
+        # Восстанавливаем shadow-paper и запускаем мониторинг
+        try:
+            await self.restore_shadow_paper_trades()
+        except Exception as e:
+            logger.warning("Shadow-paper restore failed", error=str(e))
+
         try:
             from sqlalchemy import select
             from app.db.models.auto_short import AutoShort
@@ -727,6 +739,258 @@ class AutoShortService:
                 cancel_reason=cancel_reason,
                 error=str(e),
             )
+
+    # ── Shadow-paper: golden dataset all_opened_signals ──────────
+
+    async def _create_shadow_paper_signal(
+        self,
+        risk_score: RiskScore,
+        would_have_opened: bool,
+        actual_blocked_by: str | None,
+        linked_auto_short_id: int | None = None,
+        linked_canceled_signal_id: int | None = None,
+    ) -> None:
+        """Создаёт shadow-paper запись в all_opened_signals.
+
+        Вызывается ровно один раз для КАЖДОГО risk_score, независимо
+        от того, прошёл ли сигнал фильтры или нет.
+        TP/SL всегда 10%/10%.  Без TG-уведомлений.
+        """
+        try:
+            from app.db.models.all_opened_signal import AllOpenedSignal
+            from app.db.session import AsyncSessionLocal
+
+            symbol = risk_score.symbol
+            features = risk_score.features_snapshot
+            factor_map = {f.name: f.raw_value for f in risk_score.factors}
+
+            entry_price = await self._get_price(symbol)
+            if not entry_price and features:
+                entry_price = features.last_price
+            if not entry_price:
+                logger.debug("Shadow-paper skipped — no price", symbol=symbol)
+                return
+
+            signal_price = entry_price
+            leverage = LEVERAGE  # всегда 10x для shadow-paper
+            tp_move = SHADOW_TP_PCT / leverage  # 1% движение цены
+            sl_move = SHADOW_SL_PCT / leverage  # 1% движение цены
+            tp_price = entry_price * (1 - tp_move / 100)
+            sl_price = entry_price * (1 + sl_move / 100)
+
+            row = AllOpenedSignal(
+                symbol=symbol,
+                signal_type=(
+                    risk_score.signal_type.value
+                    if risk_score.signal_type
+                    else "unknown"
+                ),
+                would_have_opened=would_have_opened,
+                actual_blocked_by=actual_blocked_by,
+                linked_auto_short_id=linked_auto_short_id,
+                linked_canceled_signal_id=linked_canceled_signal_id,
+                entry_price=entry_price,
+                signal_price=signal_price,
+                leverage=leverage,
+                tp_pct=SHADOW_TP_PCT,
+                sl_pct=SHADOW_SL_PCT,
+                tp_price=tp_price,
+                sl_price=sl_price,
+                score=float(risk_score.score),
+                entry_score=float(risk_score.score),
+                triggered_count=risk_score.triggered_count,
+                status="open",
+                f_rsi=factor_map.get("rsi_1m") or factor_map.get("rsi"),
+                f_vwap_extension=factor_map.get("vwap_extension"),
+                f_volume_zscore=factor_map.get("volume_zscore"),
+                f_trade_imbalance=factor_map.get("trade_imbalance"),
+                f_large_buy_cluster=factor_map.get("large_buy_cluster"),
+                f_price_acceleration=factor_map.get("price_acceleration"),
+                f_consecutive_greens=factor_map.get("consecutive_greens"),
+                f_ob_bid_thinning=factor_map.get("ob_bid_thinning"),
+                f_spread_expansion=factor_map.get("spread_expansion"),
+                f_momentum_loss=factor_map.get("momentum_loss"),
+                f_upper_wick=factor_map.get("upper_wick"),
+                f_funding_rate=factor_map.get("funding_rate"),
+                f_rsi_5m=factor_map.get("rsi_5m"),
+                f_large_sell_cluster=factor_map.get("large_sell_cluster"),
+                f_cvd_divergence=factor_map.get("cvd_divergence"),
+                f_liquidation_cascade=factor_map.get("liquidation_cascade"),
+                realized_vol_1h=features.realized_vol_1h if features else None,
+                volume_24h_usdt=features.volume_24h_usdt if features else None,
+                price_change_5m=features.price_change_5m if features else None,
+                price_change_1h=features.price_change_1h if features else None,
+                spread_pct=features.spread_pct if features else None,
+                bid_depth_change_5m=features.bid_depth_change_5m if features else None,
+                btc_change_15m=features.btc_change_15m if features else None,
+                funding_rate_at_signal=features.funding_rate if features else None,
+                oi_change_pct_at_signal=features.oi_change_pct if features else None,
+                trend_strength_1h=(
+                    features.trend_context.trend_strength
+                    if features and features.trend_context
+                    else None
+                ),
+            )
+
+            async with AsyncSessionLocal() as session:
+                session.add(row)
+                await session.commit()
+                await session.refresh(row)
+                shadow_id = row.id
+
+            # Регистрируем в Redis для мониторинга
+            shadow_data = json.dumps({
+                "id": shadow_id,
+                "symbol": symbol,
+                "entry_price": entry_price,
+                "tp_price": tp_price,
+                "sl_price": sl_price,
+            })
+            await self._redis.hset(REDIS_SHADOW_PAPER_KEY, str(shadow_id), shadow_data)  # type: ignore
+
+            logger.debug(
+                "Shadow-paper signal created",
+                shadow_id=shadow_id,
+                symbol=symbol,
+                would_have_opened=would_have_opened,
+                actual_blocked_by=actual_blocked_by,
+                entry_price=entry_price,
+                tp_price=round(tp_price, 6),
+                sl_price=round(sl_price, 6),
+            )
+
+        except Exception as e:
+            logger.debug(
+                "Shadow-paper signal creation failed",
+                symbol=risk_score.symbol,
+                error=str(e),
+            )
+
+    async def _monitor_shadow_paper_loop(self) -> None:
+        """Бесконечный цикл мониторинга shadow-paper сделок.
+
+        Проверяет все open shadow-paper по TP/SL каждые 30 секунд.
+        Без таймаута — висит пока не сработает TP или SL.
+        """
+        from sqlalchemy import update
+        from app.db.models.all_opened_signal import AllOpenedSignal
+        from app.db.session import AsyncSessionLocal
+
+        logger.info("Shadow-paper monitor loop started")
+
+        while True:
+            try:
+                await asyncio.sleep(SHADOW_MONITOR_INTERVAL)
+
+                raw_all = await self._redis.hgetall(REDIS_SHADOW_PAPER_KEY)  # type: ignore
+                if not raw_all:
+                    continue
+
+                for key, raw_val in raw_all.items():
+                    try:
+                        data = json.loads(raw_val)
+                        shadow_id = data["id"]
+                        symbol = data["symbol"]
+                        tp_price = data["tp_price"]
+                        sl_price = data["sl_price"]
+                        entry_price = data["entry_price"]
+
+                        current_price = await self._get_price(symbol)
+                        if not current_price:
+                            continue
+
+                        close_reason: str | None = None
+                        pnl_pct: float | None = None
+                        ml_label: int | None = None
+
+                        # Шорт: TP когда цена падает, SL когда цена растёт
+                        if current_price <= tp_price:
+                            close_reason = "tp_hit"
+                            pnl_pct = SHADOW_TP_PCT
+                            ml_label = 1
+                        elif current_price >= sl_price:
+                            close_reason = "sl_hit"
+                            pnl_pct = -SHADOW_SL_PCT
+                            ml_label = 0
+
+                        if close_reason:
+                            now = datetime.now(timezone.utc)
+                            async with AsyncSessionLocal() as session:
+                                await session.execute(
+                                    update(AllOpenedSignal)
+                                    .where(AllOpenedSignal.id == shadow_id)
+                                    .values(
+                                        status="closed",
+                                        close_reason=close_reason,
+                                        exit_price=current_price,
+                                        exit_ts=now,
+                                        pnl_pct=pnl_pct,
+                                        ml_label=ml_label,
+                                    )
+                                )
+                                await session.commit()
+
+                            await self._redis.hdel(REDIS_SHADOW_PAPER_KEY, str(shadow_id))  # type: ignore
+
+                            logger.debug(
+                                "Shadow-paper closed",
+                                shadow_id=shadow_id,
+                                symbol=symbol,
+                                close_reason=close_reason,
+                                pnl_pct=pnl_pct,
+                                entry_price=entry_price,
+                                exit_price=current_price,
+                            )
+
+                    except Exception as e:
+                        logger.debug(
+                            "Shadow-paper monitor item error",
+                            key=key,
+                            error=str(e),
+                        )
+
+            except asyncio.CancelledError:
+                logger.info("Shadow-paper monitor loop cancelled")
+                raise
+            except Exception as e:
+                logger.warning("Shadow-paper monitor loop error", error=str(e))
+
+    async def restore_shadow_paper_trades(self) -> None:
+        """Восстанавливает open shadow-paper сделки из БД в Redis при старте."""
+        try:
+            from sqlalchemy import select
+            from app.db.models.all_opened_signal import AllOpenedSignal
+            from app.db.session import AsyncSessionLocal
+
+            await self._redis.delete(REDIS_SHADOW_PAPER_KEY)
+
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(AllOpenedSignal).where(AllOpenedSignal.status == "open")
+                )
+                open_shadows = result.scalars().all()
+
+            if not open_shadows:
+                logger.info("No open shadow-paper trades to restore")
+            else:
+                for s in open_shadows:
+                    shadow_data = json.dumps({
+                        "id": s.id,
+                        "symbol": s.symbol,
+                        "entry_price": s.entry_price,
+                        "tp_price": s.tp_price,
+                        "sl_price": s.sl_price,
+                    })
+                    await self._redis.hset(REDIS_SHADOW_PAPER_KEY, str(s.id), shadow_data)  # type: ignore
+                logger.info("Shadow-paper trades restored", count=len(open_shadows))
+
+            # Запускаем мониторинг shadow-paper
+            task = asyncio.create_task(self._monitor_shadow_paper_loop())
+            self._shadow_paper_tasks.add(task)
+            task.add_done_callback(self._shadow_paper_tasks.discard)
+
+        except Exception as e:
+            logger.exception("Failed to restore shadow-paper trades", error=str(e))
 
     async def _save_canceled_signal(
         self,
@@ -857,6 +1121,14 @@ class AutoShortService:
                     canceled_id=canceled_id,
                     error=str(e),
                 )
+
+            # Shadow-paper: создаём запись в all_opened_signals
+            await self._create_shadow_paper_signal(
+                risk_score=risk_score,
+                would_have_opened=False,
+                actual_blocked_by=cancel_reason,
+                linked_canceled_signal_id=canceled_id,
+            )
 
             return canceled_id
 
@@ -1270,6 +1542,11 @@ class AutoShortService:
                     risk_score=risk_score,
                     cancel_reason="already_open",
                 )
+                await self._create_shadow_paper_signal(
+                    risk_score=risk_score,
+                    would_have_opened=False,
+                    actual_blocked_by="duplicate",
+                )
                 return
 
             if symbol in self._pending_symbols:
@@ -1281,6 +1558,11 @@ class AutoShortService:
                 await self._maybe_save_shadow_trade(
                     risk_score=risk_score,
                     cancel_reason="pending_duplicate",
+                )
+                await self._create_shadow_paper_signal(
+                    risk_score=risk_score,
+                    would_have_opened=False,
+                    actual_blocked_by="duplicate",
                 )
                 return
 
@@ -1297,6 +1579,11 @@ class AutoShortService:
                 await self._maybe_save_shadow_trade(
                     risk_score=risk_score,
                     cancel_reason="strategy_disabled",
+                )
+                await self._create_shadow_paper_signal(
+                    risk_score=risk_score,
+                    would_have_opened=False,
+                    actual_blocked_by="strategy_disabled",
                 )
                 return
 
@@ -1591,6 +1878,14 @@ class AutoShortService:
 
                 task = asyncio.create_task(self._monitor_trade(trade_id))
                 self._track_task(trade_id, task)
+
+                # Shadow-paper: создаём запись для золотого датасета
+                await self._create_shadow_paper_signal(
+                    risk_score=risk_score,
+                    would_have_opened=True,
+                    actual_blocked_by=None,
+                    linked_auto_short_id=trade_id,
+                )
 
         except Exception as e:
             logger.exception(

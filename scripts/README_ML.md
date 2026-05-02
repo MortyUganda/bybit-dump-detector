@@ -133,3 +133,19 @@ python -m scripts.train_decision_model --auto-csv my_auto.csv --canceled-csv my_
 
 **`Невозможно: один класс в выборке`:**
 В одном из фолдов все сделки win или все loss. Подожди ещё данных.
+
+---
+
+## Новый датасет: `all_opened_signals`
+
+Файл `all_opened_signals_*.csv` — **золотой датасет** для ML.
+
+Содержит shadow-paper сделку по **каждому** risk-сигналу:
+- TP/SL всегда 10%/10%, без таймаута
+- Поле `would_have_opened` — открыл бы реальный бот (прошёл все фильтры)
+- Поле `actual_blocked_by` — причина блокировки (`trend_filter`, `cancel_drop`, `score_dropped`, `strategy_disabled`, `duplicate` и т.д.), NULL если открыл
+- `linked_auto_short_id` / `linked_canceled_signal_id` — связь с реальными таблицами
+
+**ML-target:** `ml_label` = 1 (tp_hit, прибыльный) или 0 (sl_hit, убыточный) — **без bias** текущих фильтров.
+
+Экспортируется автоматически через `export_trades_csv.py` вместе с остальными.

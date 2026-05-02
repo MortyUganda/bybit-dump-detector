@@ -8,6 +8,7 @@ from app.db.models.alert import AlertHistory
 from app.db.models.paper_trade import PaperTrade
 from app.db.models.auto_short import AutoShort  # ← новая таблица
 from app.db.models.canceled_signal import CanceledSignal
+from app.db.models.all_opened_signal import AllOpenedSignal
 
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "PaperTrade",
     "AutoShort",
     "CanceledSignal",
+    "AllOpenedSignal",
 ]

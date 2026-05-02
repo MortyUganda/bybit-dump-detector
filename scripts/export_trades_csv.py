@@ -65,6 +65,7 @@ async def main() -> None:
     total = 0
     total += await export_table(engine, "auto_shorts", EXPORT_DIR / f"auto_shorts_{ts}.csv")
     total += await export_table(engine, "canceled_signals", EXPORT_DIR / f"canceled_signals_{ts}.csv")
+    total += await export_table(engine, "all_opened_signals", EXPORT_DIR / f"all_opened_signals_{ts}.csv")
     print(f"\nГотово: {total} строк")
     print("Скопировать наружу:")
     print(f"  docker cp $(docker compose -p <env> -f docker/docker-compose.<env>.yml ps -q bot):/app/exports/. ./exports/")
