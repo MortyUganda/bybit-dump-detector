@@ -8,6 +8,6 @@ canceled_signals.csv
 ./ml/data/raw/current/ml_opened_vs_canceled.parquet
 ./ml/data/raw/current/ml_opened_only_profitable.parquet
 ./ml/data/raw/current/canceled_signals.parquet
-
+.env.dev2
 ml/data/raw/archive
 docker/canceled_signals_dump.csv
