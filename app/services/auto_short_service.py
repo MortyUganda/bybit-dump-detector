@@ -26,7 +26,7 @@ LEVERAGE = 10
 TARGET_PNL_PCT = 20.0
 TARGET_SL_PCT = 10.0
 
-ENTRY_DELAY_SEC = 60
+ENTRY_DELAY_SEC = 30
 MONITOR_ATTEMPTS = 24
 MONITOR_INTERVAL_SEC = 5
 MIN_SCORE_TO_ENTER = 55
@@ -441,7 +441,7 @@ class AutoShortService:
                     final_price=current_price,
                     price_change_pct=price_change_pct,
                     final_score=current_score,
-                    cancel_reason="score_dropped",
+                    cancel_reason="cancel_drop",
                     entry_mode_candidate="after_monitor",
                     ob_snapshot_data=mon_ob_snap,
                 )
@@ -451,7 +451,7 @@ class AutoShortService:
                     current_price=current_price,
                     price_change_pct=price_change_pct,
                     score=current_score,
-                    reason="score_dropped",
+                    reason="price_dropped",
                 )
                 return None
 
@@ -469,7 +469,7 @@ class AutoShortService:
                     final_price=current_price,
                     price_change_pct=price_change_pct,
                     final_score=current_score,
-                    cancel_reason="score_dropped",
+                    cancel_reason="cancel_rise",
                     entry_mode_candidate="after_monitor",
                     ob_snapshot_data=mon_ob_snap,
                 )
@@ -479,7 +479,7 @@ class AutoShortService:
                     current_price=current_price,
                     price_change_pct=price_change_pct,
                     score=current_score,
-                    reason="score_dropped",
+                    reason="price_too_high",
                 )
                 return None
 
@@ -503,20 +503,20 @@ class AutoShortService:
         await self._save_canceled_signal(
             risk_score=risk_score,
             signal_price=signal_price,
-            final_price=current_price,
-            price_change_pct=price_change_pct,
-            final_score=current_score,
-            cancel_reason="score_dropped",
+            final_price=last_price or current_price,
+            price_change_pct=last_change,
+            final_score=last_score,
+            cancel_reason="timeout",
             entry_mode_candidate="after_monitor",
             ob_snapshot_data=timeout_ob_snap,
         )
         await self._notify_entry_canceled(
             symbol=symbol,
             signal_price=signal_price,
-            current_price=current_price,
-            price_change_pct=price_change_pct,
-            score=current_score,
-            reason="score_dropped",
+            current_price=last_price or current_price,
+            price_change_pct=last_change,
+            score=last_score,
+            reason="timeout",
         )
         return None
     # ── Notify canceled entry ─────────────────────────────────────
@@ -1427,8 +1427,8 @@ class AutoShortService:
                     final_price=entry_price,
                     price_change_pct=price_change_pct,
                     final_score=effective_score,
-                    cancel_reason="score_dropped",
-                    entry_mode_candidate="after_monitor",
+                    cancel_reason="cancel_drop",
+                    entry_mode_candidate="direct",
                     ob_snapshot_data=ob_snap,
                 )
                 await self._notify_entry_canceled(
@@ -1437,7 +1437,7 @@ class AutoShortService:
                     entry_price=entry_price,
                     price_change_pct=price_change_pct,
                     score=effective_score,
-                    reason="score_dropped",
+                    reason="price_dropped",
                 )
                 return
 
@@ -1454,8 +1454,8 @@ class AutoShortService:
                     final_price=entry_price,
                     price_change_pct=price_change_pct,
                     final_score=effective_score,
-                    cancel_reason="score_dropped",
-                    entry_mode_candidate="after_monitor",
+                    cancel_reason="cancel_rise",
+                    entry_mode_candidate="direct",
                     ob_snapshot_data=ob_snap,
                 )
                 await self._notify_entry_canceled(
@@ -1464,7 +1464,7 @@ class AutoShortService:
                     entry_price=entry_price,
                     price_change_pct=price_change_pct,
                     score=effective_score,
-                    reason="score_dropped",
+                    reason="price_too_high",
                 )
                 return
 
