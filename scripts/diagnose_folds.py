@@ -74,8 +74,10 @@ def main() -> None:
     print("=" * 78)
     print(f"  Разбивка датасета на {args.splits} равных временных кусков")
     print("=" * 78)
-    chunks = np.array_split(df, args.splits)
-    for i, c in enumerate(chunks, 1):
+    n = len(df)
+    indices = np.array_split(np.arange(n), args.splits)
+    for i, idx in enumerate(indices, 1):
+        c = df.iloc[idx]
         wr = c[TARGET].mean() * 100
         sources = c["source"].value_counts().to_dict()
         src_str = ", ".join(f"{k}={v}" for k, v in sources.items())
