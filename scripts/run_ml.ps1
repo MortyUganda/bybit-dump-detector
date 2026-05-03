@@ -1,4 +1,4 @@
-# === Удобный запуск ML-скриптов из PowerShell ===
+﻿# === Удобный запуск ML-скриптов из PowerShell ===
 # Использование (из корня проекта):
 #   .\scripts\run_ml.ps1                  -> обе модели на последних CSV
 #   .\scripts\run_ml.ps1 -Mode outcome    -> только outcome
