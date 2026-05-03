@@ -514,17 +514,12 @@ class AutoShortService:
                 return
 
             bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
-            min_score_to_enter = await self._get_min_score_to_enter()
             max_entry_drop_pct = await self._get_max_entry_drop_pct()
             max_rise_pct = await self._get_max_rise_pct()
             monitor_attempts = await self._get_monitor_attempts()
             monitor_interval_sec = await self._get_monitor_interval_sec()
 
             reason_details = {
-                "score_dropped": (
-                    f"⚠️ Score: <b>{score:.0f}</b> (мин. {min_score_to_enter})\n\n"
-                    f"<i>Score упал ниже порога входа — вход отменён</i>"
-                ),
                 "price_dropped": (
                     f"📉 Изменение: <b>{price_change_pct:+.2f}%</b> "
                     f"(порог {max_entry_drop_pct}%)\n\n"
