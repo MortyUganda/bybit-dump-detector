@@ -96,9 +96,16 @@ async def strategy_keyboard() -> InlineKeyboardMarkup:
             callback_data=f"strategy:sl:{value}",
         )
 
+    for value in [0.1, 0.2, 0.3, 0.5]:
+        marker = "✅ " if abs(cfg.get("adverse_move_threshold_pct", 0.2) - value) < 0.01 else ""
+        builder.button(
+            text=f"{marker}Adverse {value}%",
+            callback_data=f"strategy:adverse:{value}",
+        )
+
     builder.button(text="🔄 Сбросить стратегию", callback_data="strategy:reset")
 
-    builder.adjust(1, 1, 2, 2, 2, 2, 2, 2, 1)
+    builder.adjust(1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1)
     return builder.as_markup()
 
 
@@ -124,6 +131,7 @@ async def _format_strategy_text() -> str:
         f"📈 Max rise: <b>{cfg['max_rise_pct']}%</b>\n"
         f"📉 Max entry drop: <b>{cfg['max_entry_drop_pct']}%</b>\n"
         f"📌 Stabilization threshold: <b>{cfg['stabilization_threshold_pct']}%</b>\n"
+        f"🚫 Adverse move threshold: <b>{cfg.get('adverse_move_threshold_pct', 0.2)}%</b>\n"
         f"👻 Shadow trades: <b>{'YES' if cfg.get('shadow_trades_enabled', True) else 'NO'}</b>\n\n"
         f"<i>Изменения применяются на лету через Redis</i>"
     )
@@ -318,6 +326,31 @@ async def cb_sl(query: CallbackQuery) -> None:
     try:
         await patch_runtime_strategy_config(redis, {"target_sl_pct": value})
         logger.info("Strategy target_sl_pct updated", value=value)
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_strategy_text(),
+            reply_markup=await strategy_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("strategy:adverse:"))
+async def cb_adverse(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    value = float(query.data.split(":")[-1])
+
+    redis = await _get_redis()
+    try:
+        await patch_runtime_strategy_config(redis, {"adverse_move_threshold_pct": value})
+        logger.info("Strategy adverse_move_threshold_pct updated", value=value)
     finally:
         await redis.aclose()
 

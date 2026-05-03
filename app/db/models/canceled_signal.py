@@ -102,6 +102,9 @@ class CanceledSignal(Base):
     btc_atr_pct_1h: Mapped[float | None] = mapped_column(Float, nullable=True)
     recent_wr_20: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # ── Adverse move (движение цены против позиции за время delay) ──
+    adverse_move_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # ── Post-cancel price tracking (для synthetic PnL и ML) ────────
     price_15m: Mapped[float | None] = mapped_column(Float, nullable=True)
     price_30m: Mapped[float | None] = mapped_column(Float, nullable=True)

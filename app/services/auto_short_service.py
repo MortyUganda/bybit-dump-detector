@@ -143,6 +143,10 @@ class AutoShortService:
         cfg = await self._get_strategy()
         return float(cfg.get("max_entry_drop_pct", MAX_ENTRY_DROP_PCT))
 
+    async def _get_adverse_move_threshold_pct(self) -> float:
+        cfg = await self._get_strategy()
+        return float(cfg.get("adverse_move_threshold_pct", 0.2))
+
     async def _get_leverage(self) -> float:
         cfg = await self._get_strategy()
         return float(cfg.get("leverage", LEVERAGE))
@@ -276,20 +280,11 @@ class AutoShortService:
         current_score: float,
         symbol: str,
     ) -> str:
-        min_score_to_enter = await self._get_min_score_to_enter()
         max_entry_drop_pct = await self._get_max_entry_drop_pct()
         max_rise_pct = await self._get_max_rise_pct()
         stabilization_threshold_pct = await self._get_stabilization_threshold_pct()
 
-        if current_score < min_score_to_enter:
-            logger.debug(
-                "Entry check: score below minimum",
-                symbol=symbol,
-                score=round(current_score, 1),
-                min_score=min_score_to_enter,
-            )
-            decision = "cancel_score"
-        elif price_change_pct < max_entry_drop_pct:
+        if price_change_pct < max_entry_drop_pct:
             logger.debug(
                 "Entry check: price dropped too much",
                 symbol=symbol,
@@ -322,12 +317,11 @@ class AutoShortService:
             decision=decision,
             price_change_pct=round(price_change_pct, 3),
             score=round(current_score, 1),
-            min_score=min_score_to_enter,
             max_entry_drop_pct=max_entry_drop_pct,
             max_rise_pct=max_rise_pct,
             stabilization_threshold_pct=stabilization_threshold_pct,
         )
-        return decision    
+        return decision
 
     
     # ── Current score ─────────────────────────────────────────────
@@ -403,36 +397,8 @@ class AutoShortService:
                 )
                 return current_price, price_change_pct, float(current_score)
 
-            if decision in ("cancel_score", "cancel_drop", "cancel_rise"):
+            if decision in ("cancel_drop", "cancel_rise"):
                 mon_ob_snap = await self._get_ob_snapshot(symbol, current_price)
-
-            if decision == "cancel_score":
-                logger.info(
-                    "Canceled because score dropped",
-                    symbol=symbol,
-                    attempt=attempt + 1,
-                    score=round(current_score, 1),
-                    min_score=await self._get_min_score_to_enter(),
-                )
-                await self._save_canceled_signal(
-                    risk_score=risk_score,
-                    signal_price=signal_price,
-                    final_price=current_price,
-                    price_change_pct=price_change_pct,
-                    final_score=current_score,
-                    cancel_reason="score_dropped",
-                    entry_mode_candidate="after_monitor",
-                    ob_snapshot_data=mon_ob_snap,
-                )
-                await self._notify_entry_canceled(
-                    symbol=symbol,
-                    signal_price=signal_price,
-                    current_price=current_price,
-                    price_change_pct=price_change_pct,
-                    score=current_score,
-                    reason="score_dropped",
-                )
-                return None
 
             if decision == "cancel_drop":
                 logger.info(
@@ -535,6 +501,7 @@ class AutoShortService:
         price_change_pct: float,
         score: float,
         reason: str,
+        adverse_move_pct: float | None = None,
     ) -> None:
         if not self._bot:
             return
@@ -575,6 +542,15 @@ class AutoShortService:
                     f"<i>Стабилизация не наступила — вход отменён по таймауту</i>"
                 ),
             }
+
+            # Adverse move reason
+            adverse_threshold = await self._get_adverse_move_threshold_pct()
+            adverse_str = f"{adverse_move_pct:+.2f}%" if adverse_move_pct is not None else "N/A"
+            reason_details["adverse_move"] = (
+                f"📈 Движение против позиции: <b>{adverse_str}</b> "
+                f"(порог +{adverse_threshold}%)\n\n"
+                f"<i>Цена выросла за время delay — вход в шорт отменён</i>"
+            )
 
             # Trend filter reason
             reason_details["trend_filter_blocked"] = (
@@ -1030,6 +1006,7 @@ class AutoShortService:
         cancel_reason: str,
         entry_mode_candidate: str = "direct",
         ob_snapshot_data: dict | None = None,
+        adverse_move_pct: float | None = None,
     ) -> int | None:
         try:
             from app.db.models.canceled_signal import CanceledSignal
@@ -1121,6 +1098,7 @@ class AutoShortService:
                 btc_adx_1h=features.btc_adx_1h if features else None,
                 btc_atr_pct_1h=features.btc_atr_pct_1h if features else None,
                 recent_wr_20=features.recent_wr_20 if features else None,
+                adverse_move_pct=adverse_move_pct,
             )
 
             async with AsyncSessionLocal() as session:
@@ -1695,19 +1673,21 @@ class AutoShortService:
                 effective_score=round(effective_score, 1),
             )
 
-            decision = await self._evaluate_entry_conditions(
-                price_change_pct=price_change_pct,
-                current_score=effective_score,
-                symbol=symbol,
-            )
+            # ── adverse move check (price moved against short during delay) ──
+            adverse_move_pct = (entry_price / signal_price - 1.0) * 100.0
+            strategy = await self._get_strategy()
+            adverse_threshold = float(strategy.get("adverse_move_threshold_pct", 0.2))
 
-            if decision == "cancel_score":
+            if adverse_move_pct >= adverse_threshold:
                 logger.info(
-                    "Canceled because score dropped before entry",
+                    "[adverse_move] %s delay=%ds adverse_move=%.2f%%",
+                    symbol,
+                    entry_delay_sec,
+                    adverse_move_pct,
                     symbol=symbol,
                     signal_type=signal_type,
-                    score=round(effective_score, 1),
-                    min_score=min_score_to_enter,
+                    adverse_move_pct=round(adverse_move_pct, 2),
+                    threshold=adverse_threshold,
                 )
                 await self._save_canceled_signal(
                     risk_score=risk_score,
@@ -1715,9 +1695,10 @@ class AutoShortService:
                     final_price=entry_price,
                     price_change_pct=price_change_pct,
                     final_score=effective_score,
-                    cancel_reason="score_dropped",
-                    entry_mode_candidate="after_monitor",
+                    cancel_reason="adverse_move",
+                    entry_mode_candidate="direct",
                     ob_snapshot_data=ob_snap,
+                    adverse_move_pct=adverse_move_pct,
                 )
                 await self._notify_entry_canceled(
                     symbol=symbol,
@@ -1725,9 +1706,16 @@ class AutoShortService:
                     entry_price=entry_price,
                     price_change_pct=price_change_pct,
                     score=effective_score,
-                    reason="score_dropped",
+                    reason="adverse_move",
+                    adverse_move_pct=adverse_move_pct,
                 )
                 return
+
+            decision = await self._evaluate_entry_conditions(
+                price_change_pct=price_change_pct,
+                current_score=effective_score,
+                symbol=symbol,
+            )
 
             if decision == "cancel_drop":
                 logger.info(

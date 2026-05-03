@@ -36,6 +36,7 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "stabilization_threshold_pct": 0.2,
     "max_rise_pct": 0.8,
     "max_entry_drop_pct": -0.3,
+    "adverse_move_threshold_pct": 0.2,
     "trade_monitor_interval": 5,
     "max_trade_duration_sec": 0,  # disabled: автозакрытие по таймауту отключено
     "shadow_trades_enabled": True,
@@ -76,6 +77,9 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
     )
     merged["max_rise_pct"] = float(merged.get("max_rise_pct", 0.8))
     merged["max_entry_drop_pct"] = float(merged.get("max_entry_drop_pct", -0.3))
+    merged["adverse_move_threshold_pct"] = max(
+        0.0, float(merged.get("adverse_move_threshold_pct", 0.2))
+    )
     merged["trade_monitor_interval"] = max(
         1, int(merged.get("trade_monitor_interval", 5))
     )
