@@ -124,7 +124,17 @@ async def _get_stats() -> dict:
         return {}
 
 
-async def _format_active_shorts() -> tuple[str, list[int]]:
+# Безопасный лимит для одного Telegram-сообщения (Telegram режет на 4096 символах)
+TG_MAX_MESSAGE_CHARS = 3800
+
+
+async def _format_active_shorts_chunks() -> tuple[list[str], list[int]]:
+    """
+    Разбивает список всех активных сделок на несколько сообщений
+    чтобы уложиться в лимит Telegram. Возвращает:
+      - список текстов (по одному на сообщение)
+      - общий список trade_ids (для клавиатуры на последнем сообщении)
+    """
     try:
         from app.db.session import AsyncSessionLocal
         from app.db.models.auto_short import AutoShort
@@ -138,18 +148,21 @@ async def _format_active_shorts() -> tuple[str, list[int]]:
 
     except Exception as e:
         logger.error("Failed to fetch active shorts", error=str(e))
-        return "❌ Ошибка загрузки данных.", []
+        return ["❌ Ошибка загрузки данных."], []
 
     if not trades:
         return (
-            "🤖 <b>Авто-шорты</b>\n\n"
-            "<i>Нет активных сделок.</i>\n\n"
-            "Сделки открываются автоматически при score ≥ 45.",
+            [
+                "🤖 <b>Авто-шорты</b>\n\n"
+                "<i>Нет активных сделок.</i>\n\n"
+                "Сделки открываются автоматически при score ≥ 45."
+            ],
             [],
         )
 
-    lines = [f"🤖 <b>Авто-шорты</b> ({len(trades)} активных)\n"]
+    header = f"🤖 <b>Авто-шорты</b> ({len(trades)} активных)"
     trade_ids: list[int] = []
+    blocks: list[str] = []
 
     for trade in sorted(trades, key=lambda t: -t.id):
         symbol = trade.symbol
@@ -171,7 +184,7 @@ async def _format_active_shorts() -> tuple[str, list[int]]:
             current_price_line = "   💹 Сейчас: <b>н/д</b>\n"
             pnl_line = "   ⚪ PnL now: <b>н/д</b>\n"
 
-        lines.append(
+        blocks.append(
             f"📌 #{trade.id} <a href=\"{bybit_url}\">{symbol}</a>\n"
             f"   💰 Вход: <b>${trade.entry_price:.6g}</b> | ⏱ {elapsed_min}м\n"
             f"{current_price_line}"
@@ -181,7 +194,45 @@ async def _format_active_shorts() -> tuple[str, list[int]]:
         )
         trade_ids.append(trade.id)
 
-    return "\n\n".join(lines), trade_ids
+    # Склеиваем блоки в чанки по лимиту в ~3800 символов
+    chunks: list[str] = []
+    sep = "\n\n"
+    current_lines: list[str] = [header]
+    current_len = len(header)
+    is_first = True
+    for block in blocks:
+        add_len = len(sep) + len(block)
+        if current_len + add_len > TG_MAX_MESSAGE_CHARS and not is_first:
+            chunks.append(sep.join(current_lines))
+            current_lines = [block]
+            current_len = len(block)
+        else:
+            current_lines.append(block)
+            current_len += add_len
+            is_first = False
+    if current_lines:
+        chunks.append(sep.join(current_lines))
+
+    return chunks, trade_ids
+
+
+async def _send_active_shorts(msg: Message) -> None:
+    """Отправить все активные сделки пачками сообщений, клава — на последнем."""
+    chunks, trade_ids = await _format_active_shorts_chunks()
+    for i, chunk in enumerate(chunks):
+        is_last = i == len(chunks) - 1
+        if is_last:
+            await msg.answer(chunk, reply_markup=auto_shorts_keyboard(trade_ids))
+        else:
+            await msg.answer(chunk)
+
+
+# Обратная совместимость: возвращает ОДНИМ сообщением первый чанк +
+# общий список trade_ids. Используется там, где импортируется в commands.py извне.
+async def _format_active_shorts() -> tuple[str, list[int]]:
+    chunks, trade_ids = await _format_active_shorts_chunks()
+    text = chunks[0] if chunks else "❌ Нет данных."
+    return text, trade_ids
 
 
 async def _format_stats() -> str:
@@ -262,8 +313,7 @@ async def _manual_close_trade(trade_id: int) -> tuple[bool, str]:
 
 @router.message(Command("auto_shorts"))
 async def cmd_auto_shorts(msg: Message) -> None:
-    text, trade_ids = await _format_active_shorts()
-    await msg.answer(text, reply_markup=auto_shorts_keyboard(trade_ids))
+    await _send_active_shorts(msg)
 
 
 @router.message(Command("stats"))
@@ -274,8 +324,7 @@ async def cmd_stats(msg: Message) -> None:
 
 @router.message(F.text == "🤖 Авто-шорты")
 async def auto_shorts_from_reply_keyboard(msg: Message) -> None:
-    text, trade_ids = await _format_active_shorts()
-    await msg.answer(text, reply_markup=auto_shorts_keyboard(trade_ids))
+    await _send_active_shorts(msg)
 
 
 @router.callback_query(F.data == "auto_shorts:refresh")
@@ -285,12 +334,27 @@ async def cb_auto_shorts_refresh(query: CallbackQuery) -> None:
     except Exception:
         pass
 
-    text, trade_ids = await _format_active_shorts()
+    chunks, trade_ids = await _format_active_shorts_chunks()
+    if not chunks:
+        return
+    # Первый чанк — edit_text старого сообщения, остальные — новыми answer.
+    # Клавиатура всегда на последнем сообщении.
     try:
-        await query.message.edit_text(
-            text,
-            reply_markup=auto_shorts_keyboard(trade_ids),
-        )
+        if len(chunks) == 1:
+            await query.message.edit_text(
+                chunks[0],
+                reply_markup=auto_shorts_keyboard(trade_ids),
+            )
+        else:
+            await query.message.edit_text(chunks[0])
+            for i, chunk in enumerate(chunks[1:], start=1):
+                is_last = i == len(chunks) - 1
+                if is_last:
+                    await query.message.answer(
+                        chunk, reply_markup=auto_shorts_keyboard(trade_ids)
+                    )
+                else:
+                    await query.message.answer(chunk)
     except Exception:
         pass
 
@@ -329,11 +393,7 @@ async def cb_auto_shorts_close(query: CallbackQuery) -> None:
     await query.message.answer(result_text)
 
     if ok:
-        text, trade_ids = await _format_active_shorts()
         try:
-            await query.message.answer(
-                text,
-                reply_markup=auto_shorts_keyboard(trade_ids),
-            )
+            await _send_active_shorts(query.message)
         except Exception:
             pass
