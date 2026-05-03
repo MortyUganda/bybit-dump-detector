@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 router = Router()
 
 PAGE_SIZE = 5
-SCORE_MIN_THRESHOLD = 35  # ниже этого — удалять из истории
+# SCORE_MIN_THRESHOLD удалён вместе с score-фильтром (см. e689a7c, 343bcf5)
 
 REDIS_SIGNALS_KEY = "signals_history"
 MAX_SIGNALS = 500
@@ -84,8 +84,9 @@ async def get_signals(redis: aioredis.Redis, limit: int = 50) -> list[dict]:
 
 async def _refresh_scores() -> None:
     """
-    Обновить score для всех сигналов из Redis.
-    Удалить те у которых score упал ниже SCORE_MIN_THRESHOLD.
+    Обновить current_score для всех сигналов в Redis.
+    Сигналы НЕ удаляются по падению score (score-фильтр отключён
+    вместе с score_dropped в e689a7c — ML показало что фильтр режет прибыльные).
     """
     try:
         redis = await _get_redis()
@@ -93,34 +94,17 @@ async def _refresh_scores() -> None:
         raw_all = await redis.lrange(REDIS_SIGNALS_KEY, 0, -1)
         signals = [json.loads(r) for r in raw_all]
 
-        to_remove_indices: list[int] = []
         for i, signal in enumerate(signals):
             raw = await redis.get(f"score:{signal['symbol']}")
             if raw:
                 data = json.loads(raw)
                 current_score = data.get("score", 0)
                 signal["current_score"] = current_score
-
-                if current_score < SCORE_MIN_THRESHOLD:
-                    to_remove_indices.append(i)
-                    logger.info(
-                        "Signal removed — score below threshold",
-                        symbol=signal["symbol"],
-                        score=current_score,
-                    )
-                else:
-                    await redis.lset(
-                        REDIS_SIGNALS_KEY, i, json.dumps(signal, default=str)
-                    )
+                await redis.lset(
+                    REDIS_SIGNALS_KEY, i, json.dumps(signal, default=str)
+                )
             else:
                 signal["current_score"] = signal["score"]
-
-        # Удаляем просевшие сигналы (от конца к началу чтобы индексы не сдвигались)
-        for idx in reversed(to_remove_indices):
-            sentinel = "__REMOVE__"
-            await redis.lset(REDIS_SIGNALS_KEY, idx, sentinel)
-        if to_remove_indices:
-            await redis.lrem(REDIS_SIGNALS_KEY, 0, "__REMOVE__")
 
         await redis.aclose()
 
