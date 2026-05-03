@@ -726,6 +726,7 @@ class AutoShortService:
         linked_auto_short_id: int | None = None,
         linked_canceled_signal_id: int | None = None,
         ob_snapshot_data: dict | None = None,
+        adverse_move_pct: float | None = None,
     ) -> None:
         """Создаёт shadow-paper запись в all_opened_signals.
 
@@ -834,6 +835,7 @@ class AutoShortService:
                 btc_adx_1h=getattr(features, 'btc_adx_1h', None) if features else None,
                 btc_atr_pct_1h=getattr(features, 'btc_atr_pct_1h', None) if features else None,
                 recent_wr_20=getattr(features, 'recent_wr_20', None) if features else None,
+                adverse_move_pct=adverse_move_pct,
             )
 
             async with AsyncSessionLocal() as session:
@@ -1134,6 +1136,7 @@ class AutoShortService:
                 would_have_opened=False,
                 actual_blocked_by=cancel_reason,
                 linked_canceled_signal_id=canceled_id,
+                adverse_move_pct=adverse_move_pct,
             )
 
             return canceled_id

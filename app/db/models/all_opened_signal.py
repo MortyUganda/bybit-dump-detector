@@ -92,6 +92,9 @@ class AllOpenedSignal(Base):
     oi_change_pct_at_signal: Mapped[float | None] = mapped_column(Float, nullable=True)
     trend_strength_1h: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # -- Adverse move (движение цены против позиции за время delay) --
+    adverse_move_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # -- Order book snapshot при входе (для ML) --
     ob_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     ob_bid_volume_top10: Mapped[float | None] = mapped_column(Float, nullable=True)

@@ -77,6 +77,8 @@ COMMON_FEATURES = [
     "btc_adx_1h", "btc_atr_pct_1h",
     # Контекст
     "recent_wr_20",
+    # Adverse move
+    "adverse_move_pct",
 ]
 
 TARGET = "label"
