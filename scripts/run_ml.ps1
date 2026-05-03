@@ -5,6 +5,7 @@
 #   .\scripts\run_ml.ps1 -Mode decision   -> только decision
 #   .\scripts\run_ml.ps1 -Mode export     -> только выгрузить CSV
 #   .\scripts\run_ml.ps1 -Mode all        -> выгрузить + обе модели
+#   .\scripts\run_ml.ps1 -Mode diagnose   -> диагностика фолдов (drift)
 #   .\scripts\run_ml.ps1 -MinId 700       -> outcome с другим min_id
 #   .\scripts\run_ml.ps1 -Splits 8        -> кастомное число фолдов
 #
@@ -13,7 +14,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("run", "outcome", "decision", "export", "all")]
+    [ValidateSet("run", "outcome", "decision", "export", "all", "diagnose")]
     [string]$Mode = "run",
     [int]$MinId = 449,
     [int]$Splits = 5,
@@ -50,6 +51,14 @@ function Invoke-Decision {
     python -m scripts.train_decision_model @args
 }
 
+function Invoke-Diagnose {
+    Write-Host "`n=== Диагностика фолдов ===" -ForegroundColor Cyan
+    $args = @("--splits", $Splits)
+    if ($AutoCsv) { $args += @("--auto-csv", $AutoCsv) }
+    if ($CanceledCsv) { $args += @("--canceled-csv", $CanceledCsv) }
+    python -m scripts.diagnose_folds @args
+}
+
 switch ($Mode) {
     "export" {
         Export-TradesCsv
@@ -64,6 +73,9 @@ switch ($Mode) {
         Export-TradesCsv
         Invoke-Outcome
         Invoke-Decision
+    }
+    "diagnose" {
+        Invoke-Diagnose
     }
     "run" {
         Invoke-Outcome
