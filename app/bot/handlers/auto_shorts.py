@@ -148,19 +148,10 @@ async def _format_active_shorts() -> tuple[str, list[int]]:
             [],
         )
 
-    # Telegram лимит 4096 символов; показываем только самые свежие N сделок
-    MAX_TRADES_IN_LIST = 12
-    sorted_trades = sorted(trades, key=lambda t: -t.id)
-    visible_trades = sorted_trades[:MAX_TRADES_IN_LIST]
-    hidden_count = len(sorted_trades) - len(visible_trades)
-
-    header = f"🤖 <b>Авто-шорты</b> ({len(trades)} активных)"
-    if hidden_count > 0:
-        header += f"\n<i>Показаны последние {len(visible_trades)}, ещё {hidden_count} скрыты</i>"
-    lines = [header + "\n"]
+    lines = [f"🤖 <b>Авто-шорты</b> ({len(trades)} активных)\n"]
     trade_ids: list[int] = []
 
-    for trade in visible_trades:
+    for trade in sorted(trades, key=lambda t: -t.id):
         symbol = trade.symbol
         bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
         now = datetime.now(timezone.utc)
@@ -190,12 +181,7 @@ async def _format_active_shorts() -> tuple[str, list[int]]:
         )
         trade_ids.append(trade.id)
 
-    # Кнопки тоже только для видимых сделок
-    text = "\n\n".join(lines)
-    # Дополнительный hard-cap на случай длинных символов/цен
-    if len(text) > 3900:
-        text = text[:3900] + "\n\n<i>… список обрезан</i>"
-    return text, trade_ids
+    return "\n\n".join(lines), trade_ids
 
 
 async def _format_stats() -> str:
