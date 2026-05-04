@@ -16,7 +16,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
 # === Настройки по умолчанию ===
-DEFAULT_MIN_TRADE_ID = 449  # с какой сделки берём данные (когда заработали OB-фичи)
+DEFAULT_MIN_TRADE_ID = 1  # с какой сделки берём данные (когда заработали OB-фичи)
 DEFAULT_N_SPLITS = 5
 RANDOM_STATE = 42
 

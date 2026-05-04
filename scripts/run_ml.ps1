@@ -16,7 +16,7 @@
 param(
     [ValidateSet("run", "outcome", "decision", "export", "all", "diagnose")]
     [string]$Mode = "run",
-    [int]$MinId = 449,
+    [int]$MinId = 1,
     [int]$Splits = 5,
     [string]$AutoCsv = "",
     [string]$CanceledCsv = ""
