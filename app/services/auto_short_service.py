@@ -1,3 +1,11 @@
+# === ВЕТКА dev3-no-filters ===
+# Эксперимент: бот входит в шорт сразу при score >= min_score_to_enter
+# без всяких фильтров (adverse_move, trend, BTC, price_dropped, cancel_rise).
+# Цель: чистый baseline для сравнения "бот без логики" vs "бот с фильтрами".
+# Единственное что осталось:
+#  - порог score >= 45 (это не фильтр, это условие сигнала)
+#  - skip if already_open (чтобы не получать ошибки биржи)
+#  - strategy enabled/disabled (общий выключатель)
 """
 AutoShortService — автоматически открывает paper short при сигнале,
 мониторит цену и закрывает по TP / SL / времени,
@@ -1542,15 +1550,6 @@ class AutoShortService:
                     symbol=symbol,
                     signal_type=signal_type,
                 )
-                await self._maybe_save_shadow_trade(
-                    risk_score=risk_score,
-                    cancel_reason="already_open",
-                )
-                await self._create_shadow_paper_signal(
-                    risk_score=risk_score,
-                    would_have_opened=False,
-                    actual_blocked_by="duplicate",
-                )
                 return
 
             if symbol in self._pending_symbols:
@@ -1558,15 +1557,6 @@ class AutoShortService:
                     "Skipping short — symbol already pending entry",
                     symbol=symbol,
                     signal_type=signal_type,
-                )
-                await self._maybe_save_shadow_trade(
-                    risk_score=risk_score,
-                    cancel_reason="pending_duplicate",
-                )
-                await self._create_shadow_paper_signal(
-                    risk_score=risk_score,
-                    would_have_opened=False,
-                    actual_blocked_by="duplicate",
                 )
                 return
 
@@ -1580,242 +1570,49 @@ class AutoShortService:
                     symbol=symbol,
                     signal_type=signal_type,
                 )
-                await self._maybe_save_shadow_trade(
-                    risk_score=risk_score,
-                    cancel_reason="strategy_disabled",
-                )
-                await self._create_shadow_paper_signal(
-                    risk_score=risk_score,
-                    would_have_opened=False,
-                    actual_blocked_by="strategy_disabled",
-                )
                 return
 
-            # ── Trend filter (BTC + price/RSI/candles) ────────────
-            if not await self._check_trend_filter(risk_score):
+            # dev3-no-filters: никаких фильтров, входим сразу при score >= min_score
+            min_score_to_enter = float(strategy.get("min_score_to_enter", MIN_SCORE_TO_ENTER))
+            if risk_score.score < min_score_to_enter:
                 logger.info(
-                    "auto_short_service.open_short_blocked_by_trend_filter",
+                    "Skipping short — score below min_score_to_enter",
                     symbol=symbol,
                     signal_type=signal_type,
-                )
-                signal_price_for_tf = await self._get_price(symbol)
-                if signal_price_for_tf:
-                    await self._save_canceled_signal(
-                        risk_score=risk_score,
-                        signal_price=signal_price_for_tf,
-                        final_price=signal_price_for_tf,
-                        price_change_pct=0.0,
-                        final_score=float(risk_score.score),
-                        cancel_reason="trend_filter_blocked",
-                        entry_mode_candidate="direct",
-                    )
-                    await self._notify_entry_canceled(
-                        symbol=symbol,
-                        signal_price=signal_price_for_tf,
-                        entry_price=signal_price_for_tf,
-                        price_change_pct=0.0,
-                        score=float(risk_score.score),
-                        reason="trend_filter_blocked",
-                    )
-                return
-
-            signal_price = await self._get_price(symbol)
-            if not signal_price:
-                logger.warning(
-                    "Cannot open short — no price at signal",
-                    symbol=symbol,
-                    signal_type=signal_type,
+                    score=round(risk_score.score, 1),
+                    min_score_to_enter=min_score_to_enter,
                 )
                 return
-
-            entry_delay_sec = await self._get_entry_delay_sec()
-            min_score_to_enter = await self._get_min_score_to_enter()
-
-            logger.info(
-                "Short signal received — waiting before entry",
-                symbol=symbol,
-                signal_type=signal_type,
-                signal_price=signal_price,
-                delay_sec=entry_delay_sec,
-                score=round(risk_score.score, 1),
-                min_score_to_enter=min_score_to_enter,
-            )
-
-            await asyncio.sleep(entry_delay_sec)
 
             entry_price = await self._get_price(symbol)
             if not entry_price:
                 logger.warning(
-                    "Cannot open short — no price after delay",
+                    "Cannot open short — no price",
                     symbol=symbol,
                     signal_type=signal_type,
                 )
                 return
 
-            # OB snapshot для сохранения в canceled / trade
-            ob_snap = await self._get_ob_snapshot(symbol, entry_price)
-
-            effective_score = await self._get_current_score(symbol)
-            effective_score = (
-                float(effective_score) if effective_score is not None else float(risk_score.score)
-            )
-            price_change_pct = self._calc_price_move_pct(signal_price, entry_price)
-
-            logger.info(
-                "Price check after delay",
-                symbol=symbol,
-                signal_type=signal_type,
-                signal_price=signal_price,
-                entry_price=entry_price,
-                change_pct=round(price_change_pct, 3),
-                effective_score=round(effective_score, 1),
-            )
-
-            # ── adverse move check (price moved against short during delay) ──
-            adverse_move_pct = (entry_price / signal_price - 1.0) * 100.0
-            strategy = await self._get_strategy()
-            adverse_threshold = float(strategy.get("adverse_move_threshold_pct", 0.2))
-
-            if adverse_move_pct >= adverse_threshold:
-                logger.info(
-                    "[adverse_move] %s delay=%ds adverse_move=%.2f%%",
-                    symbol,
-                    entry_delay_sec,
-                    adverse_move_pct,
-                    symbol=symbol,
-                    signal_type=signal_type,
-                    adverse_move_pct=round(adverse_move_pct, 2),
-                    threshold=adverse_threshold,
-                )
-                await self._save_canceled_signal(
-                    risk_score=risk_score,
-                    signal_price=signal_price,
-                    final_price=entry_price,
-                    price_change_pct=price_change_pct,
-                    final_score=effective_score,
-                    cancel_reason="adverse_move",
-                    entry_mode_candidate="direct",
-                    ob_snapshot_data=ob_snap,
-                    adverse_move_pct=adverse_move_pct,
-                )
-                await self._notify_entry_canceled(
-                    symbol=symbol,
-                    signal_price=signal_price,
-                    entry_price=entry_price,
-                    price_change_pct=price_change_pct,
-                    score=effective_score,
-                    reason="adverse_move",
-                    adverse_move_pct=adverse_move_pct,
-                )
-                return
-
-            decision = await self._evaluate_entry_conditions(
-                price_change_pct=price_change_pct,
-                current_score=effective_score,
-                symbol=symbol,
-            )
-
-            if decision == "cancel_drop":
-                logger.info(
-                    "Canceled because price dropped too much before entry",
-                    symbol=symbol,
-                    signal_type=signal_type,
-                    change_pct=round(price_change_pct, 3),
-                )
-                await self._save_canceled_signal(
-                    risk_score=risk_score,
-                    signal_price=signal_price,
-                    final_price=entry_price,
-                    price_change_pct=price_change_pct,
-                    final_score=effective_score,
-                    cancel_reason="cancel_drop",
-                    entry_mode_candidate="direct",
-                    ob_snapshot_data=ob_snap,
-                )
-                await self._notify_entry_canceled(
-                    symbol=symbol,
-                    signal_price=signal_price,
-                    entry_price=entry_price,
-                    price_change_pct=price_change_pct,
-                    score=effective_score,
-                    reason="price_dropped",
-                )
-                return
-
-            if decision == "cancel_rise":
-                logger.info(
-                    "Canceled because price rose too much before entry",
-                    symbol=symbol,
-                    signal_type=signal_type,
-                    change_pct=round(price_change_pct, 3),
-                )
-                await self._save_canceled_signal(
-                    risk_score=risk_score,
-                    signal_price=signal_price,
-                    final_price=entry_price,
-                    price_change_pct=price_change_pct,
-                    final_score=effective_score,
-                    cancel_reason="cancel_rise",
-                    entry_mode_candidate="direct",
-                    ob_snapshot_data=ob_snap,
-                )
-                await self._notify_entry_canceled(
-                    symbol=symbol,
-                    signal_price=signal_price,
-                    entry_price=entry_price,
-                    price_change_pct=price_change_pct,
-                    score=effective_score,
-                    reason="price_too_high",
-                )
-                return
-
+            signal_price = entry_price  # без delay — signal_price == entry_price
+            effective_score = float(risk_score.score)
+            price_change_pct = 0.0
             entry_mode = "direct"
 
-            if decision == "monitor":
-                logger.info(
-                    "Auto-short entering monitoring mode",
-                    symbol=symbol,
-                    signal_type=signal_type,
-                    signal_price=signal_price,
-                    entry_price=entry_price,
-                    change_pct=round(price_change_pct, 3),
-                    score=round(effective_score, 1),
-                )
-
-                entry_result = await self._monitor_entry(
-                    risk_score=risk_score,
-                    symbol=symbol,
-                    signal_price=signal_price,
-                    initial_score=effective_score,
-                )
-                if entry_result is None:
-                    logger.info(
-                        "Auto-short entry finished with no trade after monitoring",
-                        symbol=symbol,
-                        signal_type=signal_type,
-                    )
-                    return
-
-                entry_price, price_change_pct, effective_score = entry_result
-                entry_mode = "after_monitor"
-
-                logger.info(
-                    "Auto-short monitoring result",
-                    symbol=symbol,
-                    signal_type=signal_type,
-                    entry_price=entry_price,
-                    change_pct=round(price_change_pct, 3),
-                    effective_score=round(effective_score, 1),
-                    entry_mode=entry_mode,
-                )
-
-            # Обновляем OB snapshot перед финальным открытием (после мониторинга мог измениться)
+            # OB snapshot для сохранения в trade
             ob_snap = await self._get_ob_snapshot(symbol, entry_price)
+
+            logger.info(
+                "Short signal — entering immediately (no-filters mode)",
+                symbol=symbol,
+                signal_type=signal_type,
+                entry_price=entry_price,
+                score=round(effective_score, 1),
+            )
 
             async with lock:
                 if await self._is_symbol_already_open(symbol):
                     logger.info(
-                        "Skipping short after monitoring — trade already opened in parallel",
+                        "Skipping short — trade already opened in parallel",
                         symbol=symbol,
                         signal_type=signal_type,
                     )
@@ -1872,7 +1669,6 @@ class AutoShortService:
                     signal_type=signal_type,
                     signal_price=signal_price,
                     entry_price=entry_price,
-                    change_pct=round(price_change_pct, 3),
                     tp_price=tp_price,
                     sl_price=sl_price,
                     score=round(effective_score, 1),
