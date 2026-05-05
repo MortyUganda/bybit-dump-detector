@@ -346,12 +346,13 @@ class AnalyzerService:
             getattr(self, "_overvalued_broadcast_count", 0) + 1
         )
 
-        should_broadcast = (added_symbols and top_n) or (
-            top_n and self._overvalued_broadcast_count % 3 == 0
-        )
-
-        if should_broadcast:
-            await self._broadcast_overvalued(top_n, added_symbols or new_symbols)
+        # Отправка переоценённого списка в TG отключена (спам).
+        # Вычисления и сохранение в Redis/БД оставлены.
+        # should_broadcast = (added_symbols and top_n) or (
+        #     top_n and self._overvalued_broadcast_count % 3 == 0
+        # )
+        # if should_broadcast:
+        #     await self._broadcast_overvalued(top_n, added_symbols or new_symbols)
 
         # Persist snapshot to DB
         if top_n and self._db:
