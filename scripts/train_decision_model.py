@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import pickle
 import sys
 from pathlib import Path
 
@@ -334,6 +335,35 @@ def main() -> None:
 
     feature_importance(X, y)
     threshold_analysis(df, y, res["oof_proba"], res["oof_mask"])
+
+    # ── Обучение финальной модели на ВСЕХ данных и сохранение ──
+    print("\n=== Обучение финальной модели на всех данных ===")
+    from lightgbm import LGBMClassifier
+
+    clf = LGBMClassifier(
+        objective="binary",
+        metric="auc",
+        learning_rate=0.05,
+        num_leaves=31,
+        min_child_samples=10,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        subsample_freq=1,
+        n_estimators=300,
+        random_state=RANDOM_STATE,
+        verbose=-1,
+    )
+    clf.fit(X, y)
+
+    model_dir = Path("models")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / "decision_model.pkl"
+
+    with open(model_path, "wb") as f:
+        pickle.dump(clf, f)
+
+    print(f"\n✅ Модель сохранена: {model_path} "
+          f"(n={len(X)}, AUC={res['mean_auc']:.3f})")
 
 
 if __name__ == "__main__":
