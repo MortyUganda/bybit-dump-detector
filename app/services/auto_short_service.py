@@ -140,6 +140,7 @@ class AutoShortService:
         self._ml_decision_model: Any = None
         self._ml_model_loaded: bool = False
         self._ml_model_warned: bool = False
+        self._ml_disabled_logged: bool = False
 
     # ── ML decision model ──────────────────────────────────────────
 
@@ -261,7 +262,15 @@ class AutoShortService:
         Returns (passed, proba).
         passed=True означает что сделку можно открывать.
         Если модели нет — fail-open (passed=True, proba=None).
+        Если ml_decision_enabled=False — пропускаем инференс полностью.
         """
+        strategy = await self._get_strategy()
+        if not strategy.get("ml_decision_enabled", True):
+            if not getattr(self, "_ml_disabled_logged", False):
+                logger.info("🤖 ML-gate выключен через runtime_config")
+                self._ml_disabled_logged = True
+            return True, None
+
         model = self._ensure_ml_model()
         if model is None:
             return True, None
@@ -1874,6 +1883,22 @@ class AutoShortService:
                 )
                 return
 
+            # ── BTC 24h trend filter ────────────────────────────────
+            btc_24h_blocked, btc_24h_reason = await self._check_btc_24h_filter(
+                risk_score,
+            )
+            if btc_24h_blocked:
+                await self._maybe_save_shadow_trade(
+                    risk_score=risk_score,
+                    cancel_reason=btc_24h_reason,
+                )
+                await self._create_shadow_paper_signal(
+                    risk_score=risk_score,
+                    would_have_opened=False,
+                    actual_blocked_by=btc_24h_reason,
+                )
+                return
+
             signal_price = await self._get_price(symbol)
             if not signal_price:
                 logger.warning(
@@ -2200,6 +2225,56 @@ class AutoShortService:
             )
         finally:
             self._pending_symbols.discard(symbol)
+
+    # ── BTC 24h trend filter ────────────────────────────────────────
+
+    async def _check_btc_24h_filter(
+        self,
+        risk_score: RiskScore,
+    ) -> tuple[bool, str | None]:
+        """Блокирует шорт при сильном движении BTC за 24ч.
+
+        Returns (blocked, reason).
+        blocked=True → сделку не открываем.
+        reason: 'btc_24h_uptrend' | 'btc_24h_downtrend' | None.
+        """
+        strategy = await self._get_strategy()
+        if not strategy.get("btc_24h_filter_enabled", True):
+            return False, None
+
+        features = risk_score.features_snapshot
+        btc_change_24h = getattr(features, "btc_change_24h", 0.0) if features else 0.0
+
+        threshold_up = float(strategy.get("btc_24h_filter_threshold_up_pct", 5.0))
+        threshold_down = float(strategy.get("btc_24h_filter_threshold_down_pct", 0.0))
+
+        # Рост > threshold_up % → блок (bull-режим)
+        if threshold_up > 0 and btc_change_24h >= threshold_up:
+            logger.info(
+                "🚫 BTC 24h filter: BTC=+%.1f%% > порог +%.1f%% → блокировка",
+                btc_change_24h,
+                threshold_up,
+                symbol=risk_score.symbol,
+                btc_change_24h=round(btc_change_24h, 2),
+                threshold=threshold_up,
+                direction="uptrend",
+            )
+            return True, "btc_24h_uptrend"
+
+        # Падение > threshold_down % → блок (отскок близко)
+        if threshold_down > 0 and btc_change_24h <= -threshold_down:
+            logger.info(
+                "🚫 BTC 24h filter: BTC=%.1f%% < порог -%.1f%% → блокировка",
+                btc_change_24h,
+                threshold_down,
+                symbol=risk_score.symbol,
+                btc_change_24h=round(btc_change_24h, 2),
+                threshold=threshold_down,
+                direction="downtrend",
+            )
+            return True, "btc_24h_downtrend"
+
+        return False, None
 
     # ── Trend filter ──────────────────────────────────────────────
 

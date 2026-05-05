@@ -40,13 +40,18 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "trade_monitor_interval": 5,
     "max_trade_duration_sec": 0,  # disabled: автозакрытие по таймауту отключено
     "shadow_trades_enabled": True,
-    # ML decision model threshold
+    # ML decision model
+    "ml_decision_enabled": True,
     "ml_decision_threshold": 0.50,
     # BTC trend filter settings
     "btc_filter_enabled": True,
     "btc_filter_change_15m_threshold": 0.5,
     "btc_filter_change_1h_threshold": 1.0,
     "btc_filter_mode": "any",
+    # BTC 24h trend filter — блокировка при сильном движении BTC за 24ч
+    "btc_24h_filter_enabled": True,
+    "btc_24h_filter_threshold_up_pct": 5.0,
+    "btc_24h_filter_threshold_down_pct": 0.0,
     # Symbol loss cooldown — блокировка входа после серии убытков
     "symbol_loss_cooldown_enabled": True,
     "symbol_loss_cooldown_count": 2,
@@ -93,7 +98,8 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
     merged["max_trade_duration_sec"] = int(merged.get("max_trade_duration_sec", 0))
     merged["shadow_trades_enabled"] = bool(merged.get("shadow_trades_enabled", True))
 
-    # ML decision threshold
+    # ML decision model
+    merged["ml_decision_enabled"] = bool(merged.get("ml_decision_enabled", True))
     merged["ml_decision_threshold"] = max(
         0.0, min(1.0, float(merged.get("ml_decision_threshold", 0.50)))
     )
@@ -110,6 +116,17 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
     if btc_mode not in ("any", "both"):
         btc_mode = "any"
     merged["btc_filter_mode"] = btc_mode
+
+    # BTC 24h trend filter
+    merged["btc_24h_filter_enabled"] = bool(
+        merged.get("btc_24h_filter_enabled", True)
+    )
+    merged["btc_24h_filter_threshold_up_pct"] = max(
+        0.0, float(merged.get("btc_24h_filter_threshold_up_pct", 5.0))
+    )
+    merged["btc_24h_filter_threshold_down_pct"] = max(
+        0.0, float(merged.get("btc_24h_filter_threshold_down_pct", 0.0))
+    )
 
     # Symbol loss cooldown
     merged["symbol_loss_cooldown_enabled"] = bool(

@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import redis.asyncio as aioredis
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -103,16 +105,13 @@ async def strategy_keyboard() -> InlineKeyboardMarkup:
             callback_data=f"strategy:adverse:{value}",
         )
 
-    for value in [0.45, 0.50, 0.55, 0.60, 0.65, 0.7]:
-        marker = "✅ " if abs(cfg.get("ml_decision_threshold", 0.50) - value) < 0.01 else ""
-        builder.button(
-            text=f"{marker}ML порог {value:.2f}",
-            callback_data=f"strategy:ml_threshold:{value}",
-        )
+    ml_enabled = cfg.get("ml_decision_enabled", True)
+    ml_label = "🤖 ML фильтр: ВКЛ ✅" if ml_enabled else "🤖 ML фильтр: ВЫКЛ ❌"
+    builder.button(text=ml_label, callback_data="strategy:ml_menu")
 
     builder.button(text="🔄 Сбросить стратегию", callback_data="strategy:reset")
 
-    builder.adjust(1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1)
+    builder.adjust(1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1)
     return builder.as_markup()
 
 
@@ -140,7 +139,8 @@ async def _format_strategy_text() -> str:
         f"📌 Stabilization threshold: <b>{cfg['stabilization_threshold_pct']}%</b>\n"
         f"🚫 Adverse move threshold: <b>{cfg.get('adverse_move_threshold_pct', 0.2)}%</b>\n"
         f"👻 Shadow trades: <b>{'YES' if cfg.get('shadow_trades_enabled', True) else 'NO'}</b>\n"
-        f"🧠 ML порог: <b>{cfg.get('ml_decision_threshold', 0.50):.2f}</b>\n\n"
+        f"🤖 ML фильтр: <b>{'ВКЛ' if cfg.get('ml_decision_enabled', True) else 'ВЫКЛ'}</b> "
+        f"(порог {cfg.get('ml_decision_threshold', 0.50):.2f})\n\n"
         f"<i>Изменения применяются на лету через Redis</i>"
     )
 
@@ -386,6 +386,117 @@ async def cb_ml_threshold(query: CallbackQuery) -> None:
         logger.info("Strategy ml_decision_threshold updated", value=value)
     finally:
         await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_ml_filter_text(),
+            reply_markup=await _ml_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+# ── ML filter submenu ─────────────────────────────────────────────
+
+
+async def _ml_filter_keyboard() -> InlineKeyboardMarkup:
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+    finally:
+        await redis.aclose()
+
+    builder = InlineKeyboardBuilder()
+
+    enabled = cfg.get("ml_decision_enabled", True)
+    toggle_label = "🤖 ML фильтр: ВКЛ ✅" if enabled else "🤖 ML фильтр: ВЫКЛ ❌"
+    builder.button(text=toggle_label, callback_data="strategy:ml_toggle")
+
+    for value in [0.50, 0.55, 0.60, 0.65, 0.70]:
+        marker = "✅ " if abs(cfg.get("ml_decision_threshold", 0.50) - value) < 0.01 else ""
+        builder.button(
+            text=f"{marker}Порог {value:.2f}",
+            callback_data=f"strategy:ml_threshold:{value}",
+        )
+
+    builder.button(text="← Назад", callback_data="strategy:back")
+    builder.adjust(1, 3, 2, 1)
+    return builder.as_markup()
+
+
+async def _format_ml_filter_text() -> str:
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+    finally:
+        await redis.aclose()
+
+    enabled = cfg.get("ml_decision_enabled", True)
+    threshold = cfg.get("ml_decision_threshold", 0.50)
+    model_exists = Path("models/decision_model.pkl").exists()
+    model_status = "✅ модель загружена" if model_exists else "⚠️ модель не найдена (fail-open)"
+
+    return (
+        f"🤖 <b>ML фильтр</b>\n\n"
+        f"Состояние: <b>{'ВКЛ ✅' if enabled else 'ВЫКЛ ❌'}</b>\n"
+        f"Порог: <b>{threshold:.2f}</b>\n"
+        f"Модель: {model_status}\n\n"
+        f"<i>Если ML выключен — инференс не выполняется, "
+        f"сделки проходят без ML-блокировки.</i>"
+    )
+
+
+@router.callback_query(F.data == "strategy:ml_menu")
+async def cb_ml_menu(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    try:
+        await query.message.edit_text(
+            await _format_ml_filter_text(),
+            reply_markup=await _ml_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "strategy:ml_toggle")
+async def cb_ml_toggle(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+        new_value = not cfg.get("ml_decision_enabled", True)
+        await patch_runtime_strategy_config(redis, {"ml_decision_enabled": new_value})
+        logger.info(
+            "Strategy ml_decision_enabled toggled",
+            value=new_value,
+            user_id=query.from_user.id if query.from_user else None,
+        )
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_ml_filter_text(),
+            reply_markup=await _ml_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "strategy:back")
+async def cb_back_to_strategy(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     try:
         await query.message.edit_text(
