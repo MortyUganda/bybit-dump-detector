@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import pickle
+from datetime import datetime, timezone
 from pathlib import Path
 
 import redis.asyncio as aioredis
@@ -11,8 +13,10 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import text
 
 from app.config import get_settings
+from app.db.session import AsyncSessionLocal
 from app.services.runtime_config import (
     get_runtime_strategy_config,
     patch_runtime_strategy_config,
@@ -109,9 +113,13 @@ async def strategy_keyboard() -> InlineKeyboardMarkup:
     ml_label = "🤖 ML фильтр: ВКЛ ✅" if ml_enabled else "🤖 ML фильтр: ВЫКЛ ❌"
     builder.button(text=ml_label, callback_data="strategy:ml_menu")
 
+    btc24_enabled = cfg.get("btc_24h_filter_enabled", True)
+    btc24_label = "📈 BTC 24h фильтр: ВКЛ ✅" if btc24_enabled else "📈 BTC 24h фильтр: ВЫКЛ ❌"
+    builder.button(text=btc24_label, callback_data="strategy:btc24_menu")
+
     builder.button(text="🔄 Сбросить стратегию", callback_data="strategy:reset")
 
-    builder.adjust(1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1)
+    builder.adjust(1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1)
     return builder.as_markup()
 
 
@@ -140,7 +148,8 @@ async def _format_strategy_text() -> str:
         f"🚫 Adverse move threshold: <b>{cfg.get('adverse_move_threshold_pct', 0.2)}%</b>\n"
         f"👻 Shadow trades: <b>{'YES' if cfg.get('shadow_trades_enabled', True) else 'NO'}</b>\n"
         f"🤖 ML фильтр: <b>{'ВКЛ' if cfg.get('ml_decision_enabled', True) else 'ВЫКЛ'}</b> "
-        f"(порог {cfg.get('ml_decision_threshold', 0.50):.2f})\n\n"
+        f"(порог {cfg.get('ml_decision_threshold', 0.50):.2f})\n"
+        f"📈 BTC 24h фильтр: <b>{'ВКЛ' if cfg.get('btc_24h_filter_enabled', True) else 'ВЫКЛ'}</b>\n\n"
         f"<i>Изменения применяются на лету через Redis</i>"
     )
 
@@ -398,6 +407,8 @@ async def cb_ml_threshold(query: CallbackQuery) -> None:
 
 # ── ML filter submenu ─────────────────────────────────────────────
 
+ML_MODEL_PATH = Path("ml_model/lgbm_scorer.pkl")
+
 
 async def _ml_filter_keyboard() -> InlineKeyboardMarkup:
     redis = await _get_redis()
@@ -424,6 +435,91 @@ async def _ml_filter_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def _format_model_info() -> str:
+    """Информация о файле ML-модели."""
+    if not ML_MODEL_PATH.exists():
+        return "⚠️ Модель не найдена (fail-open)"
+
+    try:
+        stat = ML_MODEL_PATH.stat()
+        mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+        age = now - mtime
+        hours = int(age.total_seconds() // 3600)
+        minutes = int((age.total_seconds() % 3600) // 60)
+        if hours > 0:
+            age_str = f"{hours}ч назад"
+        else:
+            age_str = f"{minutes}м назад"
+
+        size_kb = stat.st_size / 1024
+        if size_kb >= 1024:
+            size_str = f"{size_kb / 1024:.1f} MB"
+        else:
+            size_str = f"{size_kb:.1f} KB"
+
+        lines = [
+            f"  Обучена: {mtime.strftime('%Y-%m-%d %H:%M')} ({age_str})",
+            f"  Размер: {size_str}",
+        ]
+
+        # Попытка достать метаданные из pkl
+        try:
+            with open(ML_MODEL_PATH, "rb") as f:
+                obj = pickle.load(f)
+            if isinstance(obj, dict):
+                n_samples = obj.get("n_samples")
+                mean_cv_auc = obj.get("mean_cv_auc")
+                if n_samples is not None or mean_cv_auc is not None:
+                    parts = []
+                    if n_samples is not None:
+                        parts.append(f"N samples: {n_samples}")
+                    if mean_cv_auc is not None:
+                        parts.append(f"AUC: {mean_cv_auc:.3f}")
+                    lines.append(f"  {', '.join(parts)}")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+    except Exception:
+        return "⚠️ Ошибка чтения модели"
+
+
+async def _format_ml_stats_24h() -> str:
+    """Статистика ML-gate за 24 часа."""
+    try:
+        async with AsyncSessionLocal() as session:
+            # Сколько auto_shorts открыто за 24ч (прошли ML-gate)
+            result = await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM auto_shorts "
+                    "WHERE created_at > NOW() - INTERVAL '24 hours'"
+                )
+            )
+            passed = result.scalar() or 0
+
+            # Сколько отклонено ML
+            result = await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM canceled_signals "
+                    "WHERE cancel_reason = 'ml_low_confidence' "
+                    "AND signal_ts > NOW() - INTERVAL '24 hours'"
+                )
+            )
+            rejected = result.scalar() or 0
+
+        total = passed + rejected
+        if total > 0:
+            reject_pct = rejected * 100 // total
+            return (
+                f"  Прошло ML: {passed}\n"
+                f"  Отклонено: {rejected} ({reject_pct}%)"
+            )
+        return "  Прошло ML: 0\n  Отклонено: 0"
+    except Exception:
+        return "  статистика недоступна"
+
+
 async def _format_ml_filter_text() -> str:
     redis = await _get_redis()
     try:
@@ -433,16 +529,101 @@ async def _format_ml_filter_text() -> str:
 
     enabled = cfg.get("ml_decision_enabled", True)
     threshold = cfg.get("ml_decision_threshold", 0.50)
-    model_exists = Path("models/decision_model.pkl").exists()
-    model_status = "✅ модель загружена" if model_exists else "⚠️ модель не найдена (fail-open)"
+
+    model_info = _format_model_info()
+    stats_24h = await _format_ml_stats_24h()
 
     return (
         f"🤖 <b>ML фильтр</b>\n\n"
         f"Состояние: <b>{'ВКЛ ✅' if enabled else 'ВЫКЛ ❌'}</b>\n"
-        f"Порог: <b>{threshold:.2f}</b>\n"
-        f"Модель: {model_status}\n\n"
+        f"Порог: <b>{threshold:.2f}</b>\n\n"
+        f"📦 <b>Модель:</b>\n{model_info}\n\n"
+        f"📊 <b>За 24ч:</b>\n{stats_24h}\n\n"
         f"<i>Если ML выключен — инференс не выполняется, "
         f"сделки проходят без ML-блокировки.</i>"
+    )
+
+
+# ── BTC 24h filter submenu ────────────────────────────────────────
+
+
+async def _btc24_filter_keyboard() -> InlineKeyboardMarkup:
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+    finally:
+        await redis.aclose()
+
+    builder = InlineKeyboardBuilder()
+
+    enabled = cfg.get("btc_24h_filter_enabled", True)
+    toggle_label = "📈 BTC 24h фильтр: ВКЛ ✅" if enabled else "📈 BTC 24h фильтр: ВЫКЛ ❌"
+    builder.button(text=toggle_label, callback_data="strategy:btc24_toggle")
+
+    # Пресеты порога роста
+    current_up = cfg.get("btc_24h_filter_threshold_up_pct", 5.0)
+    for value in [0, 3, 5, 7, 10]:
+        if value == 0:
+            label = "Выкл"
+            marker = "✅ " if abs(current_up) < 0.01 else ""
+        else:
+            label = f"{value}%"
+            marker = "✅ " if abs(current_up - value) < 0.01 else ""
+        builder.button(
+            text=f"{marker}⬆ {label}",
+            callback_data=f"strategy:btc24_up:{value}",
+        )
+
+    # Пресеты порога падения
+    current_down = cfg.get("btc_24h_filter_threshold_down_pct", 0.0)
+    for value in [0, 3, 5, 7, 10]:
+        if value == 0:
+            label = "Выкл"
+            marker = "✅ " if abs(current_down) < 0.01 else ""
+        else:
+            label = f"{value}%"
+            marker = "✅ " if abs(current_down - value) < 0.01 else ""
+        builder.button(
+            text=f"{marker}⬇ {label}",
+            callback_data=f"strategy:btc24_down:{value}",
+        )
+
+    builder.button(text="← Назад", callback_data="strategy:back")
+    builder.adjust(1, 5, 5, 1)
+    return builder.as_markup()
+
+
+async def _format_btc24_filter_text() -> str:
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+        # Попробуем достать текущий btc_change_24h из Redis-кэша MarketContext
+        btc_24h_str = "н/д"
+        try:
+            raw = await redis.get("market_context:btc_change_24h")
+            if raw is not None:
+                val = float(raw)
+                sign = "+" if val >= 0 else ""
+                btc_24h_str = f"{sign}{val:.2f}%"
+        except Exception:
+            pass
+    finally:
+        await redis.aclose()
+
+    enabled = cfg.get("btc_24h_filter_enabled", True)
+    threshold_up = cfg.get("btc_24h_filter_threshold_up_pct", 5.0)
+    threshold_down = cfg.get("btc_24h_filter_threshold_down_pct", 0.0)
+
+    up_str = f"{threshold_up}%" if threshold_up > 0 else "выкл"
+    down_str = f"{threshold_down}%" if threshold_down > 0 else "выкл"
+
+    return (
+        f"📈 <b>BTC 24h фильтр</b>\n\n"
+        f"Состояние: <b>{'ВКЛ ✅' if enabled else 'ВЫКЛ ❌'}</b>\n"
+        f"BTC 24h: <b>{btc_24h_str}</b>\n\n"
+        f"Порог роста: <b>{up_str}</b>\n"
+        f"Порог падения: <b>{down_str}</b> (0 = выкл)\n\n"
+        f"<i>Блокирует шорты при сильном движении BTC за 24ч.</i>"
     )
 
 
@@ -486,6 +667,104 @@ async def cb_ml_toggle(query: CallbackQuery) -> None:
         await query.message.edit_text(
             await _format_ml_filter_text(),
             reply_markup=await _ml_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+# ── BTC 24h filter handlers ────────────────────────────────────────
+
+
+@router.callback_query(F.data == "strategy:btc24_menu")
+async def cb_btc24_menu(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    try:
+        await query.message.edit_text(
+            await _format_btc24_filter_text(),
+            reply_markup=await _btc24_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "strategy:btc24_toggle")
+async def cb_btc24_toggle(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    redis = await _get_redis()
+    try:
+        cfg = await get_runtime_strategy_config(redis)
+        new_value = not cfg.get("btc_24h_filter_enabled", True)
+        await patch_runtime_strategy_config(redis, {"btc_24h_filter_enabled": new_value})
+        logger.info(
+            "Strategy btc_24h_filter_enabled toggled",
+            value=new_value,
+            user_id=query.from_user.id if query.from_user else None,
+        )
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_btc24_filter_text(),
+            reply_markup=await _btc24_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("strategy:btc24_up:"))
+async def cb_btc24_up(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    value = float(query.data.split(":")[-1])
+
+    redis = await _get_redis()
+    try:
+        await patch_runtime_strategy_config(redis, {"btc_24h_filter_threshold_up_pct": value})
+        logger.info("Strategy btc_24h_filter_threshold_up_pct updated", value=value)
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_btc24_filter_text(),
+            reply_markup=await _btc24_filter_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("strategy:btc24_down:"))
+async def cb_btc24_down(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    value = float(query.data.split(":")[-1])
+
+    redis = await _get_redis()
+    try:
+        await patch_runtime_strategy_config(redis, {"btc_24h_filter_threshold_down_pct": value})
+        logger.info("Strategy btc_24h_filter_threshold_down_pct updated", value=value)
+    finally:
+        await redis.aclose()
+
+    try:
+        await query.message.edit_text(
+            await _format_btc24_filter_text(),
+            reply_markup=await _btc24_filter_keyboard(),
         )
     except Exception:
         pass
