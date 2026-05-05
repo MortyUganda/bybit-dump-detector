@@ -103,7 +103,7 @@ async def strategy_keyboard() -> InlineKeyboardMarkup:
             callback_data=f"strategy:adverse:{value}",
         )
 
-    for value in [0.30, 0.50, 0.60, 0.70]:
+    for value in [0.45, 0.50, 0.55, 0.60, 0.65, 0.7]:
         marker = "✅ " if abs(cfg.get("ml_decision_threshold", 0.50) - value) < 0.01 else ""
         builder.button(
             text=f"{marker}ML порог {value:.2f}",
