@@ -1717,6 +1717,46 @@ class AutoShortService:
                 return None
 
 
+    # ── Symbol loss cooldown ─────────────────────────────────────
+
+    async def _check_symbol_loss_cooldown(self, symbol: str) -> tuple[bool, int]:
+        """Проверяет cooldown по символу: >= K убытков за N часов → блокировка.
+
+        Returns (blocked, loss_count).
+        """
+        strategy = await self._get_strategy()
+        if not strategy.get("symbol_loss_cooldown_enabled", True):
+            return False, 0
+
+        threshold = int(strategy.get("symbol_loss_cooldown_count", 2))
+        hours = int(strategy.get("symbol_loss_cooldown_hours", 24))
+
+        try:
+            from sqlalchemy import text
+            from app.db.session import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM auto_shorts "
+                        "WHERE symbol = :symbol "
+                        "AND status = 'closed' "
+                        "AND pnl_pct < 0 "
+                        "AND exit_ts > NOW() - make_interval(hours => :hours)"
+                    ),
+                    {"symbol": symbol, "hours": hours},
+                )
+                count = result.scalar() or 0
+        except Exception as exc:
+            logger.warning(
+                "Symbol loss cooldown check failed — skip",
+                symbol=symbol,
+                error=str(exc),
+            )
+            return False, 0
+
+        return count >= threshold, int(count)
+
     # ── Open short ────────────────────────────────────────────────
 
     async def open_short(self, risk_score: RiskScore) -> None:
@@ -1806,6 +1846,32 @@ class AutoShortService:
                         score=float(risk_score.score),
                         reason="trend_filter_blocked",
                     )
+                return
+
+            # ── Symbol loss cooldown ─────────────────────────────
+            cooldown_blocked, losses_count = await self._check_symbol_loss_cooldown(symbol)
+            if cooldown_blocked:
+                strategy = await self._get_strategy()
+                cooldown_hours = int(strategy.get("symbol_loss_cooldown_hours", 24))
+                logger.info(
+                    "🚫 Symbol cooldown: %s заблокирован (%d убыточных за %dч)",
+                    symbol,
+                    losses_count,
+                    cooldown_hours,
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    losses_count=losses_count,
+                    cooldown_hours=cooldown_hours,
+                )
+                await self._maybe_save_shadow_trade(
+                    risk_score=risk_score,
+                    cancel_reason="symbol_loss_cooldown",
+                )
+                await self._create_shadow_paper_signal(
+                    risk_score=risk_score,
+                    would_have_opened=False,
+                    actual_blocked_by="symbol_loss_cooldown",
+                )
                 return
 
             signal_price = await self._get_price(symbol)

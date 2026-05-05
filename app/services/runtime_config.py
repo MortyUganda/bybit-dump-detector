@@ -47,6 +47,10 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "btc_filter_change_15m_threshold": 0.5,
     "btc_filter_change_1h_threshold": 1.0,
     "btc_filter_mode": "any",
+    # Symbol loss cooldown — блокировка входа после серии убытков
+    "symbol_loss_cooldown_enabled": True,
+    "symbol_loss_cooldown_count": 2,
+    "symbol_loss_cooldown_hours": 24,
 }
 
 
@@ -106,6 +110,17 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
     if btc_mode not in ("any", "both"):
         btc_mode = "any"
     merged["btc_filter_mode"] = btc_mode
+
+    # Symbol loss cooldown
+    merged["symbol_loss_cooldown_enabled"] = bool(
+        merged.get("symbol_loss_cooldown_enabled", True)
+    )
+    merged["symbol_loss_cooldown_count"] = max(
+        1, int(merged.get("symbol_loss_cooldown_count", 2))
+    )
+    merged["symbol_loss_cooldown_hours"] = max(
+        1, int(merged.get("symbol_loss_cooldown_hours", 24))
+    )
 
     return merged
 
