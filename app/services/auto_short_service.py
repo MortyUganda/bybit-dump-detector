@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pickle
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -19,6 +21,33 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
+
+# ── ML decision model ────────────────────────────────────────────
+DECISION_MODEL_PATH = Path("models/decision_model.pkl")
+
+# Фичи, совпадающие с COMMON_FEATURES из scripts/train_decision_model.py
+ML_DECISION_FEATURES = [
+    "score",
+    "f_rsi", "f_rsi_5m", "f_vwap_extension", "f_volume_zscore",
+    "f_trade_imbalance", "f_large_buy_cluster", "f_large_sell_cluster",
+    "f_price_acceleration", "f_consecutive_greens", "f_ob_bid_thinning",
+    "f_spread_expansion", "f_momentum_loss", "f_upper_wick", "f_funding_rate",
+    "f_cvd_divergence", "f_liquidation_cascade",
+    "realized_vol_1h", "volume_24h_usdt",
+    "price_change_5m", "price_change_1h", "spread_pct",
+    "bid_depth_change_5m", "btc_change_15m",
+    "funding_rate_at_signal", "oi_change_pct_at_signal", "trend_strength_1h",
+    "ob_bid_volume_top10", "ob_ask_volume_top10",
+    "ob_imbalance_top10", "ob_spread_bps",
+    "ob_bid_wall_price", "ob_bid_wall_size",
+    "ob_ask_wall_price", "ob_ask_wall_size",
+    "spread_pct_z", "bid_depth_change_5m_z", "realized_vol_1h_z",
+    "volume_24h_usdt_z", "oi_change_pct_z",
+    "btc_change_1h", "btc_change_4h", "btc_change_24h",
+    "btc_adx_1h", "btc_atr_pct_1h",
+    "recent_wr_20",
+    "adverse_move_pct",
+]
 
 # ── Fallback defaults ─────────────────────────────────────────────
 
@@ -107,6 +136,166 @@ class AutoShortService:
         self._pending_symbols: set[str] = set()
         self._price_cache: dict[str, float] = {}
         self._shadow_paper_tasks: set[asyncio.Task] = set()
+        # ML decision model (lazy init)
+        self._ml_decision_model: Any = None
+        self._ml_model_loaded: bool = False
+        self._ml_model_warned: bool = False
+
+    # ── ML decision model ──────────────────────────────────────────
+
+    def _ensure_ml_model(self) -> Any:
+        """Lazy-load ML decision model. Возвращает модель или None."""
+        if self._ml_model_loaded:
+            return self._ml_decision_model
+        self._ml_model_loaded = True
+        if not DECISION_MODEL_PATH.exists():
+            if not self._ml_model_warned:
+                self._ml_model_warned = True
+                logger.warning(
+                    "ML decision model not found — ML-gate disabled (fail-open)",
+                    path=str(DECISION_MODEL_PATH),
+                )
+            return None
+        try:
+            with open(DECISION_MODEL_PATH, "rb") as f:
+                self._ml_decision_model = pickle.load(f)
+            logger.info(
+                "ML decision model loaded",
+                path=str(DECISION_MODEL_PATH),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to load ML decision model — ML-gate disabled",
+                error=str(exc),
+            )
+        return self._ml_decision_model
+
+    def _build_ml_features(
+        self,
+        risk_score: RiskScore,
+        ob_snap: dict | None,
+        adverse_move_pct: float | None,
+    ) -> list[float]:
+        """Собирает вектор фичей для инференса decision-модели.
+
+        Порядок и состав полностью совпадают с ML_DECISION_FEATURES
+        (= COMMON_FEATURES из train_decision_model.py).
+        Отсутствующие значения заполняются 0.0 (как fillna(0.0) при обучении).
+        """
+        features = risk_score.features_snapshot
+        factor_map = {f.name: f.raw_value for f in risk_score.factors}
+
+        def _f(val: Any) -> float:
+            if val is None:
+                return 0.0
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return 0.0
+
+        return [
+            _f(risk_score.score),
+            # factor-based features
+            _f(factor_map.get("rsi_1m") or factor_map.get("rsi")),
+            _f(factor_map.get("rsi_5m")),
+            _f(factor_map.get("vwap_extension")),
+            _f(factor_map.get("volume_zscore")),
+            _f(factor_map.get("trade_imbalance")),
+            _f(factor_map.get("large_buy_cluster")),
+            _f(factor_map.get("large_sell_cluster")),
+            _f(factor_map.get("price_acceleration")),
+            _f(factor_map.get("consecutive_greens")),
+            _f(factor_map.get("ob_bid_thinning")),
+            _f(factor_map.get("spread_expansion")),
+            _f(factor_map.get("momentum_loss")),
+            _f(factor_map.get("upper_wick")),
+            _f(factor_map.get("funding_rate")),
+            _f(factor_map.get("cvd_divergence")),
+            _f(factor_map.get("liquidation_cascade")),
+            # features from CoinFeatures
+            _f(features.realized_vol_1h if features else None),
+            _f(features.volume_24h_usdt if features else None),
+            _f(features.price_change_5m if features else None),
+            _f(features.price_change_1h if features else None),
+            _f(features.spread_pct if features else None),
+            _f(features.bid_depth_change_5m if features else None),
+            _f(features.btc_change_15m if features else None),
+            _f(features.funding_rate if features else None),
+            _f(features.oi_change_pct if features else None),
+            _f(features.trend_context.trend_strength if features and features.trend_context else None),
+            # OB snapshot features
+            _f(ob_snap.get("bid_volume_top10") if ob_snap else None),
+            _f(ob_snap.get("ask_volume_top10") if ob_snap else None),
+            _f(ob_snap.get("imbalance_top10") if ob_snap else None),
+            _f(ob_snap.get("spread_bps") if ob_snap else None),
+            _f(ob_snap.get("bid_wall_price") if ob_snap else None),
+            _f(ob_snap.get("bid_wall_size") if ob_snap else None),
+            _f(ob_snap.get("ask_wall_price") if ob_snap else None),
+            _f(ob_snap.get("ask_wall_size") if ob_snap else None),
+            # Z-score features
+            _f(getattr(features, 'spread_pct_z', None) if features else None),
+            _f(getattr(features, 'bid_depth_change_5m_z', None) if features else None),
+            _f(getattr(features, 'realized_vol_1h_z', None) if features else None),
+            _f(getattr(features, 'volume_24h_usdt_z', None) if features else None),
+            _f(getattr(features, 'oi_change_pct_z', None) if features else None),
+            # BTC regime features
+            _f(getattr(features, 'btc_change_1h', None) if features else None),
+            _f(getattr(features, 'btc_change_4h', None) if features else None),
+            _f(getattr(features, 'btc_change_24h', None) if features else None),
+            _f(getattr(features, 'btc_adx_1h', None) if features else None),
+            _f(getattr(features, 'btc_atr_pct_1h', None) if features else None),
+            # Context
+            _f(getattr(features, 'recent_wr_20', None) if features else None),
+            # Adverse move
+            _f(adverse_move_pct),
+        ]
+
+    async def _ml_gate_check(
+        self,
+        risk_score: RiskScore,
+        ob_snap: dict | None,
+        adverse_move_pct: float | None,
+    ) -> tuple[bool, float | None]:
+        """ML-gate: проверяет уверенность decision-модели.
+
+        Returns (passed, proba).
+        passed=True означает что сделку можно открывать.
+        Если модели нет — fail-open (passed=True, proba=None).
+        """
+        model = self._ensure_ml_model()
+        if model is None:
+            return True, None
+
+        try:
+            import numpy as np
+            feature_vec = self._build_ml_features(risk_score, ob_snap, adverse_move_pct)
+            X = np.array([feature_vec], dtype=np.float64)
+            proba = float(model.predict_proba(X)[0][1])
+        except Exception as exc:
+            logger.warning(
+                "ML-gate inference failed — fail-open",
+                symbol=risk_score.symbol,
+                error=str(exc),
+            )
+            return True, None
+
+        strategy = await self._get_strategy()
+        threshold = float(strategy.get("ml_decision_threshold", 0.50))
+        passed = proba >= threshold
+        verdict = "PASS" if passed else "REJECT"
+
+        logger.info(
+            "🤖 ML-gate: %s proba=%.2f (threshold=%.2f) → %s",
+            risk_score.symbol,
+            proba,
+            threshold,
+            verdict,
+            symbol=risk_score.symbol,
+            proba=round(proba, 4),
+            threshold=threshold,
+            verdict=verdict,
+        )
+        return passed, proba
 
     # ── Runtime strategy config ───────────────────────────────────
 
@@ -1706,6 +1895,41 @@ class AutoShortService:
                     score=effective_score,
                     reason="adverse_move",
                     adverse_move_pct=adverse_move_pct,
+                )
+                return
+
+            # ── ML-gate: decision model confidence check ─────────
+            ml_passed, ml_proba = await self._ml_gate_check(
+                risk_score=risk_score,
+                ob_snap=ob_snap,
+                adverse_move_pct=adverse_move_pct,
+            )
+            if not ml_passed:
+                await self._save_canceled_signal(
+                    risk_score=risk_score,
+                    signal_price=signal_price,
+                    final_price=entry_price,
+                    price_change_pct=price_change_pct,
+                    final_score=effective_score,
+                    cancel_reason="ml_low_confidence",
+                    entry_mode_candidate="direct",
+                    ob_snapshot_data=ob_snap,
+                    adverse_move_pct=adverse_move_pct,
+                )
+                await self._create_shadow_paper_signal(
+                    risk_score=risk_score,
+                    would_have_opened=False,
+                    actual_blocked_by="ml_low_confidence",
+                    ob_snapshot_data=ob_snap,
+                    adverse_move_pct=adverse_move_pct,
+                )
+                await self._notify_entry_canceled(
+                    symbol=symbol,
+                    signal_price=signal_price,
+                    entry_price=entry_price,
+                    price_change_pct=price_change_pct,
+                    score=effective_score,
+                    reason="ml_low_confidence",
                 )
                 return
 

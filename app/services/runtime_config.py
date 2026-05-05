@@ -40,6 +40,8 @@ DEFAULT_AUTO_SHORT_CONFIG: dict[str, Any] = {
     "trade_monitor_interval": 5,
     "max_trade_duration_sec": 0,  # disabled: автозакрытие по таймауту отключено
     "shadow_trades_enabled": True,
+    # ML decision model threshold
+    "ml_decision_threshold": 0.50,
     # BTC trend filter settings
     "btc_filter_enabled": True,
     "btc_filter_change_15m_threshold": 0.5,
@@ -86,6 +88,11 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
     # 0 = disabled (автозакрытие по таймауту отключено)
     merged["max_trade_duration_sec"] = int(merged.get("max_trade_duration_sec", 0))
     merged["shadow_trades_enabled"] = bool(merged.get("shadow_trades_enabled", True))
+
+    # ML decision threshold
+    merged["ml_decision_threshold"] = max(
+        0.0, min(1.0, float(merged.get("ml_decision_threshold", 0.50)))
+    )
 
     # BTC trend filter settings
     merged["btc_filter_enabled"] = bool(merged.get("btc_filter_enabled", True))
