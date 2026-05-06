@@ -19,7 +19,7 @@ import glob
 import pickle
 import sys
 from pathlib import Path
-
+from datetime import date, datetime
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -357,7 +357,9 @@ def main() -> None:
 
     model_dir = Path("models")
     model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / "decision_model.pkl"
+    now = datetime.now()
+    current_time = now.strftime("%H%M%S")
+    model_path = model_dir / f"decision_model_{date.today()}_{current_time}.pkl"
 
     with open(model_path, "wb") as f:
         pickle.dump(clf, f)
