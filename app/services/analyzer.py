@@ -110,16 +110,18 @@ class AnalyzerService:
         scored = []
         for features in features_list:
             try:
-                ob_raw = await self._redis.get(f"ob_features:{features.symbol}")
-                if ob_raw:
-                    ob_data = json.loads(ob_raw)
-                    # ВАЖНО: None означает "OB не было", не "спред нулевой".
-                    # default=None сохраняет отсутствие данных явно.
-                    features.spread_pct = ob_data.get("spread_pct")
-                    features.bid_depth_change_5m = ob_data.get("bid_depth_change_5m")
-            except Exception as e:
-                logger.debug("OB features Redis read failed", symbol=features.symbol, error=str(e))
-                # При ошибке оставляем текущие значения (могут быть None/0)
+                # OB features из Redis (внутренний try чтобы Redis ошибка не ломала весь цикл)
+                try:
+                    ob_raw = await self._redis.get(f"ob_features:{features.symbol}")
+                    if ob_raw:
+                        ob_data = json.loads(ob_raw)
+                        # ВАЖНО: None означает "OB не было", не "спред нулевой".
+                        # default=None сохраняет отсутствие данных явно.
+                        features.spread_pct = ob_data.get("spread_pct")
+                        features.bid_depth_change_5m = ob_data.get("bid_depth_change_5m")
+                except Exception as e:
+                    logger.debug("OB features Redis read failed", symbol=features.symbol, error=str(e))
+                    # При ошибке оставляем текущие значения (могут быть None/0)
 
                 # Populate BTC context on each feature
                 features.btc_change_15m = self._market_context.btc_change_15m
@@ -138,11 +140,11 @@ class AnalyzerService:
                     ml_features = {
                         **factor_map,
                         "btc_change_15m": features.btc_change_15m,
-                        "funding_rate_at_signal": features.funding_rate,           # None если нет данных
+                        "funding_rate_at_signal": features.funding_rate,
                         "oi_change_pct_at_signal": features.oi_change_pct,
                         "trend_strength_1h": (
                             features.trend_context.trend_strength
-                            if features.trend_context else None                    # None если нет контекста
+                            if features.trend_context else None
                         ),
                     }
                     ml_prob = self._ml_scorer.predict_probability(ml_features)
