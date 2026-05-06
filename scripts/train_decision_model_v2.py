@@ -1,5 +1,7 @@
 """
-v2: эксперименты с чистотой target, feature selection, sliding window.
+v2: эксперименты с чистотой target, feature selection, sliding window,
+strong target + engineered features, и фикс багованных фичей.
+
 Сравнивает с baseline (текущий train_decision_model.py).
 НЕ сохраняет модель — только отчёт. Сохранение делает train_decision_model.py.
 
@@ -8,6 +10,8 @@ v2: эксперименты с чистотой target, feature selection, slid
   EXP 1 — Чистый target: только auto_shorts, status=closed, close_reason ∈ {tp_hit, sl_hit}
   EXP 2 — EXP1 + feature selection (top-K по importance)
   EXP 3 — EXP2 + sliding window (последние N дней)
+  EXP 4 — strong target (pnl > +5% / pnl < -5%) + 5 engineered features
+  EXP 5 — EXP1 + bug fixes + 7 engineered features (без потери данных)
 
 CLI: --auto-csv X --canceled-csv Y --all-opened-csv Z
      --window-days N (default 14)
@@ -27,10 +31,12 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
+
 # === Настройки ===
 DEFAULT_N_SPLITS = 5
 RANDOM_STATE = 42
 TARGET = "label"
+
 
 COMMON_FEATURES = [
     "score",
@@ -60,6 +66,35 @@ COMMON_FEATURES = [
     "adverse_move_pct",
 ]
 
+
+# Engineered features для EXP 4
+NEW_FEATURES_EXP4 = [
+    "hour_of_day",
+    "day_of_week",
+    "ob_depth_ratio",
+    "btc_alignment",
+    "vol_regime",
+]
+
+
+# Engineered features для EXP 5 (расширенный набор)
+NEW_FEATURES_EXP5 = [
+    "hour_of_day",
+    "day_of_week",
+    "ob_depth_ratio",
+    "ob_wall_imbalance",
+    "btc_alignment",
+    "vol_regime",
+    "symbol_signals_24h",
+]
+
+
+# Фичи, которые мёртвые/плохие — исключаем в EXP 5
+DEAD_FEATURES = [
+    "f_momentum_loss",  # почти всегда 0
+]
+
+
 LGB_PARAMS = {
     "objective": "binary",
     "metric": "auc",
@@ -72,14 +107,6 @@ LGB_PARAMS = {
     "verbose": -1,
     "seed": RANDOM_STATE,
 }
-
-NEW_FEATURES = [
-    "hour_of_day",
-    "day_of_week",
-    "ob_depth_ratio",
-    "btc_alignment",
-    "vol_regime",
-]
 
 
 # ── Утилиты ──────────────────────────────────────────────────────
@@ -109,6 +136,89 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--window-days", type=int, default=14,
                    help="Окно в днях для EXP 3 (default 14)")
     return p.parse_args()
+
+
+# ── Engineered features (общие для EXP 4 и EXP 5) ───────────────
+
+
+def add_engineered_features(df: pd.DataFrame, mode: str = "exp4") -> pd.DataFrame:
+    """Добавляет производные фичи. mode='exp4' или 'exp5'."""
+    df = df.copy()
+
+    # Time-of-day features
+    df["hour_of_day"] = pd.to_datetime(df["signal_ts"]).dt.hour
+    df["day_of_week"] = pd.to_datetime(df["signal_ts"]).dt.dayofweek
+
+    # OB depth ratio (bid/ask balance)
+    if "ob_bid_volume_top10" in df.columns and "ob_ask_volume_top10" in df.columns:
+        df["ob_depth_ratio"] = df["ob_bid_volume_top10"] / (
+            df["ob_ask_volume_top10"].replace(0, np.nan) + 1e-9
+        )
+        df["ob_depth_ratio"] = df["ob_depth_ratio"].fillna(1.0).clip(0, 100)
+    else:
+        df["ob_depth_ratio"] = 1.0
+
+    # OB wall imbalance (только для EXP 5)
+    if mode == "exp5":
+        if "ob_bid_wall_size" in df.columns and "ob_ask_wall_size" in df.columns:
+            df["ob_wall_imbalance"] = df["ob_bid_wall_size"] / (
+                df["ob_ask_wall_size"].replace(0, np.nan) + 1e-9
+            )
+            df["ob_wall_imbalance"] = df["ob_wall_imbalance"].fillna(1.0).clip(0, 100)
+        else:
+            df["ob_wall_imbalance"] = 1.0
+
+    # BTC alignment: согласованность краткого и среднего тренда
+    if "btc_change_15m" in df.columns and "btc_change_1h" in df.columns:
+        df["btc_alignment"] = (
+            np.sign(df["btc_change_15m"].fillna(0))
+            * np.sign(df["btc_change_1h"].fillna(0))
+        )
+    else:
+        df["btc_alignment"] = 0
+
+    # Volatility regime: 0=low, 1=med, 2=high (по quantile)
+    if "realized_vol_1h" in df.columns:
+        try:
+            df["vol_regime"] = pd.qcut(
+                df["realized_vol_1h"].fillna(df["realized_vol_1h"].median()),
+                q=3, labels=[0, 1, 2], duplicates="drop"
+            ).astype(float)
+        except Exception:
+            df["vol_regime"] = 1.0
+    else:
+        df["vol_regime"] = 1.0
+
+    # Symbol signals в 24h (только для EXP 5)
+    if mode == "exp5" and "symbol" in df.columns and "signal_ts" in df.columns:
+        df_sorted = df.sort_values("signal_ts").reset_index(drop=False)
+        # Считаем сколько сигналов было по этому символу за последние 24 часа
+        df_sorted["signal_ts_dt"] = pd.to_datetime(df_sorted["signal_ts"])
+        signals_24h = []
+        for sym in df_sorted["symbol"].unique():
+            mask = df_sorted["symbol"] == sym
+            sym_df = df_sorted.loc[mask, ["signal_ts_dt"]].copy()
+            sym_df = sym_df.sort_values("signal_ts_dt")
+            # Для каждой строки считаем, сколько сигналов в окне 24h до неё (не включая саму)
+            counts = []
+            ts_arr = sym_df["signal_ts_dt"].values
+            for i, ts in enumerate(ts_arr):
+                window_start = ts - np.timedelta64(24, "h")
+                cnt = int(((ts_arr[:i] >= window_start) & (ts_arr[:i] < ts)).sum())
+                counts.append(cnt)
+            sym_df["symbol_signals_24h"] = counts
+            for orig_idx, cnt in zip(sym_df.index, counts):
+                signals_24h.append((df_sorted.loc[orig_idx, "index"], cnt))
+        # Записываем обратно в df
+        signals_dict = dict(signals_24h)
+        df["symbol_signals_24h"] = df.index.map(signals_dict).fillna(0).astype(float)
+
+    # Bug-fix: spread_pct (50% нулей — заменяем нули на NaN, потом median fill)
+    if mode == "exp5" and "spread_pct" in df.columns:
+        df["spread_pct"] = df["spread_pct"].replace(0, np.nan)
+        df["spread_pct"] = df["spread_pct"].fillna(df["spread_pct"].median())
+
+    return df
 
 
 # ── Загрузка данных ──────────────────────────────────────────────
@@ -164,6 +274,7 @@ def load_auto_clean(path: str) -> pd.DataFrame:
     df["source"] = "auto_short_clean"
     return df
 
+
 def load_auto_strong_target(path: str, pnl_threshold: float = 5.0) -> pd.DataFrame:
     """auto_shorts с сильным target: только pnl > +X% или < -X%, остальное выброшено."""
     df = pd.read_csv(path)
@@ -181,57 +292,6 @@ def load_auto_strong_target(path: str, pnl_threshold: float = 5.0) -> pd.DataFra
     df["source"] = "auto_short_strong"
     return df
 
-
-def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Добавляет 5 новых производных фич."""
-    df = df.copy()
-
-    # Time-of-day features
-    df["hour_of_day"] = pd.to_datetime(df["signal_ts"]).dt.hour
-    df["day_of_week"] = pd.to_datetime(df["signal_ts"]).dt.dayofweek
-
-    # OB depth ratio (bid/ask balance)
-    if "ob_bid_volume_top10" in df.columns and "ob_ask_volume_top10" in df.columns:
-        df["ob_depth_ratio"] = df["ob_bid_volume_top10"] / (
-            df["ob_ask_volume_top10"].replace(0, np.nan) + 1e-9
-        )
-        df["ob_depth_ratio"] = df["ob_depth_ratio"].fillna(1.0).clip(0, 100)
-    else:
-        df["ob_depth_ratio"] = 1.0
-
-    # BTC alignment: согласованность краткого и среднего тренда
-    if "btc_change_15m" in df.columns and "btc_change_1h" in df.columns:
-        df["btc_alignment"] = (
-            np.sign(df["btc_change_15m"].fillna(0))
-            * np.sign(df["btc_change_1h"].fillna(0))
-        )
-    else:
-        df["btc_alignment"] = 0
-
-    # Volatility regime: 0=low, 1=med, 2=high (по quantile)
-    if "realized_vol_1h" in df.columns:
-        try:
-            df["vol_regime"] = pd.qcut(
-                df["realized_vol_1h"].fillna(df["realized_vol_1h"].median()),
-                q=3, labels=[0, 1, 2], duplicates="drop"
-            ).astype(float)
-        except Exception:
-            df["vol_regime"] = 1.0
-    else:
-        df["vol_regime"] = 1.0
-
-    return df
-
-
-def prepare_strong_with_engineered(df_strong: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Датасет: сильный target + добавленные фичи."""
-    df = add_engineered_features(df_strong)
-    base_features = [c for c in COMMON_FEATURES if c in df.columns]
-    feature_cols = base_features + [f for f in NEW_FEATURES if f in df.columns]
-    cols = feature_cols + ["signal_ts", TARGET, "source"]
-    df = df[cols].copy().sort_values("signal_ts").reset_index(drop=True)
-    df[feature_cols] = df[feature_cols].fillna(0.0)
-    return df, feature_cols
 
 # ── Подготовка датасетов ─────────────────────────────────────────
 
@@ -259,6 +319,38 @@ def prepare_clean(df_clean: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     feature_cols = [c for c in COMMON_FEATURES if c in df_clean.columns]
     cols = feature_cols + ["signal_ts", TARGET, "source"]
     df = df_clean[cols].copy().sort_values("signal_ts").reset_index(drop=True)
+    df[feature_cols] = df[feature_cols].fillna(0.0)
+    return df, feature_cols
+
+
+def prepare_strong_with_engineered(df_strong: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """EXP 4: сильный target + базовые engineered features."""
+    df = add_engineered_features(df_strong, mode="exp4")
+    base_features = [c for c in COMMON_FEATURES if c in df.columns]
+    feature_cols = base_features + [f for f in NEW_FEATURES_EXP4 if f in df.columns]
+    cols = feature_cols + ["signal_ts", TARGET, "source"]
+    df = df[cols].copy().sort_values("signal_ts").reset_index(drop=True)
+    df[feature_cols] = df[feature_cols].fillna(0.0)
+    return df, feature_cols
+
+# ── Подготовкад атасетов ─────────────────────────────────────────
+
+
+def prepare_clean_with_fixes_and_engineered(df_clean: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """EXP 5: clean target + bug fixes + расширенные engineered features."""
+    df = df_clean.copy()
+
+    # Применяем engineered features (с bug fixes для spread_pct)
+    df = add_engineered_features(df, mode="exp5")
+
+    # Базовые фичи минус мёртвые
+    base_features = [c for c in COMMON_FEATURES if c in df.columns and c not in DEAD_FEATURES]
+
+    # Добавляем engineered
+    feature_cols = base_features + [f for f in NEW_FEATURES_EXP5 if f in df.columns]
+
+    cols = feature_cols + ["signal_ts", TARGET, "source"]
+    df = df[cols].copy().sort_values("signal_ts").reset_index(drop=True)
     df[feature_cols] = df[feature_cols].fillna(0.0)
     return df, feature_cols
 
@@ -391,12 +483,12 @@ def print_comparison(results: list[dict]) -> None:
     print(f"\n{'=' * 70}")
     print("=== Сравнение экспериментов ===")
     print(f"{'=' * 70}")
-    header = f"{'EXP':<30s} {'n':>6s}   {'mean_AUC':>8s}  {'std':>6s}   folds (sorted)"
+    header = f"{'EXP':<40s} {'n':>6s}   {'mean_AUC':>8s}  {'std':>6s}   folds (sorted)"
     print(header)
-    print("─" * 90)
+    print("─" * 110)
     for r in results:
         folds_str = "[" + ", ".join(f"{a:.3f}" for a in r["fold_aucs"]) + "]"
-        print(f"{r['name']:<30s} {r['n']:>6d}   {r['mean_auc']:>8.3f}  "
+        print(f"{r['name']:<40s} {r['n']:>6d}   {r['mean_auc']:>8.3f}  "
               f"{r['std_auc']:>6.3f}   {folds_str}")
 
     # Лучший
@@ -425,6 +517,11 @@ def print_comparison(results: list[dict]) -> None:
             print(f"  - EXP 4 лучший с разрывом {delta:+.3f} > 0.03 → внедрить strong target + новые фичи")
         else:
             print(f"  - EXP 4 лучший, но разрыв всего {delta:+.3f} → проверить устойчивость")
+    elif "EXP 5" in best["name"]:
+        if delta > 0.03:
+            print(f"  - EXP 5 лучший с разрывом {delta:+.3f} > 0.03 → внедрить bug fixes + engineered features в прод")
+        else:
+            print(f"  - EXP 5 лучший, разрыв {delta:+.3f} → собрать ещё данных и проверить устойчивость")
     elif abs(delta) < 0.02:
         print(f"  - Разница {abs(delta):.3f} < 0.02 → оставить baseline")
     else:
@@ -472,7 +569,7 @@ def main() -> None:
     df_c1, feat_c1 = prepare_clean(df_clean)
 
     if len(df_c1) < 30:
-        print(f"WARN: чистый auto_shorts содержит {len(df_c1)} строк — EXP 1/2/3 могут быть нестабильны")
+        print(f"WARN: чистый auto_shorts содержит {len(df_c1)} строк — EXP 1/2/3/5 могут быть нестабильны")
 
     n_splits = args.splits
     top_k = args.top_features
@@ -500,11 +597,8 @@ def main() -> None:
     )
 
     # ── EXP 2: feature selection ──
-    # Сначала получаем importance на данных EXP 1
     print("Запуск EXP 2 (feature selection)...")
     imp_all = get_feature_importance(df_c1[feat_c1], df_c1[TARGET].astype(int))
-    top_features = [name for name, _ in imp_all[:top_k]]
-    # Отсечь фичи с нулевой важностью
     top_features = [name for name, val in imp_all[:top_k] if val > 0]
     if len(top_features) < 5:
         top_features = [name for name, _ in imp_all[:5]]
@@ -544,7 +638,7 @@ def main() -> None:
             top_features, n_splits,
         )
 
-    # ── EXP 4: strong target + engineered features ──
+    # ── EXP 4: strong target + базовые engineered features ──
     print("Запуск EXP 4 (strong target + новые фичи)...")
     df_strong = load_auto_strong_target(auto_csv, pnl_threshold=5.0)
     print(f"  EXP 4: после strong target n={len(df_strong)}")
@@ -570,8 +664,42 @@ def main() -> None:
             feat_c4, n_splits,
         )
 
+    # ── EXP 5: clean target + bug fixes + расширенные engineered features ──
+    print("Запуск EXP 5 (bug fixes + расширенные engineered features)...")
+    if len(df_c1) < 30:
+        print(f"  WARN: clean auto_shorts слишком мал ({len(df_c1)}), пропускаем EXP 5")
+        exp5 = {
+            "name": "EXP 5 (fixes + engineered)",
+            "n": 0,
+            "features": [],
+            "n_features": 0,
+            "mean_auc": float("nan"),
+            "std_auc": float("nan"),
+            "fold_aucs": [],
+            "importance_top10": [],
+            "thresholds": {},
+        }
+    else:
+        # Загружаем clean заново (нужен symbol для symbol_signals_24h)
+        df_clean_full = pd.read_csv(auto_csv)
+        df_clean_full = df_clean_full[df_clean_full["status"] == "closed"].copy()
+        df_clean_full = df_clean_full[
+            df_clean_full["close_reason"].isin(["tp_hit", "sl_hit"])
+        ].copy()
+        df_clean_full["signal_ts"] = pd.to_datetime(df_clean_full["entry_ts"])
+        df_clean_full[TARGET] = (df_clean_full["close_reason"] == "tp_hit").astype(int)
+        df_clean_full["source"] = "auto_short_clean"
+
+        df_c5, feat_c5 = prepare_clean_with_fixes_and_engineered(df_clean_full)
+        print(f"  EXP 5: clean+fixes+engineered n={len(df_c5)}, фичей={len(feat_c5)}")
+        exp5 = run_experiment(
+            f"EXP 5 (fixes+engineered, {len(feat_c5)} фичей)",
+            df_c5[feat_c5], df_c5[TARGET].astype(int),
+            feat_c5, n_splits,
+        )
+
     # ── Вывод деталей ──
-    results = [exp0, exp1, exp2, exp3, exp4]
+    results = [exp0, exp1, exp2, exp3, exp4, exp5]
     for r in results:
         print_experiment_detail(r)
 
