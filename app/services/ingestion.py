@@ -163,11 +163,9 @@ class IngestionService:
         try:
             tmp_f = CoinFeatures(symbol=symbol, ts=0, last_price=0)
             calc._compute_ob_features(tmp_f)
-            spread = tmp_f.spread_pct if tmp_f.spread_pct is not None else 0.0
-            depth_change = tmp_f.bid_depth_change_5m if tmp_f.bid_depth_change_5m is not None else 0.0
             ob_features_payload = json.dumps({
-                "spread_pct": spread,
-                "bid_depth_change_5m": depth_change,
+                "spread_pct": tmp_f.spread_pct,                 # None при отсутствии данных
+                "bid_depth_change_5m": tmp_f.bid_depth_change_5m,  # None при отсутствии данных
                 "ts": utcnow_ts(),
             })
             await self._redis.setex(f"ob_features:{symbol}", 60, ob_features_payload)

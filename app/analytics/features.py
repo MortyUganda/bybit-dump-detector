@@ -28,11 +28,11 @@ logger = get_logger(__name__)
 @dataclass
 class TrendContext:
     """1-hour trend context for multi-timeframe filtering."""
-    ema20_1h: float = 0.0
-    ema50_1h: float = 0.0
+    ema20_1h: float | None = None
+    ema50_1h: float | None = None
     ema20_above_ema50_1h: bool = False
     price_above_ema20_1h: bool = False
-    trend_strength: float = 0.0  # -1.0 (strong down) to +1.0 (strong up)
+    trend_strength: float | None = None  # -1.0 (strong down) to +1.0 (strong up)
 
     def is_safe_to_short(self) -> bool:
         """Don't short when strong uptrend on 1h."""
@@ -82,12 +82,12 @@ class CoinFeatures:
     large_sell_count_5m: int = 0
     large_buy_usdt_5m: float = 0.0    # total USDT of large buys
     large_sell_usdt_5m: float = 0.0
-    large_trade_threshold: float = 0.0  # dynamic: 95th percentile of recent trades
+    large_trade_threshold: float | None = None  # dynamic: 95th percentile of recent trades
 
     # ── Volume anomaly ────────────────────────────────────────────
     volume_1m: float = 0.0            # current 1m volume (USDT turnover)
-    volume_zscore_1m: float = 0.0     # z-score vs rolling 60-period mean (trade-based)
-    volume_zscore_candle: float = 0.0 # z-score from candle turnover (candle-based)
+    volume_zscore_1m: float | None = None   # z-score vs rolling 60-period mean (trade-based)
+    volume_zscore_candle: float | None = None # z-score from candle turnover (candle-based)
     volume_ratio_5m: float = 0.0      # 5m volume / avg 5m volume (rolling 12 periods)
 
     # ── Price momentum ────────────────────────────────────────────
@@ -98,16 +98,16 @@ class CoinFeatures:
     price_acceleration: float = 0.0   # 1m change - avg 1m change (speed-up signal)
 
     # ── VWAP extension ────────────────────────────────────────────
-    vwap_15m: float = 0.0
-    vwap_extension_pct: float = 0.0   # (price - vwap) / vwap * 100 — positive = overextended
+    vwap_15m: float | None = None
+    vwap_extension_pct: float | None = None   # (price - vwap) / vwap * 100 — positive = overextended
 
     # ── RSI ───────────────────────────────────────────────────────
     rsi_14_1m: float = 50.0           # RSI(14) on 1m candles
     rsi_14_5m: float = 50.0           # RSI(14) on 5m candles
 
     # ── ATR / Realized Volatility ─────────────────────────────────
-    atr_14_1m: float = 0.0            # ATR(14) on 1m — measures intraday volatility
-    realized_vol_1h: float = 0.0      # std dev of 1m returns over 60 periods
+    atr_14_1m: float | None = None             # ATR(14) on 1m — measures intraday volatility
+    realized_vol_1h: float | None = None    # std dev of 1m returns over 60 periods
 
     # ── Candle patterns ───────────────────────────────────────────
     consecutive_green_candles: int = 0  # how many green 1m candles in a row
@@ -119,31 +119,31 @@ class CoinFeatures:
     volume_decline_after_spike: bool = False
 
     # ── Orderbook features ────────────────────────────────────────
-    ob_imbalance: float = 0.0         # (bid_depth - ask_depth) / total — in [-1, 1]
-    bid_depth_usdt: float = 0.0       # total bid depth in USDT (top 10 levels)
-    ask_depth_usdt: float = 0.0
-    spread_pct: float = 0.0           # (best_ask - best_bid) / mid_price * 100
-    bid_depth_change_5m: float = 0.0  # % change in bid depth (negative = thinning)
+    ob_imbalance: float | None = None      # (bid_depth - ask_depth) / total — in [-1, 1]
+    bid_depth_usdt: float | None = None    # total bid depth in USDT (top 10 levels)
+    ask_depth_usdt: float | None = None
+    spread_pct: float | None = None         # (best_ask - best_bid) / mid_price * 100
+    bid_depth_change_5m: float | None = None  # % change in bid depth (negative = thinning)
 
     # ── Open Interest (perpetual only, None for spot) ─────────────
     oi_change_pct_1h: float | None = None  # % OI change in last hour
-    oi_change_pct: float = 0.0             # % change vs 5 min ago
-    oi_zscore: float = 0.0                 # z-score of OI change rate
+    oi_change_pct: float | None = None        # % change vs 5 min ago
+    oi_zscore: float | None = None             # z-score of OI change rate
     funding_rate: float | None = None       # latest funding rate
 
     # ── Trend context (multi-timeframe) ─────────────────────────
     trend_context: TrendContext = field(default_factory=TrendContext)
 
     # ── Market context ──────────────────────────────────────────
-    btc_change_15m: float = 0.0       # BTC 15m momentum at feature time
+    btc_change_15m: float | None = None          # BTC 15m momentum at feature time
 
     # ── CVD (Cumulative Volume Delta) ────────────────────────────
-    cvd_1m: float = 0.0              # CVD over last 1 minute (raw, in USDT)
-    cvd_5m: float = 0.0              # CVD over last 5 minutes
-    cvd_divergence: float = 0.0      # -1 to +1: negative = price up but CVD down (bearish)
+    cvd_1m: float | None = None           # CVD over last 1 minute (raw, in USDT)
+    cvd_5m: float | None = None            # CVD over last 5 minutes
+    cvd_divergence: float | None = None     # -1 to +1: negative = price up but CVD down (bearish)
 
     # ── Liquidation cascade ───────────────────────────────────────
-    liquidation_cascade_score: float = 0.0
+    liquidation_cascade_score: float | None = None
 
     # ── Z-score нормализация по символу (окно 200) ─────────────
     spread_pct_z: float = 0.0
@@ -161,9 +161,9 @@ class CoinFeatures:
     recent_wr_20: float = 0.5          # winrate последних 20 закрытых auto_shorts
 
     # ── Metadata ─────────────────────────────────────────────────
-    last_price: float = 0.0
-    market_cap_proxy: float = 0.0     # price * circulating_supply (if available)
-    volume_24h_usdt: float = 0.0
+    last_price: float | None = None
+    market_cap_proxy: float | None = None    # price * circulating_supply (if available)
+    volume_24h_usdt: float | None = None
 
 
 # ─── Liquidation Cascade Detector ─────────────────────────────────────────────
@@ -654,8 +654,10 @@ class FeatureCalculator:
         mid = (best_bid + best_ask) / 2
 
         # --- Spread ---
-        if mid > 0:
+        if best_bid > 0 and best_ask > 0 and mid > 0:
             f.spread_pct = (best_ask - best_bid) / mid * 100
+        else:
+            f.spread_pct = None  # ← явно
 
         # --- Depth (top 10 levels) ---
         top10_bids = bids[:10]
