@@ -73,6 +73,14 @@ LGB_PARAMS = {
     "seed": RANDOM_STATE,
 }
 
+NEW_FEATURES = [
+    "hour_of_day",
+    "day_of_week",
+    "ob_depth_ratio",
+    "btc_alignment",
+    "vol_regime",
+]
+
 
 # ── Утилиты ──────────────────────────────────────────────────────
 
@@ -156,6 +164,74 @@ def load_auto_clean(path: str) -> pd.DataFrame:
     df["source"] = "auto_short_clean"
     return df
 
+def load_auto_strong_target(path: str, pnl_threshold: float = 5.0) -> pd.DataFrame:
+    """auto_shorts с сильным target: только pnl > +X% или < -X%, остальное выброшено."""
+    df = pd.read_csv(path)
+    df = df[df["status"] == "closed"].copy()
+    df = df[df["close_reason"].isin(["tp_hit", "sl_hit"])].copy()
+    df = df[df["pnl_pct"].notna()].copy()
+
+    # Сильные классы только: pnl > +5% (win) или pnl < -5% (loss)
+    mask_strong_win = df["pnl_pct"] > pnl_threshold
+    mask_strong_loss = df["pnl_pct"] < -pnl_threshold
+    df = df[mask_strong_win | mask_strong_loss].copy()
+
+    df["signal_ts"] = pd.to_datetime(df["entry_ts"])
+    df[TARGET] = (df["pnl_pct"] > 0).astype(int)
+    df["source"] = "auto_short_strong"
+    return df
+
+
+def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Добавляет 5 новых производных фич."""
+    df = df.copy()
+
+    # Time-of-day features
+    df["hour_of_day"] = pd.to_datetime(df["signal_ts"]).dt.hour
+    df["day_of_week"] = pd.to_datetime(df["signal_ts"]).dt.dayofweek
+
+    # OB depth ratio (bid/ask balance)
+    if "ob_bid_volume_top10" in df.columns and "ob_ask_volume_top10" in df.columns:
+        df["ob_depth_ratio"] = df["ob_bid_volume_top10"] / (
+            df["ob_ask_volume_top10"].replace(0, np.nan) + 1e-9
+        )
+        df["ob_depth_ratio"] = df["ob_depth_ratio"].fillna(1.0).clip(0, 100)
+    else:
+        df["ob_depth_ratio"] = 1.0
+
+    # BTC alignment: согласованность краткого и среднего тренда
+    if "btc_change_15m" in df.columns and "btc_change_1h" in df.columns:
+        df["btc_alignment"] = (
+            np.sign(df["btc_change_15m"].fillna(0))
+            * np.sign(df["btc_change_1h"].fillna(0))
+        )
+    else:
+        df["btc_alignment"] = 0
+
+    # Volatility regime: 0=low, 1=med, 2=high (по quantile)
+    if "realized_vol_1h" in df.columns:
+        try:
+            df["vol_regime"] = pd.qcut(
+                df["realized_vol_1h"].fillna(df["realized_vol_1h"].median()),
+                q=3, labels=[0, 1, 2], duplicates="drop"
+            ).astype(float)
+        except Exception:
+            df["vol_regime"] = 1.0
+    else:
+        df["vol_regime"] = 1.0
+
+    return df
+
+
+def prepare_strong_with_engineered(df_strong: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Датасет: сильный target + добавленные фичи."""
+    df = add_engineered_features(df_strong)
+    base_features = [c for c in COMMON_FEATURES if c in df.columns]
+    feature_cols = base_features + [f for f in NEW_FEATURES if f in df.columns]
+    cols = feature_cols + ["signal_ts", TARGET, "source"]
+    df = df[cols].copy().sort_values("signal_ts").reset_index(drop=True)
+    df[feature_cols] = df[feature_cols].fillna(0.0)
+    return df, feature_cols
 
 # ── Подготовка датасетов ─────────────────────────────────────────
 
@@ -344,6 +420,11 @@ def print_comparison(results: list[dict]) -> None:
         print(f"  - EXP 3 лучший с разрывом {delta:+.3f} > 0.03 → перейти на этот config в проде")
     elif "EXP 1" in best["name"]:
         print("  - EXP 1 лучший → достаточно почистить target в основном скрипте")
+    elif "EXP 4" in best["name"]:
+        if delta > 0.03:
+            print(f"  - EXP 4 лучший с разрывом {delta:+.3f} > 0.03 → внедрить strong target + новые фичи")
+        else:
+            print(f"  - EXP 4 лучший, но разрыв всего {delta:+.3f} → проверить устойчивость")
     elif abs(delta) < 0.02:
         print(f"  - Разница {abs(delta):.3f} < 0.02 → оставить baseline")
     else:
@@ -463,8 +544,34 @@ def main() -> None:
             top_features, n_splits,
         )
 
+    # ── EXP 4: strong target + engineered features ──
+    print("Запуск EXP 4 (strong target + новые фичи)...")
+    df_strong = load_auto_strong_target(auto_csv, pnl_threshold=5.0)
+    print(f"  EXP 4: после strong target n={len(df_strong)}")
+
+    if len(df_strong) < 30:
+        print(f"  WARN: после strong-фильтра осталось {len(df_strong)} строк")
+        exp4 = {
+            "name": "EXP 4 (strong target + new features)",
+            "n": len(df_strong),
+            "features": [],
+            "n_features": 0,
+            "mean_auc": float("nan"),
+            "std_auc": float("nan"),
+            "fold_aucs": [],
+            "importance_top10": [],
+            "thresholds": {},
+        }
+    else:
+        df_c4, feat_c4 = prepare_strong_with_engineered(df_strong)
+        exp4 = run_experiment(
+            f"EXP 4 (strong+engineered, {len(feat_c4)} фичей)",
+            df_c4[feat_c4], df_c4[TARGET].astype(int),
+            feat_c4, n_splits,
+        )
+
     # ── Вывод деталей ──
-    results = [exp0, exp1, exp2, exp3]
+    results = [exp0, exp1, exp2, exp3, exp4]
     for r in results:
         print_experiment_detail(r)
 
