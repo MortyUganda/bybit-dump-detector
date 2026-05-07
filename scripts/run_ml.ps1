@@ -6,6 +6,7 @@
 #   .\scripts\run_ml.ps1 -Mode export     -> только выгрузить CSV
 #   .\scripts\run_ml.ps1 -Mode all        -> выгрузить + обе модели
 #   .\scripts\run_ml.ps1 -Mode decision_v2 -> эксперименты decision v2
+#   .\scripts\run_ml.ps1 -Mode clean       -> фильтрация CSV для ML
 #   .\scripts\run_ml.ps1 -Mode diagnose   -> диагностика фолдов (drift)
 #   .\scripts\run_ml.ps1 -MinId 700       -> outcome с другим min_id
 #   .\scripts\run_ml.ps1 -Splits 8        -> кастомное число фолдов
@@ -15,7 +16,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("run", "outcome", "decision", "decision_v2", "export", "all", "diagnose")]
+    [ValidateSet("run", "outcome", "decision", "decision_v2", "export", "all", "clean", "diagnose")]
     [string]$Mode = "run",
     [int]$MinId = 1,
     [int]$Splits = 5,
@@ -60,6 +61,11 @@ function Invoke-DecisionV2 {
     python -m scripts.train_decision_model_v2 @args
 }
 
+function Invoke-Clean {
+    Write-Host "`n=== Фильтрация CSV для ML ===" -ForegroundColor Cyan
+    python -m scripts.export_clean_for_ml
+}
+
 function Invoke-Diagnose {
     Write-Host "`n=== Диагностика фолдов ===" -ForegroundColor Cyan
     $args = @("--splits", $Splits)
@@ -85,6 +91,9 @@ switch ($Mode) {
     }
     "decision_v2" {
         Invoke-DecisionV2
+    }
+    "clean" {
+        Invoke-Clean
     }
     "diagnose" {
         Invoke-Diagnose
