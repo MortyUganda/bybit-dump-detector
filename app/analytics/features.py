@@ -649,16 +649,16 @@ class FeatureCalculator:
         if not bids or not asks:
             return
 
-        best_bid = bids[0][0]
-        best_ask = asks[0][0]
-        mid = (best_bid + best_ask) / 2
+        best_bid = float(bids[0][0])
+        best_ask = float(asks[0][0])
+        mid = (best_bid + best_ask) / 2.0
 
         # --- Spread ---
         if best_bid > 0 and best_ask > 0 and mid > 0:
             f.spread_pct = (best_ask - best_bid) / mid * 100
         else:
-            f.spread_pct = None  # ← явно
-
+            f.spread_pct = None
+            
         # --- Depth (top 10 levels) ---
         top10_bids = bids[:10]
         top10_asks = asks[:10]

@@ -200,7 +200,7 @@ class ScoringEngine:
     OI_ZSCORE_HIGH = 2.5
 
     def _adaptive_thresholds(self, features: CoinFeatures) -> dict:
-        vol = max(0.1, features.realized_vol_1h)
+        vol = max(0.1, features.realized_vol_1h if features.realized_vol_1h is not None else 0.1)
         vol_ratio = vol / 1.0
 
         rsi_adj = min(8.0, max(-8.0, (vol_ratio - 1.0) * 5.0))
@@ -221,41 +221,45 @@ class ScoringEngine:
     def score(self, features: CoinFeatures) -> RiskScore:
         factors: list[FactorResult] = []
 
+        # Safe accessor: None -> 0.0 для арифметики
+        def _v(val, default=0.0):
+            return val if val is not None else default
+
         at = self._adaptive_thresholds(features)
 
-        rsi_1m = features.rsi_14_1m
+        rsi_1m = _v(features.rsi_14_1m)
         factors.append(self._factor("rsi_1m", rsi_1m, at["RSI_LOW"], at["RSI_HIGH"]))
 
-        rsi_5m = features.rsi_14_5m
+        rsi_5m = _v(features.rsi_14_5m)
         factors.append(self._factor("rsi_5m", rsi_5m, at["RSI_5M_LOW"], at["RSI_5M_HIGH"]))
 
-        vwap_ext = max(features.vwap_extension_pct, 0.0)
+        vwap_ext = max(_v(features.vwap_extension_pct), 0.0)
         factors.append(self._factor("vwap_extension", vwap_ext, at["VWAP_LOW"], at["VWAP_HIGH"]))
 
-        vz_trade = features.volume_zscore_1m
-        vz_candle = features.volume_zscore_candle
+        vz_trade = _v(features.volume_zscore_1m)
+        vz_candle = _v(features.volume_zscore_candle)
         if vz_trade > 0 and vz_candle > 0:
             vz = (vz_trade + vz_candle) / 2
         else:
             vz = max(vz_trade, vz_candle, 0.0)
         factors.append(self._factor("volume_zscore", vz, at["VOL_LOW"], at["VOL_HIGH"]))
 
-        imbalance = max(features.trade_imbalance_5m, 0.0)
+        imbalance = max(_v(features.trade_imbalance_5m), 0.0)
         factors.append(self._factor("trade_imbalance", imbalance, self.IMBALANCE_LOW, self.IMBALANCE_HIGH))
 
-        large_buys = float(features.large_buy_count_5m)
+        large_buys = float(_v(features.large_buy_count_5m))
         factors.append(self._factor("large_buy_cluster", large_buys, float(self.LARGE_BUY_LOW), float(self.LARGE_BUY_HIGH)))
 
-        large_sells = float(features.large_sell_count_5m)
+        large_sells = float(_v(features.large_sell_count_5m))
         factors.append(self._factor("large_sell_cluster", large_sells, float(self.LARGE_SELL_LOW), float(self.LARGE_SELL_HIGH)))
 
-        accel = features.price_acceleration
+        accel = _v(features.price_acceleration)
         factors.append(self._factor("price_acceleration", accel, self.ACCEL_LOW, self.ACCEL_HIGH))
 
-        greens = float(features.consecutive_green_candles)
+        greens = float(_v(features.consecutive_green_candles))
         factors.append(self._factor("consecutive_greens", greens, float(self.GREEN_LOW), float(self.GREEN_HIGH)))
 
-        bid_change = features.bid_depth_change_5m
+        bid_change = _v(features.bid_depth_change_5m)
         bid_thin_norm = self._normalize(-bid_change, -self.BID_THIN_LOW, -self.BID_THIN_HIGH)
         factors.append(FactorResult(
             name="ob_bid_thinning",
@@ -266,7 +270,7 @@ class ScoringEngine:
             triggered=bid_thin_norm >= 0.5,
         ))
 
-        spread = features.spread_pct
+        spread = _v(features.spread_pct)
         factors.append(self._factor("spread_expansion", spread, self.SPREAD_LOW, self.SPREAD_HIGH))
 
         mom_loss = 1.0 if features.momentum_loss_signal else 0.0
@@ -281,7 +285,7 @@ class ScoringEngine:
             triggered=momentum_val >= 0.5,
         ))
 
-        wick = features.upper_wick_ratio
+        wick = _v(features.upper_wick_ratio)
         factors.append(self._factor("upper_wick", wick, self.WICK_LOW, self.WICK_HIGH))
 
         if features.funding_rate is not None:
@@ -297,16 +301,16 @@ class ScoringEngine:
                 triggered=False,
             ))
 
-        oi_z = max(features.oi_zscore, 0.0)
-        if features.oi_change_pct > 0 and features.price_change_5m > 0:
+        oi_z = max(_v(features.oi_zscore), 0.0)
+        if _v(features.oi_change_pct) > 0 and _v(features.price_change_5m) > 0:
             oi_z = oi_z * 1.2
         factors.append(self._factor("oi_spike", oi_z, self.OI_ZSCORE_LOW, self.OI_ZSCORE_HIGH))
 
-        cvd_div = features.cvd_divergence
+        cvd_div = _v(features.cvd_divergence)
         cvd_raw = -cvd_div
         factors.append(self._factor("cvd_divergence", cvd_raw, 0.3, 0.6))
 
-        liq_score = features.liquidation_cascade_score
+        liq_score = _v(features.liquidation_cascade_score)
         factors.append(self._factor("liquidation_cascade", liq_score, 0.3, 0.6))
 
         total_score = sum(f.contribution for f in factors)
@@ -317,9 +321,6 @@ class ScoringEngine:
         if triggered_count < 2:
             total_score = min(total_score, 30.0)
 
-        # ── Multi-timeframe trend context (informational only) ───
-        # AutoShortService has its own _check_trend_filter — do not cap score here.
-        # Just record the flag so AutoShortService can use it.
         trend_blocks_short = (
             hasattr(features, "trend_context")
             and features.trend_context is not None
@@ -356,22 +357,25 @@ class ScoringEngine:
     ) -> SignalType | None:
         factor_map = {fr.name: fr for fr in factors}
 
+        def _v(val, default=0.0):
+            return val if val is not None else default
+
         large_sell_f = factor_map.get("large_sell_cluster")
         if (
-            f.price_change_5m < -3.0
-            and f.bid_depth_change_5m < -40.0
-            and f.trade_imbalance_5m < -0.3
+            _v(f.price_change_5m) < -3.0
+            and _v(f.bid_depth_change_5m) < -40.0
+            and _v(f.trade_imbalance_5m) < -0.3
         ) or (
-            f.price_change_5m < -2.0
+            _v(f.price_change_5m) < -2.0
             and large_sell_f and large_sell_f.triggered
-            and f.bid_depth_change_5m < -30.0
+            and _v(f.bid_depth_change_5m) < -30.0
         ):
             return SignalType.DUMP_STARTED
 
         if (
             f.momentum_loss_signal
-            and f.upper_wick_ratio >= self.WICK_LOW
-            and f.bid_depth_change_5m < -20.0
+            and _v(f.upper_wick_ratio) >= self.WICK_LOW
+            and _v(f.bid_depth_change_5m) < -20.0
         ):
             return SignalType.REVERSAL_RISK
 
@@ -393,9 +397,6 @@ class ScoringEngine:
         if 25 <= score < 50 and sum(1 for fr in factors if fr.triggered) >= 2:
             return SignalType.EARLY_WARNING
 
-        # Universal fallback: any combination of 2+ factors with score >= 45
-        # Catches cases where new features (CVD, OI, liquidation, funding) drive
-        # the score high without RSI/VWAP specifically triggering.
         all_triggered = sum(1 for fr in factors if fr.triggered)
         if score >= 45 and all_triggered >= 2:
             return SignalType.OVERHEATED
