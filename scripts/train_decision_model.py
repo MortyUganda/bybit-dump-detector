@@ -26,6 +26,13 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
+from _feature_engineering import (
+    add_engineered_features as add_eng_features,
+    GROUP1_FEATURES,
+    GROUP2_FEATURES,
+    GROUP3_FEATURES,
+)
+
 # === Настройки по умолчанию ===
 DEFAULT_N_SPLITS = 5
 RANDOM_STATE = 42
@@ -179,12 +186,24 @@ def merge_datasets(
     ]
     print(f"\nОбщих фичей: {len(feature_cols)}")
 
-    cols = feature_cols + ["signal_ts", TARGET, "source"]
+    # Для symbol-specific фичей нужны symbol, entry_ts, pnl_pct
+    extra_cols_for_eng = ["symbol", "entry_ts", "pnl_pct"]
+    keep_cols = list(set(feature_cols + ["signal_ts", TARGET, "source"] + extra_cols_for_eng))
+    keep_cols = [c for c in keep_cols if all(c in d.columns for d in all_dfs)]
+
     df = pd.concat(
-        [d[cols] for d in all_dfs],
+        [d[keep_cols] for d in all_dfs],
         ignore_index=True,
     )
     df = df.sort_values("signal_ts").reset_index(drop=True)
+
+    # ── Engineered features ──
+    df = add_eng_features(df)
+    # Добавляем рассчитанные фичи в список
+    for feat_list in (GROUP1_FEATURES, GROUP2_FEATURES, GROUP3_FEATURES):
+        for f in feat_list:
+            if f in df.columns and f not in feature_cols:
+                feature_cols.append(f)
 
     print(f"\nОбъединённый датасет: {len(df)} сигналов")
     print(f"  win  (label=1): {int(df[TARGET].sum())}")

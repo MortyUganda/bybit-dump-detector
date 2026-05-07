@@ -31,6 +31,13 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
+from _feature_engineering import (
+    add_engineered_features as add_eng_features,
+    GROUP1_FEATURES,
+    GROUP2_FEATURES,
+    GROUP3_FEATURES,
+)
+
 
 # === Настройки ===
 DEFAULT_N_SPLITS = 5
@@ -340,14 +347,23 @@ def prepare_clean_with_fixes_and_engineered(df_clean: pd.DataFrame) -> tuple[pd.
     """EXP 5: clean target + bug fixes + расширенные engineered features."""
     df = df_clean.copy()
 
-    # Применяем engineered features (с bug fixes для spread_pct)
+    # Применяем v2 engineered features (с bug fixes для spread_pct)
     df = add_engineered_features(df, mode="exp5")
+
+    # Применяем новые engineered features из _feature_engineering.py
+    df = add_eng_features(df)
 
     # Базовые фичи минус мёртвые
     base_features = [c for c in COMMON_FEATURES if c in df.columns and c not in DEAD_FEATURES]
 
-    # Добавляем engineered
+    # Добавляем v2 engineered
     feature_cols = base_features + [f for f in NEW_FEATURES_EXP5 if f in df.columns]
+
+    # Добавляем новые engineered features из _feature_engineering
+    for feat_list in (GROUP1_FEATURES, GROUP2_FEATURES, GROUP3_FEATURES):
+        for f in feat_list:
+            if f in df.columns and f not in feature_cols:
+                feature_cols.append(f)
 
     cols = feature_cols + ["signal_ts", TARGET, "source"]
     df = df[cols].copy().sort_values("signal_ts").reset_index(drop=True)
