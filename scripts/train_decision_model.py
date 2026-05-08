@@ -28,9 +28,7 @@ from sklearn.model_selection import TimeSeriesSplit
 
 from scripts._feature_engineering import (
     add_engineered_features as add_eng_features,
-    GROUP1_FEATURES,
     GROUP2_FEATURES,
-    GROUP3_FEATURES,
 )
 
 # === Настройки по умолчанию ===
@@ -48,7 +46,7 @@ def find_latest_csv(pattern: str) -> str | None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Decision ML: прибыльность (auto_shorts + canceled_signals + all_opened_signals)"
+        description="Decision ML: прибыльность (auto_shorts + canceled_signals)"
     )
     p.add_argument("--auto-csv", default=None,
                    help="Путь к auto_shorts CSV (default: последний auto_shorts_*.csv)")
@@ -56,6 +54,8 @@ def parse_args() -> argparse.Namespace:
                    help="Путь к canceled_signals CSV (default: последний canceled_signals_*.csv)")
     p.add_argument("--all-opened-csv", default=None,
                    help="Путь к all_opened_signals CSV (default: последний all_opened_signals_*.csv)")
+    p.add_argument("--include-all-opened", action="store_true", default=False,
+                   help="Включить all_opened_signals в объединение данных (по умолчанию ВЫКЛ)")
     p.add_argument("--splits", type=int, default=DEFAULT_N_SPLITS,
                    help=f"Число фолдов (default {DEFAULT_N_SPLITS})")
     return p.parse_args()
@@ -198,12 +198,14 @@ def merge_datasets(
     df = df.sort_values("signal_ts").reset_index(drop=True)
 
     # ── Engineered features ──
-    df = add_eng_features(df)
-    # Добавляем рассчитанные фичи в список
-    for feat_list in (GROUP1_FEATURES, GROUP2_FEATURES, GROUP3_FEATURES):
-        for f in feat_list:
-            if f in df.columns and f not in feature_cols:
-                feature_cols.append(f)
+    # Group 1 (symbol-specific) пропускаем: требует async DB-запросов при inference
+    # Group 2 (time-of-day) включаем: тривиально считается при inference
+    # Group 3 (funding) пропускаем: 83% NaN
+    df = add_eng_features(df, include_funding=False)
+    # Добавляем ТОЛЬКО Group 2 (time-of-day) — синхронизирован с inference
+    for f in GROUP2_FEATURES:
+        if f in df.columns and f not in feature_cols:
+            feature_cols.append(f)
 
     print(f"\nОбъединённый датасет: {len(df)} сигналов")
     print(f"  win  (label=1): {int(df[TARGET].sum())}")
@@ -317,7 +319,6 @@ def main() -> None:
 
     auto_csv = args.auto_csv or find_latest_csv("auto_shorts_*.csv")
     canceled_csv = args.canceled_csv or find_latest_csv("canceled_signals_*.csv")
-    all_opened_csv = args.all_opened_csv or find_latest_csv("all_opened_signals_*.csv")
 
     if not auto_csv or not Path(auto_csv).exists():
         print("Не найден auto_shorts CSV. Укажи через --auto-csv")
@@ -332,14 +333,29 @@ def main() -> None:
     df_e = load_entered(auto_csv)
     df_c = load_canceled(canceled_csv)
 
+    # all_opened_signals — только если явно запрошен --include-all-opened
     df_ao = None
-    if all_opened_csv and Path(all_opened_csv).exists():
-        print(f"all_opened_signals CSV:   {all_opened_csv}")
-        df_ao = load_all_opened(all_opened_csv)
+    if args.include_all_opened:
+        all_opened_csv = args.all_opened_csv or find_latest_csv("all_opened_signals_*.csv")
+        if all_opened_csv and Path(all_opened_csv).exists():
+            print(f"all_opened_signals CSV:   {all_opened_csv}")
+            df_ao = load_all_opened(all_opened_csv)
+        else:
+            print("all_opened_signals CSV:   не найден — пропускаем")
     else:
-        print("all_opened_signals CSV:   не найден — пропускаем")
+        print("all_opened_signals:       ОТКЛЮЧЕН (--include-all-opened не указан)")
+
+    # ── Шапка: источники и фичи ──
+    ao_status = f"ВКЛЮЧЁН N={len(df_ao)}" if df_ao is not None else "ОТКЛЮЧЕН"
+    print(f"\nИсточники: auto_shorts (N={len(df_e)}), "
+          f"canceled_signals (N={len(df_c)}) "
+          f"[all_opened: {ao_status}]")
+    print("Engineered features: time-of-day (Group 2) "
+          "[symbol-specific (Group 1): skipped — нет в inference, "
+          "funding (Group 3): skipped — 83% NaN]")
 
     df, feature_cols = merge_datasets(df_e, df_c, df_ao)
+    print(f"Итого фичей: {len(feature_cols)}")
     if len(df) < 30:
         print("Слишком мало данных")
         sys.exit(1)

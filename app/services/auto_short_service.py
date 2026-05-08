@@ -47,6 +47,11 @@ ML_DECISION_FEATURES = [
     "btc_adx_1h", "btc_atr_pct_1h",
     "recent_wr_20",
     "adverse_move_pct",
+    # Engineered: time-of-day (Group 2)
+    "hour_of_day",
+    "day_of_week",
+    "session",
+    "is_weekend",
 ]
 
 # ── Fallback defaults ─────────────────────────────────────────────
@@ -185,6 +190,7 @@ class AutoShortService:
         """
         features = risk_score.features_snapshot
         factor_map = {f.name: f.raw_value for f in risk_score.factors}
+        now = datetime.now(timezone.utc)
 
         def _f(val: Any) -> float:
             if val is None:
@@ -249,6 +255,11 @@ class AutoShortService:
             _f(getattr(features, 'recent_wr_20', None) if features else None),
             # Adverse move
             _f(adverse_move_pct),
+            # Engineered: time-of-day (Group 2)
+            _f(now.hour),
+            _f(now.weekday()),
+            _f(0 if now.hour < 8 else 1 if now.hour < 13 else 2 if now.hour < 17 else 3),
+            _f(1 if now.weekday() >= 5 else 0),
         ]
 
     async def _ml_gate_check(

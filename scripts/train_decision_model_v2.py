@@ -35,7 +35,6 @@ from scripts._feature_engineering import (
     add_engineered_features as add_eng_features,
     GROUP1_FEATURES,
     GROUP2_FEATURES,
-    GROUP3_FEATURES,
 )
 
 
@@ -136,6 +135,8 @@ def parse_args() -> argparse.Namespace:
                    help="Путь к canceled_signals CSV (default: последний canceled_signals_*.csv)")
     p.add_argument("--all-opened-csv", default=None,
                    help="Путь к all_opened_signals CSV (default: последний all_opened_signals_*.csv)")
+    p.add_argument("--include-all-opened", action="store_true", default=False,
+                   help="Включить all_opened_signals в EXP 0 baseline (по умолчанию ВЫКЛ)")
     p.add_argument("--splits", type=int, default=DEFAULT_N_SPLITS,
                    help=f"Число фолдов TimeSeriesSplit (default {DEFAULT_N_SPLITS})")
     p.add_argument("--top-features", type=int, default=20,
@@ -351,7 +352,8 @@ def prepare_clean_with_fixes_and_engineered(df_clean: pd.DataFrame) -> tuple[pd.
     df = add_engineered_features(df, mode="exp5")
 
     # Применяем новые engineered features из _feature_engineering.py
-    df = add_eng_features(df)
+    # Group 3 (funding) отключена — 83% NaN на текущих данных
+    df = add_eng_features(df, include_funding=False)
 
     # Базовые фичи минус мёртвые
     base_features = [c for c in COMMON_FEATURES if c in df.columns and c not in DEAD_FEATURES]
@@ -359,8 +361,8 @@ def prepare_clean_with_fixes_and_engineered(df_clean: pd.DataFrame) -> tuple[pd.
     # Добавляем v2 engineered
     feature_cols = base_features + [f for f in NEW_FEATURES_EXP5 if f in df.columns]
 
-    # Добавляем новые engineered features из _feature_engineering
-    for feat_list in (GROUP1_FEATURES, GROUP2_FEATURES, GROUP3_FEATURES):
+    # Добавляем Group 1 + Group 2 (без Group 3 — funding)
+    for feat_list in (GROUP1_FEATURES, GROUP2_FEATURES):
         for f in feat_list:
             if f in df.columns and f not in feature_cols:
                 feature_cols.append(f)
@@ -552,7 +554,6 @@ def main() -> None:
 
     auto_csv = args.auto_csv or find_latest_csv("auto_shorts_*.csv")
     canceled_csv = args.canceled_csv or find_latest_csv("canceled_signals_*.csv")
-    all_opened_csv = args.all_opened_csv or find_latest_csv("all_opened_signals_*.csv")
 
     if not auto_csv or not Path(auto_csv).exists():
         print("Не найден auto_shorts CSV. Укажи через --auto-csv")
@@ -568,17 +569,30 @@ def main() -> None:
     df_auto = load_auto_shorts(auto_csv)
     df_canceled = load_canceled(canceled_csv)
 
+    # all_opened_signals — только если явно запрошен --include-all-opened
     df_all_opened = None
-    if all_opened_csv and Path(all_opened_csv).exists():
-        print(f"all_opened_signals CSV:   {all_opened_csv}")
-        df_all_opened = load_all_opened(all_opened_csv)
+    if args.include_all_opened:
+        all_opened_csv = args.all_opened_csv or find_latest_csv("all_opened_signals_*.csv")
+        if all_opened_csv and Path(all_opened_csv).exists():
+            print(f"all_opened_signals CSV:   {all_opened_csv}")
+            df_all_opened = load_all_opened(all_opened_csv)
+        else:
+            print("all_opened_signals CSV:   не найден — пропускаем")
     else:
-        print("all_opened_signals CSV:   не найден — пропускаем")
+        print("all_opened_signals:       ОТКЛЮЧЕН (--include-all-opened не указан)")
+
+    # ── Шапка: источники ──
+    ao_status = f"ВКЛЮЧЁН N={len(df_all_opened)}" if df_all_opened is not None else "ОТКЛЮЧЕН"
+    print(f"\nИсточники: auto_shorts (N={len(df_auto)}), "
+          f"canceled_signals (N={len(df_canceled)}) "
+          f"[all_opened: {ao_status}]")
+    print("Engineered features: EXP 4/5 — Group 1+2 "
+          "[funding (Group 3): skipped — 83% NaN]")
 
     df_clean = load_auto_clean(auto_csv)
 
     # ── Подготовка датасетов ──
-    # EXP 0 — baseline
+    # EXP 0 — baseline (без all_opened по умолчанию)
     df_base, feat_base = merge_baseline(df_auto, df_canceled, df_all_opened)
 
     # EXP 1 — чистый target
