@@ -39,6 +39,7 @@ HELP_TEXT = """
 /signals — история сигналов риска
 /coin SYMBOL — полная диагностика монеты
 /auto_shorts — активные авто-шорты
+/ml_short — ML paper-trading шорты
 /stats — статистика по всем сделкам
 /history — история закрытых сделок
 /watchlist — список отслеживания
@@ -80,6 +81,9 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
             [
                 KeyboardButton(text="⭐ Watchlist"),
                 KeyboardButton(text="🤖 Авто-шорты"),
+            ],
+            [
+                KeyboardButton(text="🤖 ML-shorts"),
             ],
             [
                 KeyboardButton(text="📊 Статистика"),

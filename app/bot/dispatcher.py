@@ -20,6 +20,7 @@ from app.bot.handlers import (
     watchlist_router,
     nav_router,
     strategy_router,
+    ml_short_router,
 )
 
 settings = get_settings()
@@ -49,5 +50,6 @@ def create_dispatcher(redis_url: str) -> Dispatcher:
     dp.include_router(watchlist_router)
     dp.include_router(history_router)
     dp.include_router(auto_shorts_router)
+    dp.include_router(ml_short_router)
 
     return dp
