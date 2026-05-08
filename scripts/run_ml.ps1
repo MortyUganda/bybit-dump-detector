@@ -21,7 +21,8 @@ param(
     [int]$MinId = 1,
     [int]$Splits = 5,
     [string]$AutoCsv = "",
-    [string]$CanceledCsv = ""
+    [string]$CanceledCsv = "",
+    [switch]$IncludeAllOpened
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,18 +47,22 @@ function Invoke-Outcome {
 }
 
 function Invoke-Decision {
-    Write-Host "`n=== Decision model ===" -ForegroundColor Cyan
+    $aoLabel = if ($IncludeAllOpened) { "ВКЛЮЧЁН" } else { "ОТКЛЮЧЕН" }
+    Write-Host "`n=== Decision model [all_opened: $aoLabel] ===" -ForegroundColor Cyan
     $args = @("--splits", $Splits)
     if ($AutoCsv) { $args += @("--auto-csv", $AutoCsv) }
     if ($CanceledCsv) { $args += @("--canceled-csv", $CanceledCsv) }
+    if ($IncludeAllOpened) { $args += "--include-all-opened" }
     python -m scripts.train_decision_model @args
 }
 
 function Invoke-DecisionV2 {
-    Write-Host "`n=== Decision model v2 (experiments) ===" -ForegroundColor Cyan
+    $aoLabel = if ($IncludeAllOpened) { "ВКЛЮЧЁН" } else { "ОТКЛЮЧЕН" }
+    Write-Host "`n=== Decision model v2 (experiments) [all_opened: $aoLabel] ===" -ForegroundColor Cyan
     $args = @("--splits", $Splits)
     if ($AutoCsv) { $args += @("--auto-csv", $AutoCsv) }
     if ($CanceledCsv) { $args += @("--canceled-csv", $CanceledCsv) }
+    if ($IncludeAllOpened) { $args += "--include-all-opened" }
     python -m scripts.train_decision_model_v2 @args
 }
 

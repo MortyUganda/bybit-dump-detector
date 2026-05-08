@@ -269,9 +269,18 @@ GROUP3_FEATURES = [
 ]
 
 
-def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_engineered_features(
+    df: pd.DataFrame,
+    include_funding: bool = False,
+) -> pd.DataFrame:
     """
-    Добавляет все три группы engineered features.
+    Добавляет engineered features.
+
+    Группы:
+      1. Symbol-specific historical (WR, trades count, avg pnl)
+      2. Time-of-day (hour, day, session, is_weekend)
+      3. Funding rate dynamics — ТОЛЬКО если include_funding=True
+         (по умолчанию отключена: 83% NaN на текущих данных)
 
     Возвращает df с новыми колонками.
     Печатает в stdout отчёт о добавленных фичах и NaN-rate.
@@ -296,14 +305,18 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         print("  Group 2 (time-of-day): SKIPPED")
 
-    # Group 3: funding dynamics
-    cols_before_g3 = set(df.columns)
-    df = _add_funding_features(df)
-    added_g3 = [c for c in GROUP3_FEATURES if c in df.columns and c not in cols_before_g3]
-    if added_g3:
-        print(f"  Group 3 (funding dynamics): {', '.join(added_g3)}")
+    # Group 3: funding dynamics (только если include_funding=True)
+    added_g3: list[str] = []
+    if include_funding:
+        cols_before_g3 = set(df.columns)
+        df = _add_funding_features(df)
+        added_g3 = [c for c in GROUP3_FEATURES if c in df.columns and c not in cols_before_g3]
+        if added_g3:
+            print(f"  Group 3 (funding dynamics): {', '.join(added_g3)}")
+        else:
+            print("  Group 3 (funding dynamics): SKIPPED (нет исторических funding в CSV)")
     else:
-        print("  Group 3 (funding dynamics): SKIPPED (нет исторических funding в CSV)")
+        print("  Group 3 (funding dynamics): SKIPPED (include_funding=False, 83% NaN)")
 
     # NaN-rate report
     all_added = added_g1 + added_g2 + added_g3
