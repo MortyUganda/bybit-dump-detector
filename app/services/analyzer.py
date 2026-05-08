@@ -160,20 +160,14 @@ class AnalyzerService:
                 key = REDIS_SCORE_KEY.format(symbol=features.symbol)
                 await self._redis.setex(key, REDIS_SCORE_TTL, json.dumps(risk_score.to_dict()))
 
-                # Check if alert should fire (suppress during BTC rally or ML veto)
+                # Check if alert should fire (suppress during BTC rally)
+                # ML-gate убран — фильтрация по ML перенесена в ml_short_service
                 if risk_score.is_alertable and risk_score.signal_type:
                     if btc_suppressing:
                         logger.debug(
                             "Alert suppressed by BTC correlation filter",
                             symbol=features.symbol,
                             score=risk_score.score,
-                        )
-                    elif (risk_score.ml_probability is not None
-                          and risk_score.ml_probability < 0.35):
-                        logger.debug(
-                            "Alert suppressed by ML scorer — pattern historically loses",
-                            symbol=features.symbol,
-                            ml_prob=round(risk_score.ml_probability, 3),
                         )
                     else:
                         if risk_score.score >= 50:
