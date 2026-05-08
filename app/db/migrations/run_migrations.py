@@ -25,6 +25,11 @@ async def create_tables_direct() -> None:
         await conn.run_sync(Base.metadata.create_all)
     print("All tables created successfully.")
 
+    # Применяем дополнительные миграции (ml_short таблицы)
+    from app.db.migrations.create_ml_short_tables import run_migration as ml_short_migrate
+    await ml_short_migrate()
+    print("ML-short tables migration applied.")
+
 
 if __name__ == "__main__":
     asyncio.run(create_tables_direct())

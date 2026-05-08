@@ -9,6 +9,7 @@ from app.db.models.paper_trade import PaperTrade
 from app.db.models.auto_short import AutoShort  # ← новая таблица
 from app.db.models.canceled_signal import CanceledSignal
 from app.db.models.all_opened_signal import AllOpenedSignal
+from app.db.models.ml_short import MlShortSignal, MlShortPosition, MlShortCooldown
 
 
 __all__ = [
@@ -24,4 +25,7 @@ __all__ = [
     "AutoShort",
     "CanceledSignal",
     "AllOpenedSignal",
+    "MlShortSignal",
+    "MlShortPosition",
+    "MlShortCooldown",
 ]
