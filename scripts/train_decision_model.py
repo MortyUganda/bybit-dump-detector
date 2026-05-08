@@ -26,7 +26,7 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
 
-from _feature_engineering import (
+from scripts._feature_engineering import (
     add_engineered_features as add_eng_features,
     GROUP1_FEATURES,
     GROUP2_FEATURES,
