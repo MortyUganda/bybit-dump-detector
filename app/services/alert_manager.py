@@ -35,9 +35,11 @@ class AlertManager:
         bot: Bot,
         auto_short_service: Any | None = None,
         redis: aioredis.Redis | None = None,
+        ml_short_service: Any | None = None,
     ) -> None:
         self._bot = bot
         self._auto_short = auto_short_service
+        self._ml_short = ml_short_service
         self._redis = redis
         self._owns_redis = redis is None
         self._alert_tasks: set[asyncio.Task] = set()
@@ -162,6 +164,25 @@ class AlertManager:
                 error=str(e),
             )
 
+    async def _trigger_ml_short(self, symbol: str, risk_score: RiskScore) -> None:
+        """Передать сигнал в ML-short сервис для paper-trading."""
+        if not self._ml_short:
+            return
+        try:
+            task = asyncio.create_task(self._ml_short.on_signal(risk_score))
+            self._track_task(task)
+            logger.info(
+                "ML-short сигнал отправлен",
+                symbol=symbol,
+                score=risk_score.score,
+            )
+        except Exception as e:
+            logger.warning(
+                "ML-short trigger failed",
+                symbol=symbol,
+                error=str(e),
+            )
+
     async def _should_send_to_user(
         self,
         user_id: int,
@@ -217,6 +238,7 @@ class AlertManager:
 
         await self._set_last_signal_ts()
         await self._trigger_auto_short(symbol, risk_score)
+        await self._trigger_ml_short(symbol, risk_score)
 
         for user_id in user_ids:
             try:

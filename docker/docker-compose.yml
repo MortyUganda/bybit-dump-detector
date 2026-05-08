@@ -109,6 +109,32 @@ services:
       retries: 3
       start_period: 30s
 
+  # ─── ML-Short watcher ─────────────────────────────────────────
+  ml_short:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: dd_ml_short
+    restart: unless-stopped
+    command: python -m app.main ml_short
+    env_file: ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../logs:/app/logs
+      - ../models:/app/models
+    environment:
+      SERVICE_NAME: ml_short
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis as r, os; c = r.from_url(os.environ.get('REDIS_URL','redis://redis:6379')); c.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   # ─── Migration runner (runs once then exits) ─────────────────
   migrate:
     build:

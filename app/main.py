@@ -75,6 +75,7 @@ async def run_analyzer() -> None:
     from app.services.analyzer import AnalyzerService
     from app.services.auto_short_service import AutoShortService
     from app.services.ingestion import IngestionService
+    from app.services.ml_short_service import MlShortService
     from app.services.monitor_service import MonitorService
 
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
@@ -98,6 +99,12 @@ async def run_analyzer() -> None:
     )
     await auto_short.restore_active_trades()
 
+    ml_short = MlShortService(
+        redis=redis_client,
+        bot=bot,
+        rest_client=rest,
+    )
+
     monitor = MonitorService(redis=redis_client, bot=bot)
     await monitor.start()
 
@@ -105,6 +112,7 @@ async def run_analyzer() -> None:
         bot=bot,
         auto_short_service=auto_short,
         redis=redis_client,
+        ml_short_service=ml_short,
     )
     analyzer = AnalyzerService(
         ingestion=ingestion,
@@ -130,6 +138,12 @@ async def run_analyzer() -> None:
         await redis_client.aclose()
 
 
+async def run_ml_short() -> None:
+    """Запуск ML-Short watcher сервиса."""
+    from app.services.ml_short_runner import main as ml_short_main
+    await ml_short_main()
+
+
 async def run_all() -> None:
     """Run all services in one process (development mode only)."""
     logger.warning("Running ALL services in single process — dev mode only!")
@@ -146,6 +160,7 @@ def main() -> None:
         "bot": run_bot,
         "ingestion": run_ingestion,
         "analyzer": run_analyzer,
+        "ml_short": run_ml_short,
         "all": run_all,
     }
 
