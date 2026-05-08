@@ -119,9 +119,9 @@ class CoinFeatures:
     volume_decline_after_spike: bool = False
 
     # ── Orderbook features ────────────────────────────────────────
-    ob_imbalance: float | None = None      # (bid_depth - ask_depth) / total — in [-1, 1]
-    bid_depth_usdt: float | None = None    # total bid depth in USDT (top 10 levels)
-    ask_depth_usdt: float | None = None
+    ob_imbalance: float = 0.0     # (bid_depth - ask_depth) / total — in [-1, 1]
+    bid_depth_usdt: float = 0.0   # total bid depth in USDT (top 10 levels)
+    ask_depth_usdt: float = 0.0 
     spread_pct: float | None = None         # (best_ask - best_bid) / mid_price * 100
     bid_depth_change_5m: float | None = None  # % change in bid depth (negative = thinning)
 
@@ -348,30 +348,37 @@ class FeatureCalculator:
         return 0.0
 
     def _compute_zscore_features(self, f: CoinFeatures) -> None:
-        """Обновить deque'и истории и посчитать z-score."""
-        # Append current values to history
-        self._hist_spread_pct.append(f.spread_pct)
-        self._hist_bid_depth_change_5m.append(f.bid_depth_change_5m)
-        self._hist_realized_vol_1h.append(f.realized_vol_1h)
-        if f.volume_24h_usdt > 0:
-            self._hist_volume_24h_usdt.append(f.volume_24h_usdt)
-        self._hist_oi_change_pct.append(f.oi_change_pct)
+        """Обновить deque'и истории и посчитать z-score.
+        Пропускаем None-значения — не добавляем в историю и не считаем z-score.
+        """
+        # Append current values to history (только если не None)
+        if f.spread_pct is not None:
+            self._hist_spread_pct.append(f.spread_pct)
+            f.spread_pct_z = self._zscore(f.spread_pct, self._hist_spread_pct)
 
-        # Compute z-scores
-        f.spread_pct_z = self._zscore(f.spread_pct, self._hist_spread_pct)
-        f.bid_depth_change_5m_z = self._zscore(
-            f.bid_depth_change_5m, self._hist_bid_depth_change_5m,
-        )
-        f.realized_vol_1h_z = self._zscore(
-            f.realized_vol_1h, self._hist_realized_vol_1h,
-        )
-        if f.volume_24h_usdt > 0:
+        if f.bid_depth_change_5m is not None:
+            self._hist_bid_depth_change_5m.append(f.bid_depth_change_5m)
+            f.bid_depth_change_5m_z = self._zscore(
+                f.bid_depth_change_5m, self._hist_bid_depth_change_5m,
+            )
+
+        if f.realized_vol_1h is not None:
+            self._hist_realized_vol_1h.append(f.realized_vol_1h)
+            f.realized_vol_1h_z = self._zscore(
+                f.realized_vol_1h, self._hist_realized_vol_1h,
+            )
+
+        if f.volume_24h_usdt is not None and f.volume_24h_usdt > 0:
+            self._hist_volume_24h_usdt.append(f.volume_24h_usdt)
             f.volume_24h_usdt_z = self._zscore(
                 f.volume_24h_usdt, self._hist_volume_24h_usdt,
             )
-        f.oi_change_pct_z = self._zscore(
-            f.oi_change_pct, self._hist_oi_change_pct,
-        )
+
+        if f.oi_change_pct is not None:
+            self._hist_oi_change_pct.append(f.oi_change_pct)
+            f.oi_change_pct_z = self._zscore(
+                f.oi_change_pct, self._hist_oi_change_pct,
+            )
 
     async def save_to_redis(self, redis) -> None:
         """Сохранить свечи в Redis для восстановления при перезапуске."""
