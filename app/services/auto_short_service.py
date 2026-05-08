@@ -708,7 +708,7 @@ class AutoShortService:
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=current_price,
+                    entry_price=current_price,
                     price_change_pct=price_change_pct,
                     score=current_score,
                     reason="price_dropped",
@@ -736,7 +736,7 @@ class AutoShortService:
                 await self._notify_entry_canceled(
                     symbol=symbol,
                     signal_price=signal_price,
-                    current_price=current_price,
+                    entry_price=current_price,
                     price_change_pct=price_change_pct,
                     score=current_score,
                     reason="price_too_high",
@@ -773,7 +773,7 @@ class AutoShortService:
         await self._notify_entry_canceled(
             symbol=symbol,
             signal_price=signal_price,
-            current_price=last_price or current_price,
+            entry_price=last_price or current_price,
             price_change_pct=last_change,
             score=last_score,
             reason="timeout",
