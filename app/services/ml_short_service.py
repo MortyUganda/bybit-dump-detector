@@ -52,6 +52,11 @@ ML_DECISION_FEATURES = [
     "day_of_week",
     "session",
     "is_weekend",
+    # Engineered: symbol-specific (Group 1) — из Redis
+    "symbol_recent_wr_20",
+    "symbol_recent_wr_5",
+    "symbol_trades_count_24h",
+    "symbol_avg_pnl_5",
 ]
 
 # TP/SL по спеке — 10%/10%, не менять
@@ -106,17 +111,31 @@ class MlShortService:
             )
         return self._ml_model
 
+    # ── Group 1 stats из Redis ────────────────────────────────────────
+
+    async def _get_symbol_stats(self, symbol: str) -> dict[str, str]:
+        """Читает Group 1 stats из Redis (дефолты при miss)."""
+        try:
+            stats = await self._redis.hgetall(f"ml_features:symbol_stats:{symbol}")
+            if stats:
+                return stats
+        except Exception:
+            pass
+        return {}
+
     # ── Построение вектора фичей (идентично auto_short) ─────────────
 
     def _build_ml_features(
         self,
         risk_score: RiskScore,
         adverse_move_pct: float | None = None,
+        symbol_stats: dict[str, str] | None = None,
     ) -> list[float]:
         """Собирает вектор фичей для инференса decision-модели."""
         features = risk_score.features_snapshot
         factor_map = {f.name: f.raw_value for f in risk_score.factors}
         now = datetime.now(timezone.utc)
+        ss = symbol_stats or {}
 
         def _f(val: Any) -> float:
             if val is None:
@@ -179,15 +198,21 @@ class MlShortService:
             _f(now.weekday()),
             _f(0 if now.hour < 8 else 1 if now.hour < 13 else 2 if now.hour < 17 else 3),
             _f(1 if now.weekday() >= 5 else 0),
+            # Engineered: symbol-specific (Group 1) — из Redis
+            _f(ss.get("recent_wr_20", 0.5)),
+            _f(ss.get("recent_wr_5", 0.5)),
+            _f(ss.get("trades_count_24h", 0)),
+            _f(ss.get("avg_pnl_5", 0.0)),
         ]
 
     def _build_features_snapshot_json(
         self,
         risk_score: RiskScore,
         adverse_move_pct: float | None = None,
+        symbol_stats: dict[str, str] | None = None,
     ) -> dict:
         """JSON-snapshot фичей для оффлайн-анализа."""
-        vec = self._build_ml_features(risk_score, adverse_move_pct)
+        vec = self._build_ml_features(risk_score, adverse_move_pct, symbol_stats)
         return dict(zip(ML_DECISION_FEATURES, vec))
 
     # ── Получение цены ──────────────────────────────────────────────
@@ -256,7 +281,17 @@ class MlShortService:
             )
             return
 
-        # 2. Загрузить модель
+        # 2. Загрузить модель + Group 1 stats из Redis
+        symbol_stats = await self._get_symbol_stats(symbol)
+        logger.debug(
+            "Group 1 stats: wr20=%s, wr5=%s, count24h=%s, avg_pnl5=%s",
+            symbol_stats.get("recent_wr_20", "miss"),
+            symbol_stats.get("recent_wr_5", "miss"),
+            symbol_stats.get("trades_count_24h", "miss"),
+            symbol_stats.get("avg_pnl_5", "miss"),
+            symbol=symbol,
+        )
+
         model = self._ensure_ml_model()
         if model is None:
             await self._save_signal(
@@ -267,7 +302,9 @@ class MlShortService:
                 ml_proba=None,
                 ml_decision="no_model",
                 blocked_reason=None,
-                features_snapshot=self._build_features_snapshot_json(risk_score),
+                features_snapshot=self._build_features_snapshot_json(
+                    risk_score, symbol_stats=symbol_stats,
+                ),
             )
             logger.info(
                 "ML-short: модель не найдена, пропускаю сигнал",
@@ -276,7 +313,7 @@ class MlShortService:
             return
 
         # 3. Собрать фичи и получить proba
-        feature_vec = self._build_ml_features(risk_score)
+        feature_vec = self._build_ml_features(risk_score, symbol_stats=symbol_stats)
         try:
             import numpy as np
             X = np.array([feature_vec], dtype=np.float64)
@@ -295,11 +332,15 @@ class MlShortService:
                 ml_proba=None,
                 ml_decision="no_model",
                 blocked_reason="inference_error",
-                features_snapshot=self._build_features_snapshot_json(risk_score),
+                features_snapshot=self._build_features_snapshot_json(
+                    risk_score, symbol_stats=symbol_stats,
+                ),
             )
             return
 
-        features_json = self._build_features_snapshot_json(risk_score)
+        features_json = self._build_features_snapshot_json(
+            risk_score, symbol_stats=symbol_stats,
+        )
 
         # 4. Фильтры (в порядке из спеки)
 
@@ -372,7 +413,9 @@ class MlShortService:
             threshold = cfg.get("adverse_move_threshold_pct", 0.2)
             if adverse_move_pct >= threshold:
                 # Пересобрать фичи с adverse_move
-                features_json = self._build_features_snapshot_json(risk_score, adverse_move_pct)
+                features_json = self._build_features_snapshot_json(
+                    risk_score, adverse_move_pct, symbol_stats=symbol_stats,
+                )
                 await self._save_signal(
                     signal_ts=now, symbol=symbol, signal_price=signal_price,
                     score=risk_score.score, ml_proba=proba,

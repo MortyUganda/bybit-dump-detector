@@ -310,14 +310,37 @@ def intersect_features(dfs: list[pd.DataFrame]) -> list[str]:
 
 def merge_baseline(df_auto: pd.DataFrame, df_canceled: pd.DataFrame,
                    df_all_opened: pd.DataFrame | None) -> tuple[pd.DataFrame, list[str]]:
-    """Baseline-датасет: объединение всех источников (как в v1)."""
+    """Baseline-датасет: объединение всех источников (как в v1) + Group 1/2."""
     all_dfs = [df_auto, df_canceled]
     if df_all_opened is not None and len(df_all_opened) > 0:
         all_dfs.append(df_all_opened)
     feature_cols = intersect_features(all_dfs)
-    cols = feature_cols + ["signal_ts", TARGET, "source"]
-    df = pd.concat([d[cols] for d in all_dfs], ignore_index=True)
+
+    # Для Group 1 нужны: symbol, entry_ts, pnl_pct (опционально)
+    extra_required = ["symbol", "entry_ts"]
+    extra_optional = ["pnl_pct"]
+    keep = list(set(
+        feature_cols + ["signal_ts", TARGET, "source"]
+        + extra_required + extra_optional
+    ))
+    keep = [
+        c for c in keep
+        if all(c in d.columns for d in all_dfs)
+        or c in extra_optional
+    ]
+
+    df = pd.concat(
+        [d[[c for c in keep if c in d.columns]] for d in all_dfs],
+        ignore_index=True,
+    )
     df = df.sort_values("signal_ts").reset_index(drop=True)
+
+    # Group 1 + Group 2 через общий feature engineering
+    df = add_eng_features(df, include_funding=False)
+    for f in GROUP1_FEATURES + GROUP2_FEATURES:
+        if f in df.columns and f not in feature_cols:
+            feature_cols.append(f)
+
     df[feature_cols] = df[feature_cols].fillna(0.0)
     return df, feature_cols
 
@@ -586,7 +609,7 @@ def main() -> None:
     print(f"\nИсточники: auto_shorts (N={len(df_auto)}), "
           f"canceled_signals (N={len(df_canceled)}) "
           f"[all_opened: {ao_status}]")
-    print("Engineered features: EXP 4/5 — Group 1+2 "
+    print("Engineered features: symbol-specific (Group 1) + time-of-day (Group 2) "
           "[funding (Group 3): skipped — 83% NaN]")
 
     df_clean = load_auto_clean(auto_csv)

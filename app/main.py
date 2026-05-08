@@ -77,6 +77,7 @@ async def run_analyzer() -> None:
     from app.services.ingestion import IngestionService
     from app.services.ml_short_service import MlShortService
     from app.services.monitor_service import MonitorService
+    from app.services.symbol_stats_updater import SymbolStatsUpdater
 
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
 
@@ -121,6 +122,11 @@ async def run_analyzer() -> None:
     )
     await analyzer.start()
 
+    # Фоновый пересчёт per-symbol ML-статистики → Redis (Group 1)
+    symbol_stats_updater = SymbolStatsUpdater(redis=redis_client)
+    await symbol_stats_updater.recalculate_all()  # первый запуск сразу
+    stats_task = asyncio.create_task(symbol_stats_updater.run_loop())
+
     logger.info("Analyzer service running — Ctrl+C to stop")
 
     try:
@@ -129,6 +135,7 @@ async def run_analyzer() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        stats_task.cancel()
         await monitor.stop()
         await analyzer.stop()
         await alert_mgr.close()

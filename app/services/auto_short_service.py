@@ -52,6 +52,11 @@ ML_DECISION_FEATURES = [
     "day_of_week",
     "session",
     "is_weekend",
+    # Engineered: symbol-specific (Group 1) — из Redis
+    "symbol_recent_wr_20",
+    "symbol_recent_wr_5",
+    "symbol_trades_count_24h",
+    "symbol_avg_pnl_5",
 ]
 
 # ── Fallback defaults ─────────────────────────────────────────────
@@ -176,11 +181,22 @@ class AutoShortService:
             )
         return self._ml_decision_model
 
+    async def _get_symbol_stats(self, symbol: str) -> dict[str, str]:
+        """Читает Group 1 stats из Redis (sync fallback на дефолты)."""
+        try:
+            stats = await self._redis.hgetall(f"ml_features:symbol_stats:{symbol}")
+            if stats:
+                return stats
+        except Exception:
+            pass
+        return {}
+
     def _build_ml_features(
         self,
         risk_score: RiskScore,
         ob_snap: dict | None,
         adverse_move_pct: float | None,
+        symbol_stats: dict[str, str] | None = None,
     ) -> list[float]:
         """Собирает вектор фичей для инференса decision-модели.
 
@@ -191,6 +207,7 @@ class AutoShortService:
         features = risk_score.features_snapshot
         factor_map = {f.name: f.raw_value for f in risk_score.factors}
         now = datetime.now(timezone.utc)
+        ss = symbol_stats or {}
 
         def _f(val: Any) -> float:
             if val is None:
@@ -260,6 +277,11 @@ class AutoShortService:
             _f(now.weekday()),
             _f(0 if now.hour < 8 else 1 if now.hour < 13 else 2 if now.hour < 17 else 3),
             _f(1 if now.weekday() >= 5 else 0),
+            # Engineered: symbol-specific (Group 1) — из Redis
+            _f(ss.get("recent_wr_20", 0.5)),
+            _f(ss.get("recent_wr_5", 0.5)),
+            _f(ss.get("trades_count_24h", 0)),
+            _f(ss.get("avg_pnl_5", 0.0)),
         ]
 
     async def _ml_gate_check(
@@ -288,9 +310,20 @@ class AutoShortService:
 
         try:
             import numpy as np
-            feature_vec = self._build_ml_features(risk_score, ob_snap, adverse_move_pct)
+            symbol_stats = await self._get_symbol_stats(risk_score.symbol)
+            feature_vec = self._build_ml_features(
+                risk_score, ob_snap, adverse_move_pct, symbol_stats,
+            )
             X = np.array([feature_vec], dtype=np.float64)
             proba = float(model.predict_proba(X)[0][1])
+            logger.debug(
+                "Group 1 stats: wr20=%s, wr5=%s, count24h=%s, avg_pnl5=%s",
+                symbol_stats.get("recent_wr_20", "miss"),
+                symbol_stats.get("recent_wr_5", "miss"),
+                symbol_stats.get("trades_count_24h", "miss"),
+                symbol_stats.get("avg_pnl_5", "miss"),
+                symbol=risk_score.symbol,
+            )
         except Exception as exc:
             logger.warning(
                 "ML-gate inference failed — fail-open",

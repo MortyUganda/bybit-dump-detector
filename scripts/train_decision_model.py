@@ -28,6 +28,7 @@ from sklearn.model_selection import TimeSeriesSplit
 
 from scripts._feature_engineering import (
     add_engineered_features as add_eng_features,
+    GROUP1_FEATURES,
     GROUP2_FEATURES,
 )
 
@@ -187,23 +188,32 @@ def merge_datasets(
     print(f"\nОбщих фичей: {len(feature_cols)}")
 
     # Для symbol-specific фичей нужны symbol, entry_ts, pnl_pct
-    extra_cols_for_eng = ["symbol", "entry_ts", "pnl_pct"]
-    keep_cols = list(set(feature_cols + ["signal_ts", TARGET, "source"] + extra_cols_for_eng))
-    keep_cols = [c for c in keep_cols if all(c in d.columns for d in all_dfs)]
+    # pnl_pct может отсутствовать в canceled_signals — добавляем опционально
+    extra_cols_required = ["symbol", "entry_ts"]
+    extra_cols_optional = ["pnl_pct"]  # может быть не во всех источниках
+    keep_cols = list(set(
+        feature_cols + ["signal_ts", TARGET, "source"]
+        + extra_cols_required + extra_cols_optional
+    ))
+    # Обязательные — во всех; опциональные — хотя бы в одном
+    keep_cols = [
+        c for c in keep_cols
+        if all(c in d.columns for d in all_dfs)
+        or c in extra_cols_optional
+    ]
 
     df = pd.concat(
-        [d[keep_cols] for d in all_dfs],
+        [d[[c for c in keep_cols if c in d.columns]] for d in all_dfs],
         ignore_index=True,
     )
     df = df.sort_values("signal_ts").reset_index(drop=True)
 
     # ── Engineered features ──
-    # Group 1 (symbol-specific) пропускаем: требует async DB-запросов при inference
-    # Group 2 (time-of-day) включаем: тривиально считается при inference
-    # Group 3 (funding) пропускаем: 83% NaN
+    # Group 1 (symbol-specific) — включаем: inference читает из Redis
+    # Group 2 (time-of-day) — включаем: тривиально считается при inference
+    # Group 3 (funding) — пропускаем: 83% NaN
     df = add_eng_features(df, include_funding=False)
-    # Добавляем ТОЛЬКО Group 2 (time-of-day) — синхронизирован с inference
-    for f in GROUP2_FEATURES:
+    for f in GROUP1_FEATURES + GROUP2_FEATURES:
         if f in df.columns and f not in feature_cols:
             feature_cols.append(f)
 
@@ -350,9 +360,8 @@ def main() -> None:
     print(f"\nИсточники: auto_shorts (N={len(df_e)}), "
           f"canceled_signals (N={len(df_c)}) "
           f"[all_opened: {ao_status}]")
-    print("Engineered features: time-of-day (Group 2) "
-          "[symbol-specific (Group 1): skipped — нет в inference, "
-          "funding (Group 3): skipped — 83% NaN]")
+    print("Engineered features: symbol-specific (Group 1) + time-of-day (Group 2) "
+          "[funding (Group 3): skipped — 83% NaN]")
 
     df, feature_cols = merge_datasets(df_e, df_c, df_ao)
     print(f"Итого фичей: {len(feature_cols)}")

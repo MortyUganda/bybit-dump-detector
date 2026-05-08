@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     feature_window_medium: int = 15  # minutes
     feature_window_long: int = 60    # minutes
 
+    # ── Symbol Stats Updater (Group 1 ML-фичи) ──────────────────
+    symbol_stats_refresh_sec: int = 60  # интервал пересчёта per-symbol stats
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

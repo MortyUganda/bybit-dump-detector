@@ -49,7 +49,12 @@ def _add_symbol_features(df: pd.DataFrame) -> pd.DataFrame:
             label_col = c
             break
 
-    pnl_col = "pnl_pct" if "pnl_pct" in df.columns else None
+    # pnl_pct — основной источник PnL; fallback на label (1/0) как прокси
+    pnl_col = None
+    for c in ("pnl_pct", "label", "ml_label"):
+        if c in df.columns:
+            pnl_col = c
+            break
 
     # Инициализируем результаты NaN
     df["symbol_recent_wr_20"] = np.nan
