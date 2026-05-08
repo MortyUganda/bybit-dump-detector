@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import pickle
 import sys
 from pathlib import Path
@@ -407,6 +408,24 @@ def main() -> None:
 
     with open(model_path, "wb") as f:
         pickle.dump(clf, f)
+
+    # ── Манифест фичей (JSON рядом с .pkl) ──
+    trained_features = list(X.columns)
+    manifest_data = {
+        "features": trained_features,
+        "n_features": len(trained_features),
+        "saved_at": datetime.now().isoformat(),
+        "model_file": model_path.name,
+    }
+
+    manifest_ts = model_dir / f"decision_model_{date.today()}_{current_time}_features.json"
+    manifest_prod = model_dir / "decision_model_features.json"
+
+    for path in (manifest_ts, manifest_prod):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(manifest_data, f, ensure_ascii=False, indent=2)
+
+    print(f"✅ Манифест фичей сохранён: {manifest_prod} (фичей: {len(trained_features)})")
 
     print(f"\n✅ Модель сохранена: {model_path} "
           f"(n={len(X)}, AUC={res['mean_auc']:.3f})")

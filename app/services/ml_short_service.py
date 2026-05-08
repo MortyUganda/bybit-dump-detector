@@ -24,8 +24,9 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 DECISION_MODEL_PATH = Path("models/decision_model.pkl")
+DECISION_MODEL_FEATURES_PATH = Path("models/decision_model_features.json")
 
-# Фичи из auto_short_service.ML_DECISION_FEATURES (COMMON_FEATURES)
+# Фичи из auto_short_service.ML_DECISION_FEATURES (COMMON_FEATURES) — хардкод-fallback
 ML_DECISION_FEATURES = [
     "score",
     "f_rsi", "f_rsi_5m", "f_vwap_extension", "f_volume_zscore",
@@ -81,6 +82,9 @@ class MlShortService:
         self._ml_model: Any = None
         self._ml_model_loaded: bool = False
         self._ml_model_warned: bool = False
+        # Список фичей из манифеста (или хардкод-fallback)
+        self._ml_features: list[str] = ML_DECISION_FEATURES
+        self._ml_features_warned: set[str] = set()
 
     # ── ML модель (lazy загрузка с кэшем) ──────────────────────────
 
@@ -109,6 +113,32 @@ class MlShortService:
                 "Не удалось загрузить ML decision модель",
                 error=str(exc),
             )
+            return self._ml_model
+
+        # Загрузка манифеста фичей
+        if DECISION_MODEL_FEATURES_PATH.exists():
+            try:
+                with open(DECISION_MODEL_FEATURES_PATH, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                self._ml_features = manifest["features"]
+                logger.info(
+                    "Список фичей загружен из манифеста",
+                    n_features=len(self._ml_features),
+                    path=str(DECISION_MODEL_FEATURES_PATH),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Ошибка чтения манифеста — fallback на хардкод",
+                    error=str(exc),
+                )
+                self._ml_features = ML_DECISION_FEATURES
+        else:
+            logger.warning(
+                "Манифест фичей не найден — fallback на хардкод (возможен рассинхрон!)",
+                path=str(DECISION_MODEL_FEATURES_PATH),
+            )
+            self._ml_features = ML_DECISION_FEATURES
+
         return self._ml_model
 
     # ── Group 1 stats из Redis ────────────────────────────────────────
@@ -131,7 +161,11 @@ class MlShortService:
         adverse_move_pct: float | None = None,
         symbol_stats: dict[str, str] | None = None,
     ) -> list[float]:
-        """Собирает вектор фичей для инференса decision-модели."""
+        """Собирает вектор фичей для инференса decision-модели.
+
+        Все фичи собираются в dict {name: value}, потом возвращается
+        вектор в порядке self._ml_features (из манифеста или хардкода).
+        """
         features = risk_score.features_snapshot
         factor_map = {f.name: f.raw_value for f in risk_score.factors}
         now = datetime.now(timezone.utc)
@@ -145,65 +179,88 @@ class MlShortService:
             except (ValueError, TypeError):
                 return 0.0
 
-        return [
-            _f(risk_score.score),
-            _f(factor_map.get("rsi_1m") or factor_map.get("rsi")),
-            _f(factor_map.get("rsi_5m")),
-            _f(factor_map.get("vwap_extension")),
-            _f(factor_map.get("volume_zscore")),
-            _f(factor_map.get("trade_imbalance")),
-            _f(factor_map.get("large_buy_cluster")),
-            _f(factor_map.get("large_sell_cluster")),
-            _f(factor_map.get("price_acceleration")),
-            _f(factor_map.get("consecutive_greens")),
-            _f(factor_map.get("ob_bid_thinning")),
-            _f(factor_map.get("spread_expansion")),
-            _f(factor_map.get("momentum_loss")),
-            _f(factor_map.get("upper_wick")),
-            _f(factor_map.get("funding_rate")),
-            _f(factor_map.get("cvd_divergence")),
-            _f(factor_map.get("liquidation_cascade")),
-            _f(features.realized_vol_1h if features else None),
-            _f(features.volume_24h_usdt if features else None),
-            _f(features.price_change_5m if features else None),
-            _f(features.price_change_1h if features else None),
-            _f(features.spread_pct if features else None),
-            _f(features.bid_depth_change_5m if features else None),
-            _f(features.btc_change_15m if features else None),
-            _f(features.funding_rate if features else None),
-            _f(features.oi_change_pct if features else None),
-            _f(features.trend_context.trend_strength if features and features.trend_context else None),
-            _f(getattr(features, 'ob_bid_volume_top10', None) if features else None),
-            _f(getattr(features, 'ob_ask_volume_top10', None) if features else None),
-            _f(getattr(features, 'ob_imbalance_top10', None) if features else None),
-            _f(getattr(features, 'ob_spread_bps', None) if features else None),
-            _f(getattr(features, 'ob_bid_wall_price', None) if features else None),
-            _f(getattr(features, 'ob_bid_wall_size', None) if features else None),
-            _f(getattr(features, 'ob_ask_wall_price', None) if features else None),
-            _f(getattr(features, 'ob_ask_wall_size', None) if features else None),
-            _f(getattr(features, 'spread_pct_z', None) if features else None),
-            _f(getattr(features, 'bid_depth_change_5m_z', None) if features else None),
-            _f(getattr(features, 'realized_vol_1h_z', None) if features else None),
-            _f(getattr(features, 'volume_24h_usdt_z', None) if features else None),
-            _f(getattr(features, 'oi_change_pct_z', None) if features else None),
-            _f(getattr(features, 'btc_change_1h', None) if features else None),
-            _f(getattr(features, 'btc_change_4h', None) if features else None),
-            _f(getattr(features, 'btc_change_24h', None) if features else None),
-            _f(getattr(features, 'btc_adx_1h', None) if features else None),
-            _f(getattr(features, 'btc_atr_pct_1h', None) if features else None),
-            _f(getattr(features, 'recent_wr_20', None) if features else None),
-            _f(adverse_move_pct),
+        # Собираем ВСЕ возможные фичи в dict
+        all_features: dict[str, float] = {
+            "score": _f(risk_score.score),
+            # factor-based features
+            "f_rsi": _f(factor_map.get("rsi_1m") or factor_map.get("rsi")),
+            "f_rsi_5m": _f(factor_map.get("rsi_5m")),
+            "f_vwap_extension": _f(factor_map.get("vwap_extension")),
+            "f_volume_zscore": _f(factor_map.get("volume_zscore")),
+            "f_trade_imbalance": _f(factor_map.get("trade_imbalance")),
+            "f_large_buy_cluster": _f(factor_map.get("large_buy_cluster")),
+            "f_large_sell_cluster": _f(factor_map.get("large_sell_cluster")),
+            "f_price_acceleration": _f(factor_map.get("price_acceleration")),
+            "f_consecutive_greens": _f(factor_map.get("consecutive_greens")),
+            "f_ob_bid_thinning": _f(factor_map.get("ob_bid_thinning")),
+            "f_spread_expansion": _f(factor_map.get("spread_expansion")),
+            "f_momentum_loss": _f(factor_map.get("momentum_loss")),
+            "f_upper_wick": _f(factor_map.get("upper_wick")),
+            "f_funding_rate": _f(factor_map.get("funding_rate")),
+            "f_cvd_divergence": _f(factor_map.get("cvd_divergence")),
+            "f_liquidation_cascade": _f(factor_map.get("liquidation_cascade")),
+            # features from CoinFeatures
+            "realized_vol_1h": _f(features.realized_vol_1h if features else None),
+            "volume_24h_usdt": _f(features.volume_24h_usdt if features else None),
+            "price_change_5m": _f(features.price_change_5m if features else None),
+            "price_change_1h": _f(features.price_change_1h if features else None),
+            "spread_pct": _f(features.spread_pct if features else None),
+            "bid_depth_change_5m": _f(features.bid_depth_change_5m if features else None),
+            "btc_change_15m": _f(features.btc_change_15m if features else None),
+            "funding_rate_at_signal": _f(features.funding_rate if features else None),
+            "oi_change_pct_at_signal": _f(features.oi_change_pct if features else None),
+            "trend_strength_1h": _f(features.trend_context.trend_strength if features and features.trend_context else None),
+            # OB snapshot features
+            "ob_bid_volume_top10": _f(getattr(features, 'ob_bid_volume_top10', None) if features else None),
+            "ob_ask_volume_top10": _f(getattr(features, 'ob_ask_volume_top10', None) if features else None),
+            "ob_imbalance_top10": _f(getattr(features, 'ob_imbalance_top10', None) if features else None),
+            "ob_spread_bps": _f(getattr(features, 'ob_spread_bps', None) if features else None),
+            "ob_bid_wall_price": _f(getattr(features, 'ob_bid_wall_price', None) if features else None),
+            "ob_bid_wall_size": _f(getattr(features, 'ob_bid_wall_size', None) if features else None),
+            "ob_ask_wall_price": _f(getattr(features, 'ob_ask_wall_price', None) if features else None),
+            "ob_ask_wall_size": _f(getattr(features, 'ob_ask_wall_size', None) if features else None),
+            # Z-score features
+            "spread_pct_z": _f(getattr(features, 'spread_pct_z', None) if features else None),
+            "bid_depth_change_5m_z": _f(getattr(features, 'bid_depth_change_5m_z', None) if features else None),
+            "realized_vol_1h_z": _f(getattr(features, 'realized_vol_1h_z', None) if features else None),
+            "volume_24h_usdt_z": _f(getattr(features, 'volume_24h_usdt_z', None) if features else None),
+            "oi_change_pct_z": _f(getattr(features, 'oi_change_pct_z', None) if features else None),
+            # BTC regime features
+            "btc_change_1h": _f(getattr(features, 'btc_change_1h', None) if features else None),
+            "btc_change_4h": _f(getattr(features, 'btc_change_4h', None) if features else None),
+            "btc_change_24h": _f(getattr(features, 'btc_change_24h', None) if features else None),
+            "btc_adx_1h": _f(getattr(features, 'btc_adx_1h', None) if features else None),
+            "btc_atr_pct_1h": _f(getattr(features, 'btc_atr_pct_1h', None) if features else None),
+            # Context
+            "recent_wr_20": _f(getattr(features, 'recent_wr_20', None) if features else None),
+            # Adverse move
+            "adverse_move_pct": _f(adverse_move_pct),
             # Engineered: time-of-day (Group 2)
-            _f(now.hour),
-            _f(now.weekday()),
-            _f(0 if now.hour < 8 else 1 if now.hour < 13 else 2 if now.hour < 17 else 3),
-            _f(1 if now.weekday() >= 5 else 0),
+            "hour_of_day": _f(now.hour),
+            "day_of_week": _f(now.weekday()),
+            "session": _f(0 if now.hour < 8 else 1 if now.hour < 13 else 2 if now.hour < 17 else 3),
+            "is_weekend": _f(1 if now.weekday() >= 5 else 0),
             # Engineered: symbol-specific (Group 1) — из Redis
-            _f(ss.get("recent_wr_20", 0.5)),
-            _f(ss.get("recent_wr_5", 0.5)),
-            _f(ss.get("trades_count_24h", 0)),
-            _f(ss.get("avg_pnl_5", 0.0)),
-        ]
+            "symbol_recent_wr_20": _f(ss.get("recent_wr_20", 0.5)),
+            "symbol_recent_wr_5": _f(ss.get("recent_wr_5", 0.5)),
+            "symbol_trades_count_24h": _f(ss.get("trades_count_24h", 0)),
+            "symbol_avg_pnl_5": _f(ss.get("avg_pnl_5", 0.0)),
+        }
+
+        # Вернуть вектор в порядке self._ml_features (из манифеста)
+        result: list[float] = []
+        for name in self._ml_features:
+            if name in all_features:
+                result.append(all_features[name])
+            else:
+                result.append(0.0)
+                if name not in self._ml_features_warned:
+                    self._ml_features_warned.add(name)
+                    logger.warning(
+                        "Фича из манифеста отсутствует в коде — fallback 0.0",
+                        feature=name,
+                    )
+        return result
 
     def _build_features_snapshot_json(
         self,
@@ -213,7 +270,7 @@ class MlShortService:
     ) -> dict:
         """JSON-snapshot фичей для оффлайн-анализа."""
         vec = self._build_ml_features(risk_score, adverse_move_pct, symbol_stats)
-        return dict(zip(ML_DECISION_FEATURES, vec))
+        return dict(zip(self._ml_features, vec))
 
     # ── Получение цены ──────────────────────────────────────────────
 
@@ -330,8 +387,8 @@ class MlShortService:
                 signal_price=signal_price,
                 score=risk_score.score,
                 ml_proba=None,
-                ml_decision="no_model",
-                blocked_reason="inference_error",
+                ml_decision="inference_error",
+                blocked_reason=str(exc)[:200],
                 features_snapshot=self._build_features_snapshot_json(
                     risk_score, symbol_stats=symbol_stats,
                 ),

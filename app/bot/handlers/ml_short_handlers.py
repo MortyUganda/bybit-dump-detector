@@ -120,7 +120,7 @@ async def _get_status_text() -> str:
 
     # Статистика из БД
     open_count = 0
-    signals_24h = {"total": 0, "opened": 0, "blocked_low_proba": 0, "blocked_other": 0, "disabled": 0, "no_model": 0}
+    signals_24h = {"total": 0, "opened": 0, "blocked_low_proba": 0, "blocked_other": 0, "disabled": 0, "no_model": 0, "inference_error": 0}
     try:
         from sqlalchemy import text
         from app.db.session import AsyncSessionLocal
@@ -162,7 +162,8 @@ async def _get_status_text() -> str:
         f"  🔻 Low proba: {signals_24h['blocked_low_proba']}\n"
         f"  🚫 Blocked: {signals_24h['blocked_other']}\n"
         f"  ⏸ Disabled: {signals_24h['disabled']}\n"
-        f"  🤷 No model: {signals_24h['no_model']}\n\n"
+        f"  🤷 No model: {signals_24h['no_model']}\n"
+        f"  ⚠️ Inference error: {signals_24h['inference_error']}\n\n"
         f"<i>Настройки: min_score={cfg['min_score_to_enter']}, "
         f"max_concurrent={cfg['max_concurrent_positions']}, "
         f"delay={cfg['delay_seconds']}s</i>"
