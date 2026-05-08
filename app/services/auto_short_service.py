@@ -852,34 +852,18 @@ class AutoShortService:
                 f"{detail}"
             )
 
-            logger.info(
-                "Entry cancel notify: pre-send",
-                symbol=symbol,
-                reason=reason,
-                user_ids=list(user_ids),
-                text_len=len(text),
-                bot_id=id(self._bot),
-            )
             for user_id in user_ids:
                 try:
-                    sent = await self._bot.send_message(
+                    await self._bot.send_message(
                         chat_id=user_id,
                         text=text,
                         parse_mode="HTML",
-                    )
-                    logger.info(
-                        "Entry cancel notify: send_message ok",
-                        symbol=symbol,
-                        reason=reason,
-                        user_id=user_id,
-                        message_id=getattr(sent, "message_id", None),
                     )
                 except Exception as e:
                     logger.warning(
                         "Entry cancel notify failed",
                         user_id=user_id,
                         error=str(e),
-                        error_type=type(e).__name__,
                     )
 
             logger.info(
