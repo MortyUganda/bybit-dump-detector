@@ -80,6 +80,7 @@ services:
         condition: service_healthy
     volumes:
       - ../logs_dev2:/app/logs
+      - ../models:/app/models
     environment:
       SERVICE_NAME: analyzer
     healthcheck:
@@ -106,6 +107,7 @@ services:
         condition: service_healthy
     volumes:
       - ../logs_dev2:/app/logs
+      - ../models:/app/models
     environment:
       SERVICE_NAME: bot
     healthcheck:
