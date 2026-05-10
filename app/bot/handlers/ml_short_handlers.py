@@ -171,7 +171,10 @@ async def _get_status_text() -> str:
 
 
 async def _get_stats_text(period: str) -> str:
-    """Статистика по закрытым позициям за период."""
+    """Статистика в стиле авто-шортов: total/open/closed + WR + PnL + best/worst + разбивка.
+
+    Период фильтрует только закрытые позиции (exit_ts), open-счетчик всегда live.
+    """
     try:
         from sqlalchemy import text
         from app.db.session import AsyncSessionLocal
@@ -190,53 +193,56 @@ async def _get_stats_text(period: str) -> str:
             r = await session.execute(
                 text("""
                     SELECT
-                        COUNT(*) as total,
-                        COUNT(*) FILTER (WHERE pnl_pct > 0) as wins,
-                        COUNT(*) FILTER (WHERE pnl_pct <= 0) as losses,
-                        AVG(pnl_pct) as avg_pnl,
-                        MAX(pnl_pct) as best_pnl,
-                        MIN(pnl_pct) as worst_pnl,
-                        COUNT(*) FILTER (WHERE close_reason = 'tp') as tp_count,
-                        COUNT(*) FILTER (WHERE close_reason = 'sl') as sl_count,
-                        COUNT(*) FILTER (WHERE close_reason = 'timeout') as timeout_count,
-                        COUNT(*) FILTER (WHERE close_reason = 'manual') as manual_count
+                        COUNT(*) FILTER (WHERE status = 'open') as open_cnt,
+                        COUNT(*) FILTER (WHERE status = 'closed' AND exit_ts > :ts) as closed_cnt,
+                        COUNT(*) FILTER (WHERE status = 'closed' AND exit_ts > :ts AND pnl_pct > 0) as wins,
+                        COUNT(*) FILTER (WHERE status = 'closed' AND exit_ts > :ts AND pnl_pct <= 0) as losses,
+                        AVG(pnl_pct) FILTER (WHERE status = 'closed' AND exit_ts > :ts) as avg_pnl,
+                        MAX(pnl_pct) FILTER (WHERE status = 'closed' AND exit_ts > :ts) as best_pnl,
+                        MIN(pnl_pct) FILTER (WHERE status = 'closed' AND exit_ts > :ts) as worst_pnl,
+                        COUNT(*) FILTER (WHERE status = 'closed' AND exit_ts > :ts AND close_reason = 'tp') as tp_count,
+                        COUNT(*) FILTER (WHERE status = 'closed' AND exit_ts > :ts AND close_reason = 'sl') as sl_count,
+                        COUNT(*) FILTER (WHERE status = 'closed' AND exit_ts > :ts AND close_reason = 'timeout') as timeout_count,
+                        COUNT(*) FILTER (WHERE status = 'closed' AND exit_ts > :ts AND close_reason = 'manual') as manual_count
                     FROM ml_short_positions
-                    WHERE status = 'closed' AND exit_ts > :ts
                 """),
                 {"ts": ts_filter},
             )
             row = r.fetchone()
 
-        if not row or row[0] == 0:
-            return (
-                f"📈 <b>Статистика ML-Short</b> ({period_label})\n\n"
-                f"<i>Данных пока нет.</i>"
-            )
+        (
+            open_cnt, closed_cnt, wins, losses, avg_pnl, best_pnl, worst_pnl,
+            tp_count, sl_count, timeout_count, manual_count,
+        ) = row
+        total = (open_cnt or 0) + (closed_cnt or 0)
 
-        total, wins, losses, avg_pnl, best_pnl, worst_pnl = row[0], row[1], row[2], row[3], row[4], row[5]
-        tp_count, sl_count, timeout_count, manual_count = row[6], row[7], row[8], row[9]
-
-        wr = (wins / total * 100) if total > 0 else 0
-        wr_emoji = "🟢" if wr >= 60 else "🟡" if wr >= 45 else "🔴"
-        avg_emoji = "🟢" if (avg_pnl or 0) > 0 else "🔴"
+        wr = (wins / closed_cnt * 100) if closed_cnt else 0.0
+        wr_emoji = "🟢" if wr >= 60 else ("🟡" if wr >= 45 else "🔴")
+        avg_val = float(avg_pnl) if avg_pnl is not None else 0.0
+        avg_emoji = "🟢" if avg_val > 0 else ("🔴" if avg_val < 0 else "⚪")
+        best_str = f"{float(best_pnl):+.2f}%" if best_pnl is not None else "—"
+        worst_str = f"{float(worst_pnl):+.2f}%" if worst_pnl is not None else "—"
 
         return (
             f"📈 <b>Статистика ML-Short</b> ({period_label})\n\n"
-            f"📊 Всего сделок: <b>{total}</b>\n"
-            f"{wr_emoji} Win rate: <b>{wr:.1f}%</b> ({wins}W / {losses}L)\n"
-            f"{avg_emoji} Средний PnL: <b>{avg_pnl or 0:+.2f}%</b>\n"
-            f"🏆 Лучшая: <b>{best_pnl or 0:+.2f}%</b>\n"
-            f"💀 Худшая: <b>{worst_pnl or 0:+.2f}%</b>\n\n"
+            f"📈 Всего сделок: <b>{total}</b>\n"
+            f"🟡 Открытых: <b>{open_cnt or 0}</b>\n"
+            f"✅ Закрытых: <b>{closed_cnt or 0}</b>\n\n"
+            f"{wr_emoji} Win rate: <b>{wr:.1f}%</b> ({wins or 0}W / {losses or 0}L)\n"
+            f"{avg_emoji} Средний P&L: <b>{avg_val:+.2f}%</b>\n\n"
+            f"🏆 Лучшая: <b>{best_str}</b>\n"
+            f"💀 Худшая: <b>{worst_str}</b>\n\n"
             f"<b>По типу закрытия:</b>\n"
-            f"  🎯 TP: {tp_count}\n"
-            f"  🛑 SL: {sl_count}\n"
-            f"  ⏰ Timeout: {timeout_count}\n"
-            f"  ✋ Вручную: {manual_count}"
+            f"  🎯 TP: {tp_count or 0}\n"
+            f"  🛑 SL: {sl_count or 0}\n"
+            f"  ⏰ Timeout: {timeout_count or 0}\n"
+            f"  ✋ Вручную: {manual_count or 0}"
         )
 
     except Exception as exc:
         logger.error("ML-short статистика: ошибка", error=str(exc))
         return "❌ Ошибка загрузки статистики."
+
 
 
 async def _get_history_text() -> str:
@@ -342,7 +348,7 @@ async def ml_short_from_reply_keyboard(msg: Message) -> None:
 @router.callback_query(F.data == "ml_short:status")
 async def cb_ml_short_status(query: CallbackQuery) -> None:
     try:
-        await query.answer()
+        await query.answer("📊 Статус обновлён")
     except Exception:
         pass
     redis = await _get_redis()
@@ -350,7 +356,10 @@ async def cb_ml_short_status(query: CallbackQuery) -> None:
         cfg = await get_ml_short_config(redis)
     finally:
         await redis.aclose()
-    text = await _get_status_text()
+    # Добавляем таймстамп, чтобы edit_text не падал на "message is not modified"
+    status_text = await _get_status_text()
+    now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    text = f"{status_text}\n\n<i>🔄 {now_str}</i>"
     try:
         await query.message.edit_text(text, reply_markup=ml_short_main_keyboard(cfg["enabled"]))
     except Exception:
