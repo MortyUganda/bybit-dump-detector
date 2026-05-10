@@ -127,10 +127,26 @@ def _parse_one(path: Path) -> ModelReport:
     return rep
 
 
+def _is_complete_model_txt(p: Path) -> bool:
+    """
+    Проверяет, что обучение дошло до конца (в файле есть AUC).
+    Используется чтобы игнорировать огрызки от упавшего train_decision_model.py.
+    """
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "Средний AUC" in line:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 def _list_prod_txt(models_dir: Path = MODELS_DIR) -> list[Path]:
     """
     Возвращает model_txt prod-decision (без суффиксов _v2/_nodead),
     отсортированные по mtime убыванию.
+    Игнорирует огрызки (без AUC) от упавших прогонов.
     """
     if not models_dir.exists():
         return []
@@ -138,8 +154,10 @@ def _list_prod_txt(models_dir: Path = MODELS_DIR) -> list[Path]:
     for p in models_dir.glob("model_txt_*.txt"):
         # Отсекаем эксперименты
         stem = p.stem  # model_txt_2026-05-10_202504
-        # Эксперимент если в имени есть _v2 или _nodead перед расширением
         if stem.endswith("_v2") or stem.endswith("_nodead"):
+            continue
+        # Отсекаем огрызки без AUC — train_decision_model упал раньше cross_val
+        if not _is_complete_model_txt(p):
             continue
         files.append(p)
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
