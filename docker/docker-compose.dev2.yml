@@ -56,6 +56,8 @@ services:
       - ../logs_dev2:/app/logs
     environment:
       SERVICE_NAME: ingestion
+      OB_REDIS_PUBLISH: "1"
+      OB_REDIS_DEBOUNCE_SEC: "1.0"
     healthcheck:
       test: ["CMD", "python", "-c", "import redis as r, os; c = r.from_url(os.environ.get('REDIS_URL','redis://redis:6379')); c.ping()"]
       interval: 30s

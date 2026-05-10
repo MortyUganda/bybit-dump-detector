@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Dict
 
 import redis.asyncio as aioredis
@@ -61,6 +62,17 @@ class IngestionService:
         self._ob_analyzer = OrderbookAnalyzer()
         self._ws_spot: BybitWSClient | None = None
         self._running = False
+        # OB→Redis publishing: ON только в выделенном ingestion-контейнере.
+        # Analyzer тоже поднимает свой IngestionService для in-memory _calculators,
+        # но в Redis писать ob:*/ob_features:* не должен — это создаёт дубль трафика.
+        self._ob_publish: bool = os.environ.get("OB_REDIS_PUBLISH", "0") == "1"
+        # Per-symbol дебаунс записи OB в Redis: защита от штормовой перезаписи WS-тиков.
+        self._ob_debounce_sec: float = float(os.environ.get("OB_REDIS_DEBOUNCE_SEC", "1.0"))
+        self._ob_last_write_ts: Dict[str, float] = {}
+        if self._ob_publish:
+            logger.info("OB Redis publish ENABLED", debounce_sec=self._ob_debounce_sec)
+        else:
+            logger.info("OB Redis publish DISABLED (set OB_REDIS_PUBLISH=1 to enable)")
 
     async def start(self) -> None:
         self._running = True
@@ -144,6 +156,18 @@ class IngestionService:
             return
         calc = self._get_or_create_calculator(symbol)
         calc.update_orderbook(snapshot)
+
+        # In-memory обновление выше — обязательно для всех контейнеров.
+        # Запись в Redis — только если этот контейнер назначен publisher-ом
+        # (OB_REDIS_PUBLISH=1) и прошёл дебаунс по символу.
+        if not self._ob_publish:
+            return
+        now = utcnow_ts()
+        last = self._ob_last_write_ts.get(symbol, 0.0)
+        if now - last < self._ob_debounce_sec:
+            return
+        self._ob_last_write_ts[symbol] = now
+
         # Сохраняем raw orderbook top-20 в Redis для auto_short_service
         try:
             ob_key = f"ob:{symbol}"
@@ -166,7 +190,7 @@ class IngestionService:
             ob_features_payload = json.dumps({
                 "spread_pct": tmp_f.spread_pct,                 # None при отсутствии данных
                 "bid_depth_change_5m": tmp_f.bid_depth_change_5m,  # None при отсутствии данных
-                "ts": utcnow_ts(),
+                "ts": now,
             })
             await self._redis.setex(f"ob_features:{symbol}", 60, ob_features_payload)
         except Exception as e:
