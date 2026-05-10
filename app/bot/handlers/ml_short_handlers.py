@@ -19,10 +19,6 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import get_settings
-from app.services.ml_model_report import (
-    get_current_and_previous,
-    render_model_info,
-)
 from app.services.ml_short_config import (
     get_ml_short_config,
     patch_ml_short_config,
@@ -71,9 +67,8 @@ def ml_short_settings_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🔢 Cooldown losses", callback_data="ml_short:set:cooldown_losses")
     builder.button(text="⏰ Cooldown hours", callback_data="ml_short:set:cooldown_hours")
     builder.button(text="📎 Paper/Real", callback_data="ml_short:paper_info")
-    builder.button(text="🤖 Данные ИИ-модели", callback_data="ml_short:model_info")
     builder.button(text="⬅️ Назад", callback_data="ml_short:back")
-    builder.adjust(2, 2, 2, 2, 2, 1, 1)
+    builder.adjust(2, 2, 2, 2, 2, 1)
     return builder.as_markup()
 
 
@@ -589,42 +584,6 @@ async def cb_ml_short_settings(query: CallbackQuery) -> None:
         pass
 
 
-# ── Callback: данные ИИ-модели ────────────────────────────────────
-
-def _model_info_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔄 Обновить", callback_data="ml_short:model_info")
-    builder.button(text="⬅️ Назад", callback_data="ml_short:settings")
-    builder.adjust(2)
-    return builder.as_markup()
-
-
-@router.callback_query(F.data == "ml_short:model_info")
-async def cb_ml_short_model_info(query: CallbackQuery) -> None:
-    try:
-        await query.answer("🤖 Читаю model_txt...")
-    except Exception:
-        pass
-    try:
-        cfg = await get_ml_short_config()
-        cur_threshold = float(cfg.get("threshold_proba", 0.55))
-    except Exception:
-        cur_threshold = None
-    try:
-        current, previous = get_current_and_previous()
-        text = render_model_info(current, previous, cur_threshold)
-    except Exception as exc:
-        logger.exception("model_info render failed")
-        text = f"❌ Ошибка чтения model_txt: <code>{exc}</code>"
-    # Добавляем секунды к времени чтобы edit_text не выпадал по "not modified"
-    stamp = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
-    text += f"\n\n<i>Обновлено: {stamp}</i>"
-    try:
-        await query.message.edit_text(text, reply_markup=_model_info_keyboard())
-    except Exception as exc:
-        logger.debug("edit_text model_info failed: %s", exc)
-
-
 # ── Callback: threshold picker ────────────────────────────────────────
 
 @router.callback_query(F.data == "ml_short:set:threshold")
@@ -636,7 +595,7 @@ async def cb_set_threshold(query: CallbackQuery) -> None:
     try:
         await query.message.edit_text(
             "🧠 <b>Выберите threshold proba</b>\n\n"
-            "Минимальная вероятность ML-модели для открытия позиции.\n"
+            "Минимальная вероятность ML-модели для открытия позиции.\n",
             reply_markup=ml_short_threshold_keyboard(),
         )
     except Exception:
