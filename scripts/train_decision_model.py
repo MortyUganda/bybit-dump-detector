@@ -316,6 +316,11 @@ def feature_importance(X: pd.DataFrame, y: pd.Series, n_top: int = 20) -> None:
     for name, val in imp[:n_top]:
         print(f"  {name:30s} {val:.1f}")
 
+    # Полный ранкинг всех фичей (виден в model_txt при запуске с -Txt).
+    print(f"\n=== Полный ранкинг importance (все {len(imp)} фичей) ===")
+    for rank, (name, val) in enumerate(imp, 1):
+        print(f"  {rank:3d}. {name:30s} {val:.1f}")
+
 
 def threshold_analysis(
     df: pd.DataFrame, y: pd.Series, oof_proba: np.ndarray, oof_mask: np.ndarray
