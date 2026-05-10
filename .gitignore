@@ -10,3 +10,4 @@ exports
 models/*.pkl
 models/*.json
 models/*.txt
+*.csv
