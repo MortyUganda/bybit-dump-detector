@@ -8,3 +8,4 @@ __pycache__/
 exports
 .env.dev3
 models/*.pkl
+models/*.json
