@@ -314,6 +314,16 @@ def merge_baseline(df_auto: pd.DataFrame, df_canceled: pd.DataFrame,
     all_dfs = [df_auto, df_canceled]
     if df_all_opened is not None and len(df_all_opened) > 0:
         all_dfs.append(df_all_opened)
+
+    # Fallback-фичи: есть в части источников, но логически «ноль» в остальных.
+    # adverse_move_pct есть только в canceled_signals; в auto_shorts сделка уже открылась → 0.0,
+    # в all_opened (shadow paper) фильтр тоже не применяется → 0.0.
+    FILL_ZERO_FEATURES = ["adverse_move_pct"]
+    for d in all_dfs:
+        for fz in FILL_ZERO_FEATURES:
+            if fz not in d.columns:
+                d[fz] = 0.0
+
     feature_cols = intersect_features(all_dfs)
 
     # Для Group 1 нужны: symbol, entry_ts, pnl_pct (опционально)
@@ -340,6 +350,13 @@ def merge_baseline(df_auto: pd.DataFrame, df_canceled: pd.DataFrame,
     for f in GROUP1_FEATURES + GROUP2_FEATURES:
         if f in df.columns and f not in feature_cols:
             feature_cols.append(f)
+
+    # Source-shift фича: позволяет модели учитывать разницу лейблов:
+    # auto_shorts — реальный ml_label, canceled — synthetic would_hit_tp/sl, all_opened — shadow paper.
+    # Если фактически распределения одинаковые — LightGBM просто даст фиче важность 0.
+    df["is_canceled_source"] = (df["source"] == "canceled").astype(int)
+    if "is_canceled_source" not in feature_cols:
+        feature_cols.append("is_canceled_source")
 
     df[feature_cols] = df[feature_cols].fillna(0.0)
     return df, feature_cols
