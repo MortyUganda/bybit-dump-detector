@@ -8,6 +8,7 @@
 #   .\scripts\run_ml.ps1 -Mode decision_v2 -> эксперименты decision v2
 #   .\scripts\run_ml.ps1 -Mode clean       -> фильтрация CSV для ML
 #   .\scripts\run_ml.ps1 -Mode diagnose   -> диагностика фолдов (drift)
+#   .\scripts\run_ml.ps1 -Mode decision -Txt -> сохранить лог в models/model_txt_<stamp>.txt
 #   .\scripts\run_ml.ps1 -MinId 700       -> outcome с другим min_id
 #   .\scripts\run_ml.ps1 -Splits 8        -> кастомное число фолдов
 #
@@ -22,7 +23,8 @@ param(
     [int]$Splits = 5,
     [string]$AutoCsv = "",
     [string]$CanceledCsv = "",
-    [switch]$IncludeAllOpened
+    [switch]$IncludeAllOpened,
+    [switch]$Txt
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,7 +57,8 @@ function Invoke-Outcome {
 function Save-DecisionLog {
     param(
         [Parameter(Mandatory)] [string]$LogText,
-        [Parameter(Mandatory)] [string]$ModelGlob
+        [Parameter(Mandatory)] [string]$ModelGlob,
+        [string]$Suffix = ""
     )
     $modelsDir = Join-Path (Get-Location) "models"
     if (-not (Test-Path $modelsDir)) {
@@ -70,7 +73,8 @@ function Save-DecisionLog {
         # Fallback — текущее время
         $stamp = (Get-Date).ToString("yyyy-MM-dd_HHmmss")
     }
-    $logPath = Join-Path $modelsDir "model_txt_$stamp.txt"
+    $fname = if ($Suffix) { "model_txt_${stamp}_${Suffix}.txt" } else { "model_txt_${stamp}.txt" }
+    $logPath = Join-Path $modelsDir $fname
     $LogText | Out-File -FilePath $logPath -Encoding utf8
     Write-Host "📝 Отчёт сохранён: $logPath" -ForegroundColor Green
 }
@@ -96,9 +100,12 @@ function Invoke-Decision {
     if ($exit -ne 0) {
         $logText = "!!! python exit code: $exit !!!`n`n" + $logText
     }
-    Save-DecisionLog -LogText $logText -ModelGlob "decision_model_*.pkl"
+    if ($Txt) {
+        Save-DecisionLog -LogText $logText -ModelGlob "decision_model_*.pkl"
+    }
     if ($exit -ne 0) {
-        Write-Host "❌ train_decision_model упал (exit $exit) — см. model_txt_*.txt" -ForegroundColor Red
+        $msg = if ($Txt) { "❌ train_decision_model упал (exit $exit) — см. model_txt_*.txt" } else { "❌ train_decision_model упал (exit $exit). Для сохранения лога запусти с -Txt" }
+        Write-Host $msg -ForegroundColor Red
     }
 }
 
@@ -121,9 +128,12 @@ function Invoke-DecisionV2 {
     if ($exit -ne 0) {
         $logText = "!!! python exit code: $exit !!!`n`n" + $logText
     }
-    Save-DecisionLog -LogText $logText -ModelGlob "decision_model_v2_*.pkl"
+    if ($Txt) {
+        Save-DecisionLog -LogText $logText -ModelGlob "decision_model_v2_*.pkl" -Suffix "v2"
+    }
     if ($exit -ne 0) {
-        Write-Host "❌ train_decision_model_v2 упал (exit $exit) — см. model_txt_*.txt" -ForegroundColor Red
+        $msg = if ($Txt) { "❌ train_decision_model_v2 упал (exit $exit) — см. model_txt_*.txt" } else { "❌ train_decision_model_v2 упал (exit $exit). Для сохранения лога запусти с -Txt" }
+        Write-Host $msg -ForegroundColor Red
     }
 }
 
