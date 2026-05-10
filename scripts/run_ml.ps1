@@ -76,10 +76,22 @@ function Invoke-Decision {
     if ($AutoCsv) { $args += @("--auto-csv", $AutoCsv) }
     if ($CanceledCsv) { $args += @("--canceled-csv", $CanceledCsv) }
     if ($IncludeAllOpened) { $args += "--include-all-opened" }
-    # Перехватываем stdout+stderr в переменную и одновременно пишем в консоль
-    & python -m scripts.train_decision_model @args 2>&1 | Tee-Object -Variable teed | Out-Host
+    # Перехватываем stdout+stderr; временно ОТКЛЮЧАЕМ Stop, иначе любой
+    # stderr от Python (даже warnings) становится NativeCommandError и traceback обрезается.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & python -m scripts.train_decision_model @args 2>&1 | Tee-Object -Variable teed | Out-Host
+        $exit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
     $logText = ($teed | Out-String)
+    if ($exit -ne 0) {
+        $logText = "!!! python exit code: $exit !!!`n`n" + $logText
+    }
     Save-DecisionLog -LogText $logText -ModelGlob "decision_model_*.pkl"
+    if ($exit -ne 0) { throw "train_decision_model упал (exit $exit) — см. model_txt_*.txt" }
 }
 
 function Invoke-DecisionV2 {
@@ -89,9 +101,20 @@ function Invoke-DecisionV2 {
     if ($AutoCsv) { $args += @("--auto-csv", $AutoCsv) }
     if ($CanceledCsv) { $args += @("--canceled-csv", $CanceledCsv) }
     if ($IncludeAllOpened) { $args += "--include-all-opened" }
-    & python -m scripts.train_decision_model_v2 @args 2>&1 | Tee-Object -Variable teed | Out-Host
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & python -m scripts.train_decision_model_v2 @args 2>&1 | Tee-Object -Variable teed | Out-Host
+        $exit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
     $logText = ($teed | Out-String)
+    if ($exit -ne 0) {
+        $logText = "!!! python exit code: $exit !!!`n`n" + $logText
+    }
     Save-DecisionLog -LogText $logText -ModelGlob "decision_model_v2_*.pkl"
+    if ($exit -ne 0) { throw "train_decision_model_v2 упал (exit $exit) — см. model_txt_*.txt" }
 }
 
 function Invoke-Clean {
