@@ -77,8 +77,18 @@ def ml_short_stats_period_keyboard(current: str) -> InlineKeyboardMarkup:
     for period, label in [("24h", "24ч"), ("7d", "7д"), ("all", "Все")]:
         marker = "✅ " if current == period else ""
         builder.button(text=f"{marker}{label}", callback_data=f"ml_short:stats:{period}")
+    builder.button(text="🤖 Активные", callback_data="ml_short:active")
     builder.button(text="⬅️ Назад", callback_data="ml_short:back")
-    builder.adjust(3, 1)
+    builder.adjust(3, 1, 1)
+    return builder.as_markup()
+
+
+def ml_short_active_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Обновить", callback_data="ml_short:active")
+    builder.button(text="📈 Статистика", callback_data="ml_short:stats:24h")
+    builder.button(text="⬅️ Назад", callback_data="ml_short:back")
+    builder.adjust(2, 1)
     return builder.as_markup()
 
 
@@ -243,6 +253,81 @@ async def _get_stats_text(period: str) -> str:
         logger.error("ML-short статистика: ошибка", error=str(exc))
         return "❌ Ошибка загрузки статистики."
 
+
+
+TG_MAX_MESSAGE_CHARS = 3800
+
+
+async def _get_active_text() -> str:
+    """Список активных (open) ML-short paper-позиций — логика как у авто-шортов."""
+    try:
+        from sqlalchemy import text
+        from app.db.session import AsyncSessionLocal
+        from app.bot.handlers.auto_shorts import _get_current_price
+
+        async with AsyncSessionLocal() as session:
+            r = await session.execute(
+                text("""
+                    SELECT id, symbol, entry_price, entry_ts, ml_proba, score,
+                           tp_pct, sl_pct, timeout_hours
+                    FROM ml_short_positions
+                    WHERE status = 'open'
+                    ORDER BY id DESC
+                """)
+            )
+            rows = r.fetchall()
+
+        if not rows:
+            return (
+                "🤖 <b>ML-Short активные</b>\n\n"
+                "<i>Нет открытых позиций.</i>"
+            )
+
+        header = f"🤖 <b>ML-Short активные</b> ({len(rows)})"
+        lines: list[str] = [header]
+        now = datetime.now(timezone.utc)
+
+        for row in rows:
+            pos_id, symbol, entry_price, entry_ts, ml_proba, score, tp_pct, sl_pct, timeout_h = row
+            entry_price_f = float(entry_price)
+            tp_price = entry_price_f * (1 - float(tp_pct) / 100.0)
+            sl_price = entry_price_f * (1 + float(sl_pct) / 100.0)
+            elapsed_min = int((now - entry_ts).total_seconds() / 60) if entry_ts else 0
+            bybit_url = f"https://www.bybit.com/trade/usdt/{symbol}"
+
+            current_price = await _get_current_price(symbol)
+            if current_price is not None:
+                # ML-short paper: leverage = 1
+                pnl_now = ((entry_price_f - float(current_price)) / entry_price_f) * 100.0
+                pnl_em = "🟢" if pnl_now > 0 else "🔴" if pnl_now < 0 else "⚪"
+                price_line = f"   💹 Сейчас: <b>${float(current_price):.6g}</b>\n"
+                pnl_line = f"   {pnl_em} PnL now: <b>{pnl_now:+.2f}%</b>\n"
+            else:
+                price_line = "   💹 Сейчас: <b>н/д</b>\n"
+                pnl_line = "   ⚪ PnL now: <b>н/д</b>\n"
+
+            proba_str = f"{float(ml_proba) * 100:.1f}%" if ml_proba is not None else "—"
+            score_str = f"{float(score):.0f}" if score is not None else "—"
+
+            lines.append(
+                f"📌 #{pos_id} <a href=\"{bybit_url}\">{symbol}</a>\n"
+                f"   💰 Вход: <b>${entry_price_f:.6g}</b> | ⏱ {elapsed_min}м\n"
+                f"{price_line}"
+                f"{pnl_line}"
+                f"   🎯 TP: ${tp_price:.6g} | 🛑 SL: ${sl_price:.6g}\n"
+                f"   🧠 Proba: {proba_str} | 📊 Score: {score_str} | ⏰ {float(timeout_h):.0f}ч"
+            )
+
+        # Одним сообщением (обычно позиций мало, max_concurrent=5).
+        # Если вдруг перевалили лимит — просто обрежем.
+        out = "\n\n".join(lines)
+        if len(out) > TG_MAX_MESSAGE_CHARS:
+            out = out[: TG_MAX_MESSAGE_CHARS - 50] + "\n\n<i>… обрезано</i>"
+        return out
+
+    except Exception as exc:
+        logger.error("ML-short активные: ошибка", error=str(exc))
+        return "❌ Ошибка загрузки активных позиций."
 
 
 async def _get_history_text() -> str:
@@ -445,6 +530,24 @@ async def cb_ml_short_stats(query: CallbackQuery) -> None:
     text = await _get_stats_text(period)
     try:
         await query.message.edit_text(text, reply_markup=ml_short_stats_period_keyboard(period))
+    except Exception:
+        pass
+
+
+# ── Callback: активные ML-short позиции ────────────────────────
+
+@router.callback_query(F.data == "ml_short:active")
+async def cb_ml_short_active(query: CallbackQuery) -> None:
+    try:
+        await query.answer("🤖 Загружаю активные...")
+    except Exception:
+        pass
+    body = await _get_active_text()
+    # Таймстамп — чтобы edit_text не падал на "message is not modified"
+    now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    text = f"{body}\n\n<i>🔄 {now_str}</i>"
+    try:
+        await query.message.edit_text(text, reply_markup=ml_short_active_keyboard())
     except Exception:
         pass
 
