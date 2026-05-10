@@ -338,6 +338,21 @@ class MlShortService:
             )
             return
 
+        # 1.5. Ранний выход по score — не грузить ML-inference/SQL низкими сигналами
+        min_score_early = cfg.get("min_score_to_enter", 45)
+        if risk_score.score < min_score_early:
+            await self._save_signal(
+                signal_ts=now,
+                symbol=symbol,
+                signal_price=signal_price,
+                score=risk_score.score,
+                ml_proba=None,
+                ml_decision="blocked_other",
+                blocked_reason="min_score",
+                features_snapshot=None,
+            )
+            return
+
         # 2. Загрузить модель + Group 1 stats из Redis
         symbol_stats = await self._get_symbol_stats(symbol)
         logger.debug(
@@ -369,12 +384,16 @@ class MlShortService:
             )
             return
 
-        # 3. Собрать фичи и получить proba
+        # 3. Собрать фичи и получить proba.
+        # ВАЖНО: predict_proba — блокирующий sync-вызов sklearn (сотни мс),
+        # выносим в thread чтобы не блокировать event loop analyzer'а
+        # (иначе send_message/scoring/WS простаивают на каждый сигнал).
         feature_vec = self._build_ml_features(risk_score, symbol_stats=symbol_stats)
         try:
             import numpy as np
             X = np.array([feature_vec], dtype=np.float64)
-            proba = float(model.predict_proba(X)[0][1])
+            proba_arr = await asyncio.to_thread(model.predict_proba, X)
+            proba = float(proba_arr[0][1])
         except Exception as exc:
             logger.warning(
                 "ML-short: ошибка инференса",

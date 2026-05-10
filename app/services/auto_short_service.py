@@ -854,10 +854,19 @@ class AutoShortService:
 
             for user_id in user_ids:
                 try:
-                    await self._bot.send_message(
-                        chat_id=user_id,
-                        text=text,
-                        parse_mode="HTML",
+                    await asyncio.wait_for(
+                        self._bot.send_message(
+                            chat_id=user_id,
+                            text=text,
+                            parse_mode="HTML",
+                        ),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Entry cancel notify TIMEOUT (>10s)",
+                        user_id=user_id,
+                        symbol=symbol,
                     )
                 except Exception as e:
                     logger.warning(
@@ -2913,12 +2922,17 @@ class AutoShortService:
 
             for user_id in user_ids:
                 try:
-                    await self._bot.send_message(
-                        chat_id=user_id,
-                        text=text,
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
+                    await asyncio.wait_for(
+                        self._bot.send_message(
+                            chat_id=user_id,
+                            text=text,
+                            parse_mode="HTML",
+                            reply_markup=keyboard,
+                        ),
+                        timeout=10.0,
                     )
+                except asyncio.TimeoutError:
+                    logger.warning("Notify close TIMEOUT (>10s)", user_id=user_id, symbol=symbol)
                 except Exception as e:
                     logger.warning("Notify close failed", user_id=user_id, error=str(e))
 
