@@ -6,6 +6,7 @@
 #   .\scripts\run_ml.ps1 -Mode export     -> только выгрузить CSV
 #   .\scripts\run_ml.ps1 -Mode all        -> выгрузить + обе модели
 #   .\scripts\run_ml.ps1 -Mode decision_v2 -> эксперименты decision v2
+#   .\scripts\run_ml.ps1 -Mode decision_nodead -> эксперимент: decision без мёртвых фичей
 #   .\scripts\run_ml.ps1 -Mode clean       -> фильтрация CSV для ML
 #   .\scripts\run_ml.ps1 -Mode diagnose   -> диагностика фолдов (drift)
 #   .\scripts\run_ml.ps1 -Mode decision -Txt -> сохранить лог в models/model_txt_<stamp>.txt
@@ -17,7 +18,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("run", "outcome", "decision", "decision_v2", "export", "all", "clean", "diagnose")]
+    [ValidateSet("run", "outcome", "decision", "decision_v2", "decision_nodead", "export", "all", "clean", "diagnose")]
     [string]$Mode = "run",
     [int]$MinId = 1,
     [int]$Splits = 5,
@@ -137,6 +138,34 @@ function Invoke-DecisionV2 {
     }
 }
 
+function Invoke-DecisionNoDead {
+    $aoLabel = if ($IncludeAllOpened) { "ВКЛЮЧЁН" } else { "ОТКЛЮЧЕН" }
+    Write-Host "`n=== Decision model BEZ DEAD features [all_opened: $aoLabel] ===" -ForegroundColor Cyan
+    $args = @("--splits", $Splits)
+    if ($AutoCsv) { $args += @("--auto-csv", $AutoCsv) }
+    if ($CanceledCsv) { $args += @("--canceled-csv", $CanceledCsv) }
+    if ($IncludeAllOpened) { $args += "--include-all-opened" }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & python -m scripts.train_decision_model_nodead @args 2>&1 | Tee-Object -Variable teed | Out-Host
+        $exit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    $logText = ($teed | Out-String)
+    if ($exit -ne 0) {
+        $logText = "!!! python exit code: $exit !!!`n`n" + $logText
+    }
+    if ($Txt) {
+        Save-DecisionLog -LogText $logText -ModelGlob "decision_model_nodead_*.pkl" -Suffix "nodead"
+    }
+    if ($exit -ne 0) {
+        $msg = if ($Txt) { "❌ train_decision_model_nodead упал (exit $exit) — см. model_txt_*_nodead.txt" } else { "❌ train_decision_model_nodead упал (exit $exit). Для сохранения лога запусти с -Txt" }
+        Write-Host $msg -ForegroundColor Red
+    }
+}
+
 function Invoke-Clean {
     Write-Host "`n=== Фильтрация CSV для ML ===" -ForegroundColor Cyan
     python -m scripts.export_clean_for_ml
@@ -167,6 +196,9 @@ switch ($Mode) {
     }
     "decision_v2" {
         Invoke-DecisionV2
+    }
+    "decision_nodead" {
+        Invoke-DecisionNoDead
     }
     "clean" {
         Invoke-Clean
