@@ -596,7 +596,6 @@ async def cb_set_threshold(query: CallbackQuery) -> None:
         await query.message.edit_text(
             "🧠 <b>Выберите threshold proba</b>\n\n"
             "Минимальная вероятность ML-модели для открытия позиции.\n"
-            "Sweet spot: 0.60 (WR 60.2% по decision_v2).",
             reply_markup=ml_short_threshold_keyboard(),
         )
     except Exception:
