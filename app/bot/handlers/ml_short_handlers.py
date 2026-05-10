@@ -19,8 +19,13 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import get_settings
+from pathlib import Path
+
+from app.services.ml_model_loader import resolve_model_path
 from app.services.ml_model_report import (
     get_current_and_previous,
+    get_loaded_vs_disk,
+    render_compare,
     render_model_info,
 )
 from app.services.ml_short_config import (
@@ -594,8 +599,19 @@ async def cb_ml_short_settings(query: CallbackQuery) -> None:
 def _model_info_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Обновить", callback_data="ml_short:model_info")
+    builder.button(text="♻️ Перезагрузить модель", callback_data="ml_short:model_reload_prompt")
     builder.button(text="⬅️ Назад", callback_data="ml_short:settings")
-    builder.adjust(2)
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+
+def _model_reload_keyboard(is_same: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if not is_same:
+        builder.button(text="✅ Оставляем", callback_data="ml_short:model_info")
+        builder.button(text="♻️ Переобучаем", callback_data="ml_short:model_reload_apply")
+    builder.button(text="⬅️ Назад", callback_data="ml_short:model_info")
+    builder.adjust(2, 1) if not is_same else builder.adjust(1)
     return builder.as_markup()
 
 
@@ -623,6 +639,89 @@ async def cb_ml_short_model_info(query: CallbackQuery) -> None:
         await query.message.edit_text(text, reply_markup=_model_info_keyboard())
     except Exception as exc:
         logger.debug("edit_text model_info failed: %s", exc)
+
+
+# ── Callback: перезагрузка модели — экран сравнения ──────────────
+
+async def _get_loaded_pkl_path() -> Path | None:
+    """Читает из Redis имя .pkl, который сейчас в памяти у analyzer."""
+    try:
+        redis = await _get_redis()
+        try:
+            name = await redis.get("ml:current_model:path")
+        finally:
+            await redis.aclose()
+        if name:
+            return Path("models") / name
+    except Exception as exc:
+        logger.debug("failed to read ml:current_model:path: %s", exc)
+    return None
+
+
+@router.callback_query(F.data == "ml_short:model_reload_prompt")
+async def cb_ml_short_model_reload_prompt(query: CallbackQuery) -> None:
+    try:
+        await query.answer("♻️ Сравниваю модели...")
+    except Exception:
+        pass
+    loaded_path = await _get_loaded_pkl_path()
+    is_same = True
+    try:
+        loaded_rep, disk_rep, is_same = get_loaded_vs_disk(loaded_path)
+        text = render_compare(loaded_rep, disk_rep, loaded_path)
+    except Exception as exc:
+        logger.exception("model_reload_prompt render failed")
+        text = f"❌ Ошибка сравнения: <code>{exc}</code>"
+    if is_same:
+        text += (
+            "\n\n✅ <i>Модель в памяти уже свежая — перезагрузка не требуется.</i>"
+        )
+    stamp = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
+    text += f"\n\n<i>Проверено: {stamp}</i>"
+    try:
+        await query.message.edit_text(
+            text,
+            reply_markup=_model_reload_keyboard(is_same),
+        )
+    except Exception as exc:
+        logger.debug("edit_text model_reload_prompt failed: %s", exc)
+
+
+@router.callback_query(F.data == "ml_short:model_reload_apply")
+async def cb_ml_short_model_reload_apply(query: CallbackQuery) -> None:
+    try:
+        await query.answer("♻️ Применяю...")
+    except Exception:
+        pass
+    try:
+        latest = resolve_model_path()
+    except Exception:
+        latest = None
+    cmd = (
+        "docker compose -p dev2 -f docker/docker-compose.dev2.yml "
+        "restart analyzer ml_short"
+    )
+    parts = [
+        "♻️ <b>Применение новой модели</b>",
+        "",
+    ]
+    if latest is not None:
+        parts.append(f"Новая модель: <code>{latest.name}</code>")
+    parts.extend([
+        "",
+        "ℹ️ bot и analyzer — разные контейнеры, поэтому hot-reload из бота невозможен.",
+        "Выполни на хосте:",
+        f"<code>{cmd}</code>",
+        "",
+        "После рестарта ml_model_loader автоматически подхватит свежий .pkl через манифест.",
+    ])
+    text = "\n".join(parts)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ К данным модели", callback_data="ml_short:model_info")
+    try:
+        await query.message.edit_text(text, reply_markup=builder.as_markup())
+    except Exception as exc:
+        logger.debug("edit_text model_reload_apply failed: %s", exc)
 
 
 # ── Callback: threshold picker ────────────────────────────────────────

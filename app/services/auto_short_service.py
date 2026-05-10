@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import pickle
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,9 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 # ── ML decision model ────────────────────────────────────────────
+# Путь к .pkl больше НЕ хардкожен — выбор делает app.services.ml_model_loader
+# по манифесту / mtime. Две константы оставлены как aliases для обратной совместимости
+# (их импортируют некоторые модули; сам файл может не существовать).
 DECISION_MODEL_PATH = Path("models/decision_model.pkl")
 DECISION_MODEL_FEATURES_PATH = Path("models/decision_model_features.json")
 
@@ -152,6 +154,7 @@ class AutoShortService:
         self._ml_model_loaded: bool = False
         self._ml_model_warned: bool = False
         self._ml_disabled_logged: bool = False
+        self._ml_model_path: Path | None = None
         # Список фичей из манифеста (или хардкод-fallback)
         self._ml_features: list[str] = ML_DECISION_FEATURES
         self._ml_features_warned: set[str] = set()
@@ -163,54 +166,33 @@ class AutoShortService:
         if self._ml_model_loaded:
             return self._ml_decision_model
         self._ml_model_loaded = True
-        if not DECISION_MODEL_PATH.exists():
-            if not self._ml_model_warned:
-                self._ml_model_warned = True
-                logger.warning(
-                    "ML decision model not found — ML-gate disabled (fail-open)",
-                    path=str(DECISION_MODEL_PATH),
-                )
-            return None
-        try:
-            with open(DECISION_MODEL_PATH, "rb") as f:
-                self._ml_decision_model = pickle.load(f)
-            logger.info(
-                "ML decision model loaded",
-                path=str(DECISION_MODEL_PATH),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to load ML decision model — ML-gate disabled",
-                error=str(exc),
-            )
-            return self._ml_decision_model
-
-        # Загрузка манифеста фичей
-        if DECISION_MODEL_FEATURES_PATH.exists():
+        from app.services.ml_model_loader import load_decision_model
+        model, features, path = load_decision_model(ML_DECISION_FEATURES)
+        self._ml_decision_model = model
+        self._ml_features = features
+        self._ml_model_path = path
+        # Публикуем имя загруженного .pkl в Redis, чтобы TG-бот (в другом процессе)
+        # мог показать сравнение «в памяти vs на диске».
+        if path is not None:
             try:
-                import json as _json
-                with open(DECISION_MODEL_FEATURES_PATH, "r", encoding="utf-8") as f:
-                    manifest = _json.load(f)
-                self._ml_features = manifest["features"]
-                logger.info(
-                    "Список фичей загружен из манифеста",
-                    n_features=len(self._ml_features),
-                    path=str(DECISION_MODEL_FEATURES_PATH),
+                import asyncio as _asyncio
+                _asyncio.create_task(
+                    self._redis.set("ml:current_model:path", path.name)
                 )
-            except Exception as exc:
-                logger.warning(
-                    "Ошибка чтения манифеста — fallback на хардкод",
-                    error=str(exc),
-                )
-                self._ml_features = ML_DECISION_FEATURES
-        else:
-            logger.warning(
-                "Манифест фичей не найден — fallback на хардкод (возможен рассинхрон!)",
-                path=str(DECISION_MODEL_FEATURES_PATH),
-            )
-            self._ml_features = ML_DECISION_FEATURES
-
+            except Exception:
+                pass
         return self._ml_decision_model
+
+    def reload_decision_model(self) -> tuple[Any, Path | None]:
+        """
+        Принудительная перезагрузка модели с диска без рестарта процесса.
+        Используется TG-кнопкой «Перезагрузить модель». Возвращает (model, path).
+        """
+        self._ml_decision_model = None
+        self._ml_model_loaded = False
+        self._ml_model_warned = False
+        model = self._ensure_ml_model()
+        return model, self._ml_model_path
 
     async def _get_symbol_stats(self, symbol: str) -> dict[str, str]:
         """Читает Group 1 stats из Redis (sync fallback на дефолты)."""

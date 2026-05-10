@@ -156,6 +156,123 @@ def get_current_and_previous(
     return current, previous
 
 
+def _find_txt_for_pkl(pkl_name: str, models_dir: Path = MODELS_DIR) -> Path | None:
+    """
+    По имени .pkl ищет соответствующий model_txt_*.txt.
+    Имена синхронизированы: decision_model_<date>_<HHMMSS>.pkl ↔ model_txt_<date>_<HHMMSS>.txt
+    """
+    if not pkl_name:
+        return None
+    stem = pkl_name.replace(".pkl", "")
+    # decision_model_2026-05-10_202504 → model_txt_2026-05-10_202504
+    if stem.startswith("decision_model_"):
+        suffix = stem[len("decision_model_"):]
+        candidate = models_dir / f"model_txt_{suffix}.txt"
+        if candidate.exists():
+            return candidate
+    # legacy decision_model.pkl — берём самый свежий model_txt
+    return None
+
+
+def get_loaded_vs_disk(
+    loaded_pkl_path: Path | None,
+    models_dir: Path = MODELS_DIR,
+) -> tuple[ModelReport | None, ModelReport | None, bool]:
+    """
+    Возвращает (loaded_report, disk_report, is_same).
+
+    - loaded_report — отчёт по модели, которая сейчас в памяти у analyzer.
+    - disk_report — отчёт по самому свежему prod model_txt на диске.
+    - is_same — True если оба указывают на одну и ту же модель (нет смысла перезагружать).
+    """
+    files = _list_prod_txt(models_dir)
+    disk_report = _parse_one(files[0]) if files else None
+
+    loaded_report: ModelReport | None = None
+    if loaded_pkl_path is not None:
+        txt = _find_txt_for_pkl(loaded_pkl_path.name, models_dir)
+        if txt is not None:
+            loaded_report = _parse_one(txt)
+
+    # Если loaded не нашли — fallback на previous (пред. prod)
+    if loaded_report is None and len(files) >= 2:
+        loaded_report = _parse_one(files[1])
+
+    is_same = False
+    if loaded_report is not None and disk_report is not None:
+        is_same = loaded_report.path == disk_report.path
+
+    return loaded_report, disk_report, is_same
+
+
+def render_compare(
+    loaded: ModelReport | None,
+    disk: ModelReport | None,
+    loaded_pkl_path: Path | None,
+) -> str:
+    """HTML-сравнение текущей (загруженной) vs новой (на диске) модели."""
+    if disk is None:
+        return (
+            "♻️ <b>Перезагрузка модели</b>\n\n"
+            "<i>На диске нет моделей.</i> Сначала обучи:\n"
+            "<code>.\\scripts\\run_ml.ps1 -Mode decision -Txt</code>"
+        )
+
+    def _fmt(rep: ModelReport | None, label: str) -> list[str]:
+        if rep is None:
+            return [f"<b>{label}:</b> <i>нет данных</i>"]
+        date_str, age = _format_age(rep.saved_at, rep.mtime)
+        lines = [f"<b>{label}</b> ({age})"]
+        if rep.model_file:
+            lines.append(f"  📦 <code>{rep.model_file}</code>")
+        lines.append(f"  📅 {date_str}")
+        if rep.mean_auc is not None:
+            auc = f"{rep.mean_auc:.3f}"
+            if rep.std_auc is not None:
+                auc += f" ± {rep.std_auc:.3f}"
+            lines.append(f"  📈 AUC: <b>{auc}</b>")
+        if rep.total_n is not None and rep.total_wr is not None:
+            lines.append(f"  📊 n={rep.total_n}, WR={rep.total_wr:.1f}%")
+        if rep.features_count is not None:
+            lines.append(f"  🎯 фич: {rep.features_count}")
+        rec = recommend_threshold(rep)
+        if rec is not None:
+            lines.append(
+                f"  💡 рек.порог {rec.threshold:.2f}: n={rec.n}, WR={rec.wr_pct:.1f}%"
+            )
+        return lines
+
+    parts = ["♻️ <b>Сравнение моделей</b>", ""]
+    parts.extend(_fmt(loaded, "⚙️ В памяти"))
+    parts.append("")
+    parts.extend(_fmt(disk, "🆕 На диске"))
+
+    # Diff блок
+    if (
+        loaded is not None
+        and disk is not None
+        and loaded.mean_auc is not None
+        and disk.mean_auc is not None
+    ):
+        d_auc = disk.mean_auc - loaded.mean_auc
+        sign = "+" if d_auc >= 0 else ""
+        parts.append("")
+        parts.append(f"📐 <b>Δ AUC: {sign}{d_auc:.3f}</b>")
+        if loaded.total_n is not None and disk.total_n is not None:
+            dn = disk.total_n - loaded.total_n
+            sign_n = "+" if dn >= 0 else ""
+            parts.append(f"📐 <b>Δ n: {sign_n}{dn}</b>")
+
+    if loaded_pkl_path is None:
+        parts.append("")
+        parts.append(
+            "<i>⚠️ Путь к загруженной модели неизвестен (analyzer ещё не "
+            "использовал ML-gate). Сверху показана предыдущая prod-модель.</i>"
+        )
+
+    return "\n".join(parts)
+
+
 def recommend_threshold(rep: ModelReport) -> ThresholdRow | None:
     """
     Эвристика max(Δ × √n): лифт над baseline взвешенный по числу сделок.
