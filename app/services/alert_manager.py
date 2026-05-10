@@ -242,15 +242,21 @@ class AlertManager:
 
         for user_id in user_ids:
             try:
-                should_send = await self._should_send_to_user(user_id, risk_score)
+                should_send = await asyncio.wait_for(
+                    self._should_send_to_user(user_id, risk_score),
+                    timeout=5.0,
+                )
                 if not should_send:
                     continue
 
-                await self._bot.send_message(
-                    chat_id=user_id,
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
+                await asyncio.wait_for(
+                    self._bot.send_message(
+                        chat_id=user_id,
+                        text=text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML",
+                    ),
+                    timeout=10.0,
                 )
                 logger.info(
                     "Alert sent",
@@ -262,6 +268,12 @@ class AlertManager:
                     ),
                 )
 
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Alert send TIMEOUT (>10s) — цикл разблокирован",
+                    user_id=user_id,
+                    symbol=symbol,
+                )
             except Exception as e:
                 logger.warning(
                     "Alert send failed",
