@@ -46,6 +46,29 @@ function Invoke-Outcome {
     python -m scripts.train_outcome_model @args
 }
 
+function Save-DecisionLog {
+    param(
+        [Parameter(Mandatory)] [string]$LogText,
+        [Parameter(Mandatory)] [string]$ModelGlob
+    )
+    $modelsDir = Join-Path (Get-Location) "models"
+    if (-not (Test-Path $modelsDir)) {
+        New-Item -ItemType Directory -Path $modelsDir | Out-Null
+    }
+    # Ищем свежий .pkl, чтобы взять его таймстамп (имя формируется внутри Python)
+    $latest = Get-ChildItem -Path $modelsDir -Filter $ModelGlob -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($latest -and $latest.BaseName -match '_(\d{4}-\d{2}-\d{2})_(\d{6})$') {
+        $stamp = "$($matches[1])_$($matches[2])"
+    } else {
+        # Fallback — текущее время
+        $stamp = (Get-Date).ToString("yyyy-MM-dd_HHmmss")
+    }
+    $logPath = Join-Path $modelsDir "model_txt_$stamp.txt"
+    $LogText | Out-File -FilePath $logPath -Encoding utf8
+    Write-Host "📝 Отчёт сохранён: $logPath" -ForegroundColor Green
+}
+
 function Invoke-Decision {
     $aoLabel = if ($IncludeAllOpened) { "ВКЛЮЧЁН" } else { "ОТКЛЮЧЕН" }
     Write-Host "`n=== Decision model [all_opened: $aoLabel] ===" -ForegroundColor Cyan
@@ -53,7 +76,10 @@ function Invoke-Decision {
     if ($AutoCsv) { $args += @("--auto-csv", $AutoCsv) }
     if ($CanceledCsv) { $args += @("--canceled-csv", $CanceledCsv) }
     if ($IncludeAllOpened) { $args += "--include-all-opened" }
-    python -m scripts.train_decision_model @args
+    # Перехватываем stdout+stderr в переменную и одновременно пишем в консоль
+    & python -m scripts.train_decision_model @args 2>&1 | Tee-Object -Variable teed | Out-Host
+    $logText = ($teed | Out-String)
+    Save-DecisionLog -LogText $logText -ModelGlob "decision_model_*.pkl"
 }
 
 function Invoke-DecisionV2 {
@@ -63,7 +89,9 @@ function Invoke-DecisionV2 {
     if ($AutoCsv) { $args += @("--auto-csv", $AutoCsv) }
     if ($CanceledCsv) { $args += @("--canceled-csv", $CanceledCsv) }
     if ($IncludeAllOpened) { $args += "--include-all-opened" }
-    python -m scripts.train_decision_model_v2 @args
+    & python -m scripts.train_decision_model_v2 @args 2>&1 | Tee-Object -Variable teed | Out-Host
+    $logText = ($teed | Out-String)
+    Save-DecisionLog -LogText $logText -ModelGlob "decision_model_v2_*.pkl"
 }
 
 function Invoke-Clean {
