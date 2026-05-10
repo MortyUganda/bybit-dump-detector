@@ -27,6 +27,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Заставляем Python выводить в UTF-8 — иначе print('📊') падает на cp1251
+# (именно из-за этого _feature_engineering.py:293 ронял train_decision_model[_v2])
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+
 function Export-TradesCsv {
     Write-Host "=== Выгружаю свежие CSV из dev2 ===" -ForegroundColor Cyan
     docker compose -p dev2 -f docker/docker-compose.dev2.yml `
@@ -91,7 +97,9 @@ function Invoke-Decision {
         $logText = "!!! python exit code: $exit !!!`n`n" + $logText
     }
     Save-DecisionLog -LogText $logText -ModelGlob "decision_model_*.pkl"
-    if ($exit -ne 0) { throw "train_decision_model упал (exit $exit) — см. model_txt_*.txt" }
+    if ($exit -ne 0) {
+        Write-Host "❌ train_decision_model упал (exit $exit) — см. model_txt_*.txt" -ForegroundColor Red
+    }
 }
 
 function Invoke-DecisionV2 {
@@ -114,7 +122,9 @@ function Invoke-DecisionV2 {
         $logText = "!!! python exit code: $exit !!!`n`n" + $logText
     }
     Save-DecisionLog -LogText $logText -ModelGlob "decision_model_v2_*.pkl"
-    if ($exit -ne 0) { throw "train_decision_model_v2 упал (exit $exit) — см. model_txt_*.txt" }
+    if ($exit -ne 0) {
+        Write-Host "❌ train_decision_model_v2 упал (exit $exit) — см. model_txt_*.txt" -ForegroundColor Red
+    }
 }
 
 function Invoke-Clean {
