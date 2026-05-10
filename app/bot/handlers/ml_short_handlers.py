@@ -175,7 +175,7 @@ async def _get_status_text() -> str:
         f"  🤷 No model: {signals_24h['no_model']}\n"
         f"  ⚠️ Inference error: {signals_24h['inference_error']}\n\n"
         f"<i>Настройки: min_score={cfg['min_score_to_enter']}, "
-        f"max_concurrent={cfg['max_concurrent_positions']}, "
+        f"max_concurrent={cfg['max_concurrent_positions'] if cfg['max_concurrent_positions'] > 0 else '∞'}, "
         f"delay={cfg['delay_seconds']}s</i>"
     )
 
@@ -392,7 +392,7 @@ async def _get_settings_text() -> str:
         f"⚙️ <b>Настройки ML-Short</b>\n\n"
         f"🧠 Threshold proba: <b>{cfg['proba_threshold']:.2f}</b>\n"
         f"📊 Min score: <b>{cfg['min_score_to_enter']}</b>\n"
-        f"🔢 Max concurrent: <b>{cfg['max_concurrent_positions']}</b>\n"
+        f"🔢 Max concurrent: <b>{cfg['max_concurrent_positions'] if cfg['max_concurrent_positions'] > 0 else '∞ без лимита'}</b>\n"
         f"⏰ Timeout: <b>{cfg['position_timeout_hours']}h</b>\n"
         f"📉 Adverse move: <b>{cfg['adverse_move_threshold_pct']}%</b>\n"
         f"⏱ Delay: <b>{cfg['delay_seconds']}s</b>\n"
@@ -626,10 +626,19 @@ async def cb_set_max_concurrent(query: CallbackQuery) -> None:
         await query.answer()
     except Exception:
         pass
+    # Своя клавиатура — чтобы добавить кнопку «∞ Без лимита» (value=0)
+    builder = InlineKeyboardBuilder()
+    for val in [1, 2, 3, 5, 7, 10, 15, 20]:
+        builder.button(text=str(val), callback_data=f"ml_short:val:max_concurrent:{val}")
+    builder.button(text="∞ Без лимита", callback_data="ml_short:val:max_concurrent:0")
+    builder.button(text="⬅️ Назад", callback_data="ml_short:settings")
+    builder.adjust(4, 4, 1, 1)
     try:
         await query.message.edit_text(
-            "🔢 <b>Max concurrent positions</b>\n\nМаксимальное количество одновременно открытых позиций.",
-            reply_markup=ml_short_numeric_keyboard("max_concurrent", [1, 2, 3, 5, 7, 10, 15, 20]),
+            "🔢 <b>Max concurrent positions</b>\n\n"
+            "Максимальное количество одновременно открытых позиций.\n\n"
+            "<i>∞ Без лимита — ограничение отключено (cooldown/min_score продолжают работать).</i>",
+            reply_markup=builder.as_markup(),
         )
     except Exception:
         pass

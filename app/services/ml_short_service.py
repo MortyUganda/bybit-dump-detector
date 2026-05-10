@@ -442,17 +442,18 @@ class MlShortService:
             )
             return
 
-        # max_concurrent
-        max_concurrent = cfg.get("max_concurrent_positions", 5)
-        open_count = await self._count_open_positions()
-        if open_count >= max_concurrent:
-            await self._save_signal(
-                signal_ts=now, symbol=symbol, signal_price=signal_price,
-                score=risk_score.score, ml_proba=proba,
-                ml_decision="blocked_other", blocked_reason="max_concurrent",
-                features_snapshot=features_json,
-            )
-            return
+        # max_concurrent (0 = без лимита)
+        max_concurrent = int(cfg.get("max_concurrent_positions", 5) or 0)
+        if max_concurrent > 0:
+            open_count = await self._count_open_positions()
+            if open_count >= max_concurrent:
+                await self._save_signal(
+                    signal_ts=now, symbol=symbol, signal_price=signal_price,
+                    score=risk_score.score, ml_proba=proba,
+                    ml_decision="blocked_other", blocked_reason="max_concurrent",
+                    features_snapshot=features_json,
+                )
+                return
 
         # cooldown
         if cfg.get("cooldown_enabled", True):

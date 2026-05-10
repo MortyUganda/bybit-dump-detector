@@ -33,7 +33,8 @@ def _normalize_ml_short_config(config: dict[str, Any] | None) -> dict[str, Any]:
     merged["enabled"] = bool(merged.get("enabled", False))
     merged["proba_threshold"] = max(0.30, min(0.95, float(merged.get("proba_threshold", 0.60))))
     merged["min_score_to_enter"] = max(0, min(100, int(merged.get("min_score_to_enter", 45))))
-    merged["max_concurrent_positions"] = max(1, min(20, int(merged.get("max_concurrent_positions", 5))))
+    # 0 = «без лимита». Верхняя граница 999 — фактический потолок (никогда не достижим).
+    merged["max_concurrent_positions"] = max(0, min(999, int(merged.get("max_concurrent_positions", 5))))
     merged["position_timeout_hours"] = max(1, min(72, int(merged.get("position_timeout_hours", 24))))
     merged["adverse_move_threshold_pct"] = max(0.1, min(2.0, float(merged.get("adverse_move_threshold_pct", 0.2))))
     merged["delay_seconds"] = max(0, min(120, int(merged.get("delay_seconds", 30))))
