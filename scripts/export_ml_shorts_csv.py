@@ -26,7 +26,7 @@ EXPORT_DIR = Path("/app/exports")
 TABLES: list[tuple[str, str]] = [
     ("ml_short_signals", "id"),
     ("ml_short_positions", "id"),
-    ("ml_short_cooldowns", "id"),
+    ("ml_short_cooldowns", "symbol"),  # PK = symbol, не id
 ]
 
 
