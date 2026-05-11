@@ -137,6 +137,11 @@ class CoinFeatures:
     # ── Market context ──────────────────────────────────────────
     btc_change_15m: float | None = None          # BTC 15m momentum at feature time
 
+    # ── Taker buy ratio (агрессивные покупки vs продажи) ─────────
+    taker_buy_ratio_60s: float | None = None    # buy_volume / total_volume за 60s, [0,1]
+    taker_buy_ratio_5s: float | None = None     # то же за 5s (микро-агрессия)
+    taker_buy_ratio_delta: float | None = None  # 5s − 60s — изменение давления покупателей
+
     # ── CVD (Cumulative Volume Delta) ────────────────────────────
     cvd_1m: float | None = None           # CVD over last 1 minute (raw, in USDT)
     cvd_5m: float | None = None            # CVD over last 5 minutes
@@ -535,6 +540,29 @@ class FeatureCalculator:
             magnitude = min(1.0, abs(f.cvd_5m) / max(1.0, abs(price_change_5m_pct) * 1000))
             cvd_divergence *= magnitude
         f.cvd_divergence = cvd_divergence
+
+        # --- Taker buy ratio (5s / 60s / delta) ---
+        # Агрессия покупателей: buy_usdt / (buy_usdt + sell_usdt) в окне.
+        # 60s — фоновое давление, 5s — мгновенная агрессия, delta — их разница.
+        def _taker_buy_ratio(trades: list[TradeTick]) -> float | None:
+            buy_v = 0.0
+            sell_v = 0.0
+            for t in trades:
+                if t.side == "Buy":
+                    buy_v += t.usdt_value
+                else:
+                    sell_v += t.usdt_value
+            total = buy_v + sell_v
+            if total <= 0:
+                return None
+            return buy_v / total
+
+        trades_60s = [t for t in self._trades if t.ts >= now - 60]
+        trades_5s = [t for t in self._trades if t.ts >= now - 5]
+        f.taker_buy_ratio_60s = _taker_buy_ratio(trades_60s)
+        f.taker_buy_ratio_5s = _taker_buy_ratio(trades_5s)
+        if f.taker_buy_ratio_5s is not None and f.taker_buy_ratio_60s is not None:
+            f.taker_buy_ratio_delta = f.taker_buy_ratio_5s - f.taker_buy_ratio_60s
 
         # --- Liquidation cascade detection ---
         f.liquidation_cascade_score = LiquidationDetector.cascade_score(list(self._trades))

@@ -102,6 +102,11 @@ class CanceledSignal(Base):
     btc_atr_pct_1h: Mapped[float | None] = mapped_column(Float, nullable=True)
     recent_wr_20: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # ── Taker buy ratio (агрессия покупателей) ──────────────────
+    taker_buy_ratio_60s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    taker_buy_ratio_5s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    taker_buy_ratio_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # ── Adverse move (движение цены против позиции за время delay) ──
     adverse_move_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
 

@@ -49,6 +49,8 @@ ML_DECISION_FEATURES = [
     "btc_adx_1h", "btc_atr_pct_1h",
     "recent_wr_20",
     "adverse_move_pct",
+    # Taker buy ratio (агрессия покупателей)
+    "taker_buy_ratio_60s", "taker_buy_ratio_5s", "taker_buy_ratio_delta",
     # Engineered: time-of-day (Group 2)
     "hour_of_day",
     "day_of_week",

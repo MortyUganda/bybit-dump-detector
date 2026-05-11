@@ -50,6 +50,8 @@ ML_DECISION_FEATURES = [
     "btc_adx_1h", "btc_atr_pct_1h",
     "recent_wr_20",
     "adverse_move_pct",
+    # Taker buy ratio (агрессия покупателей)
+    "taker_buy_ratio_60s", "taker_buy_ratio_5s", "taker_buy_ratio_delta",
     # Engineered: time-of-day (Group 2)
     "hour_of_day",
     "day_of_week",
@@ -285,6 +287,10 @@ class AutoShortService:
             "recent_wr_20": _f(getattr(features, 'recent_wr_20', None) if features else None),
             # Adverse move
             "adverse_move_pct": _f(adverse_move_pct),
+            # Taker buy ratio
+            "taker_buy_ratio_60s": _f(features.taker_buy_ratio_60s if features else None),
+            "taker_buy_ratio_5s": _f(features.taker_buy_ratio_5s if features else None),
+            "taker_buy_ratio_delta": _f(features.taker_buy_ratio_delta if features else None),
             # Engineered: time-of-day (Group 2)
             "hour_of_day": _f(now.hour),
             "day_of_week": _f(now.weekday()),
@@ -1109,6 +1115,9 @@ class AutoShortService:
                 btc_adx_1h=getattr(features, 'btc_adx_1h', None) if features else None,
                 btc_atr_pct_1h=getattr(features, 'btc_atr_pct_1h', None) if features else None,
                 recent_wr_20=getattr(features, 'recent_wr_20', None) if features else None,
+                taker_buy_ratio_60s=getattr(features, 'taker_buy_ratio_60s', None) if features else None,
+                taker_buy_ratio_5s=getattr(features, 'taker_buy_ratio_5s', None) if features else None,
+                taker_buy_ratio_delta=getattr(features, 'taker_buy_ratio_delta', None) if features else None,
                 adverse_move_pct=adverse_move_pct,
             )
 
@@ -1374,6 +1383,9 @@ class AutoShortService:
                 btc_adx_1h=features.btc_adx_1h if features else None,
                 btc_atr_pct_1h=features.btc_atr_pct_1h if features else None,
                 recent_wr_20=features.recent_wr_20 if features else None,
+                taker_buy_ratio_60s=features.taker_buy_ratio_60s if features else None,
+                taker_buy_ratio_5s=features.taker_buy_ratio_5s if features else None,
+                taker_buy_ratio_delta=features.taker_buy_ratio_delta if features else None,
                 adverse_move_pct=adverse_move_pct,
             )
 
@@ -1794,6 +1806,9 @@ class AutoShortService:
                     btc_adx_1h=features.btc_adx_1h if features else None,
                     btc_atr_pct_1h=features.btc_atr_pct_1h if features else None,
                     recent_wr_20=features.recent_wr_20 if features else None,
+                    taker_buy_ratio_60s=features.taker_buy_ratio_60s if features else None,
+                    taker_buy_ratio_5s=features.taker_buy_ratio_5s if features else None,
+                    taker_buy_ratio_delta=features.taker_buy_ratio_delta if features else None,
                 )
 
                 async with AsyncSessionLocal() as session:

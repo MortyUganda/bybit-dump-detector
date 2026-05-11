@@ -89,6 +89,8 @@ COMMON_FEATURES = [
     "recent_wr_20",
     # Adverse move
     "adverse_move_pct",
+    # Taker buy ratio (CVD-proxy)
+    "taker_buy_ratio_60s", "taker_buy_ratio_5s", "taker_buy_ratio_delta",
 ]
 
 TARGET = "label"
