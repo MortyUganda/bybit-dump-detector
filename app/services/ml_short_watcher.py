@@ -1,10 +1,13 @@
 """
 ML-Short Watcher — фоновый процесс мониторинга paper-позиций.
 
-Каждые 5 секунд проверяет открытые ml_short_positions:
-- TP hit: current_price ≤ entry_price * (1 - tp_pct/100)
-- SL hit: current_price ≥ entry_price * (1 + sl_pct/100)
-- Timeout: NOW() - entry_ts ≥ timeout_hours
+tp_pct/sl_pct хранятся как PnL на марже (например 10%/10% при LEVERAGE=10x).
+Движение цены = tp_pct / leverage (1% при 10%/10x).
+
+Каждые N секунд проверяет открытые ml_short_positions:
+- TP hit: current_price ≤ entry_price * (1 - tp_pct/leverage/100)
+- SL hit: current_price ≥ entry_price * (1 + sl_pct/leverage/100)
+- Timeout: NOW() - entry_ts ≥ timeout_hours → PnL = price_move_pct * leverage
 
 При закрытии с убытком — инкремент cooldown.
 """
@@ -23,6 +26,9 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
+
+# Плечо ml-short paper-торговли (должно совпадать с ml_short_service.LEVERAGE)
+LEVERAGE = 10
 
 WATCHER_INTERVAL = 5  # секунд
 
@@ -140,12 +146,15 @@ class MlShortWatcher:
                 sl_pct = float(pos.sl_pct)
                 timeout_hours = float(pos.timeout_hours)
 
-                tp_price = entry_price * (1 - tp_pct / 100)
-                sl_price = entry_price * (1 + sl_pct / 100)
+                # tp_pct/sl_pct — это PnL на марже; движение цены = / LEVERAGE
+                tp_move_pct = tp_pct / LEVERAGE
+                sl_move_pct = sl_pct / LEVERAGE
+                tp_price = entry_price * (1 - tp_move_pct / 100)
+                sl_price = entry_price * (1 + sl_move_pct / 100)
 
                 # TP hit (для шорта: цена упала)
                 if current_price <= tp_price:
-                    pnl_pct = tp_pct
+                    pnl_pct = tp_pct  # PnL на марже
                     await self._close_position(
                         pos, current_price, pnl_pct, "tp", now,
                     )
@@ -153,16 +162,17 @@ class MlShortWatcher:
 
                 # SL hit (для шорта: цена выросла)
                 if current_price >= sl_price:
-                    pnl_pct = -sl_pct
+                    pnl_pct = -sl_pct  # PnL на марже
                     await self._close_position(
                         pos, current_price, pnl_pct, "sl", now,
                     )
                     continue
 
-                # Timeout
+                # Timeout: PnL = движение цены × leverage
                 elapsed = now - pos.entry_ts
                 if elapsed >= timedelta(hours=timeout_hours):
-                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                    price_move_pct = ((entry_price - current_price) / entry_price) * 100
+                    pnl_pct = price_move_pct * LEVERAGE
                     await self._close_position(
                         pos, current_price, pnl_pct, "timeout", now,
                     )

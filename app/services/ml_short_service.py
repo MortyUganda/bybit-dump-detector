@@ -63,9 +63,11 @@ ML_DECISION_FEATURES = [
     "symbol_avg_pnl_5",
 ]
 
-# TP/SL по спеке — 10%/10%, не менять
-TP_PCT = 10.0
-SL_PCT = 10.0
+# TP/SL по спеке — 10%/10% PnL на марже (не менять).
+# При LEVERAGE=10x это эквивалентно ±1% движения цены.
+LEVERAGE = 10
+TP_PCT = 10.0  # в % PnL на марже
+SL_PCT = 10.0  # в % PnL на марже
 
 
 class MlShortService:
@@ -747,8 +749,10 @@ class MlShortService:
             if not user_ids:
                 user_ids = settings.allowed_user_ids
 
-            tp_price = entry_price * (1 - TP_PCT / 100)
-            sl_price = entry_price * (1 + SL_PCT / 100)
+            tp_move_pct = TP_PCT / LEVERAGE  # движение цены в % (1% при 10x)
+            sl_move_pct = SL_PCT / LEVERAGE
+            tp_price = entry_price * (1 - tp_move_pct / 100)
+            sl_price = entry_price * (1 + sl_move_pct / 100)
 
             text = (
                 f"🤖 <b>ML-Short: позиция открыта</b>\n\n"
@@ -756,8 +760,8 @@ class MlShortService:
                 f"💰 Вход: <b>${entry_price:.6g}</b>\n"
                 f"🧠 ML proba: <b>{proba:.2%}</b>\n"
                 f"📊 Score: <b>{score:.0f}</b>\n"
-                f"🎯 TP: ${tp_price:.6g} (-{TP_PCT}%)\n"
-                f"🛑 SL: ${sl_price:.6g} (+{SL_PCT}%)\n"
+                f"🎯 TP: ${tp_price:.6g} (-{tp_move_pct:.2f}% цены / +{TP_PCT:.0f}% PnL @ {LEVERAGE}x)\n"
+                f"🛑 SL: ${sl_price:.6g} (+{sl_move_pct:.2f}% цены / -{SL_PCT:.0f}% PnL @ {LEVERAGE}x)\n"
                 f"📎 Режим: Paper (Real disabled)"
             )
             for user_id in user_ids:
