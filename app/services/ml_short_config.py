@@ -31,7 +31,8 @@ def _normalize_ml_short_config(config: dict[str, Any] | None) -> dict[str, Any]:
     merged.update(config or {})
 
     merged["enabled"] = bool(merged.get("enabled", False))
-    merged["proba_threshold"] = max(0.30, min(0.95, float(merged.get("proba_threshold", 0.60))))
+    # Диапазон 0.60..1.00 (шаг 0.05 в UI). 1.00 = фактическая пауза (ни одна proba не ≥1.0).
+    merged["proba_threshold"] = max(0.30, min(1.00, float(merged.get("proba_threshold", 0.60))))
     merged["min_score_to_enter"] = max(0, min(100, int(merged.get("min_score_to_enter", 45))))
     # 0 = «без лимита». Верхняя граница 999 — фактический потолок (никогда не достижим).
     merged["max_concurrent_positions"] = max(0, min(999, int(merged.get("max_concurrent_positions", 5))))

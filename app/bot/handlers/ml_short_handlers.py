@@ -104,10 +104,13 @@ def ml_short_active_keyboard() -> InlineKeyboardMarkup:
 
 def ml_short_threshold_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for val in [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]:
+    # Выбор порога proba: 0.60 .. 1.00 с шагом 0.05 (9 значений).
+    # round() убирает погрешность float (0.6+0.05*n).
+    values = [round(0.60 + 0.05 * i, 2) for i in range(9)]
+    for val in values:
         builder.button(text=f"{val:.2f}", callback_data=f"ml_short:val:threshold:{val}")
     builder.button(text="⬅️ Назад", callback_data="ml_short:settings")
-    builder.adjust(4, 3, 1)
+    builder.adjust(5, 4, 1)
     return builder.as_markup()
 
 
