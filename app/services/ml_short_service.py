@@ -61,9 +61,11 @@ ML_DECISION_FEATURES = [
     "symbol_avg_pnl_5",
 ]
 
-# TP/SL по спеке — 10%/10%, не менять
-TP_PCT = 10.0
-SL_PCT = 10.0
+# TP/SL задаются как ДВИЖЕНИЕ ЦЕНЫ в процентах (как у авто-шортов).
+# Реальный P&L = движение цены × LEVERAGE. Напр. TP -1% цены при 10x = +10% P&L.
+TP_PCT = 1.0
+SL_PCT = 1.0
+LEVERAGE = 10
 
 
 class MlShortService:
@@ -747,6 +749,8 @@ class MlShortService:
 
             tp_price = entry_price * (1 - TP_PCT / 100)
             sl_price = entry_price * (1 + SL_PCT / 100)
+            tp_pnl = TP_PCT * LEVERAGE
+            sl_pnl = SL_PCT * LEVERAGE
 
             text = (
                 f"🤖 <b>ML-Short: позиция открыта</b>\n\n"
@@ -754,8 +758,9 @@ class MlShortService:
                 f"💰 Вход: <b>${entry_price:.6g}</b>\n"
                 f"🧠 ML proba: <b>{proba:.2%}</b>\n"
                 f"📊 Score: <b>{score:.0f}</b>\n"
-                f"🎯 TP: ${tp_price:.6g} (-{TP_PCT}%)\n"
-                f"🛑 SL: ${sl_price:.6g} (+{SL_PCT}%)\n"
+                f"⚖️ Плечо: <b>{LEVERAGE}x</b>\n"
+                f"🎯 TP: ${tp_price:.6g} (-{TP_PCT:g}% = +{tp_pnl:.0f}% P&L)\n"
+                f"🛑 SL: ${sl_price:.6g} (+{SL_PCT:g}% = -{sl_pnl:.0f}% P&L)\n"
                 f"📎 Режим: Paper (Real disabled)"
             )
             for user_id in user_ids:

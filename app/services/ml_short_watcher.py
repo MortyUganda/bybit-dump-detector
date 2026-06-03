@@ -19,6 +19,7 @@ import redis.asyncio as aioredis
 
 from app.config import get_settings
 from app.services.ml_short_config import get_ml_short_config
+from app.services.ml_short_service import LEVERAGE
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -143,9 +144,12 @@ class MlShortWatcher:
                 tp_price = entry_price * (1 - tp_pct / 100)
                 sl_price = entry_price * (1 + sl_pct / 100)
 
+                # P&L = движение цены × плечо (как у авто-шортов).
+                # tp_pct/sl_pct в БД — это ДВИЖЕНИЕ ЦЕНЫ в %, не P&L.
+
                 # TP hit (для шорта: цена упала)
                 if current_price <= tp_price:
-                    pnl_pct = tp_pct
+                    pnl_pct = tp_pct * LEVERAGE
                     await self._close_position(
                         pos, current_price, pnl_pct, "tp", now,
                     )
@@ -153,7 +157,7 @@ class MlShortWatcher:
 
                 # SL hit (для шорта: цена выросла)
                 if current_price >= sl_price:
-                    pnl_pct = -sl_pct
+                    pnl_pct = -sl_pct * LEVERAGE
                     await self._close_position(
                         pos, current_price, pnl_pct, "sl", now,
                     )
@@ -162,7 +166,8 @@ class MlShortWatcher:
                 # Timeout
                 elapsed = now - pos.entry_ts
                 if elapsed >= timedelta(hours=timeout_hours):
-                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                    price_move_pct = ((entry_price - current_price) / entry_price) * 100
+                    pnl_pct = price_move_pct * LEVERAGE
                     await self._close_position(
                         pos, current_price, pnl_pct, "timeout", now,
                     )
@@ -354,6 +359,7 @@ class MlShortWatcher:
                 f"📌 #{pos.id} <b>{pos.symbol}</b>\n"
                 f"💰 Вход: <b>${float(pos.entry_price):.6g}</b>\n"
                 f"💹 Выход: <b>${exit_price:.6g}</b>\n"
+                f"⚖️ Плечо: <b>{LEVERAGE}x</b>\n"
                 f"{pnl_emoji} PnL: <b>{pnl_pct:+.2f}%</b>\n"
                 f"📋 Причина: {reason_text}\n"
                 f"🧠 ML proba: <b>{float(pos.ml_proba):.2%}</b>"
@@ -362,6 +368,7 @@ class MlShortWatcher:
                 f"📌 #{pos.id} <b>{pos.symbol}</b>\n"
                 f"💰 Вход: <b>${float(pos.entry_price):.6g}</b>\n"
                 f"💹 Выход: <b>${exit_price:.6g}</b>\n"
+                f"⚖️ Плечо: <b>{LEVERAGE}x</b>\n"
                 f"{pnl_emoji} PnL: <b>{pnl_pct:+.2f}%</b>\n"
                 f"📋 Причина: {reason_text}"
             )
