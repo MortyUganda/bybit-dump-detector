@@ -131,7 +131,12 @@ class BybitRestClient:
         )
         raw = data["result"]["list"]
         # Bybit returns: [startTime, open, high, low, close, volume, turnover]
-        return [
+        # ВАЖНО: Bybit V5 отдаёт свечи в порядке от НОВЫХ к СТАРЫМ (newest first).
+        # Нормализуем порядок по возрастанию ts (oldest -> newest), чтобы
+        # candles[-1] всегда была самой свежей свечой. Без этого расчёты,
+        # опирающиеся на candles[-2]/candles[-3] (напр. MarketContext._calc_change),
+        # брали старые свечи и давали инвертированный знак (баг btc_change_24h).
+        candles = [
             {
                 "ts": int(row[0]),
                 "open": float(row[1]),
@@ -143,6 +148,8 @@ class BybitRestClient:
             }
             for row in raw
         ]
+        candles.sort(key=lambda c: c["ts"])
+        return candles
 
     # ── Orderbook ─────────────────────────────────────────────────
 

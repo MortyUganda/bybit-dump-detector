@@ -40,25 +40,25 @@ class MarketContext:
         if now - self._last_update < 60:
             return
         try:
-            candles_15m, candles_1h, candles_4h, candles_24h = await asyncio.gather(
+            # СКОЛЬЗЯЩИЕ ОКНА: берём 15m-свечи и часовые свечи с запасом и
+            # сравниваем ТЕКУЩУЮ цену (candles[-1]) с ценой N периодов назад.
+            # Истинный 24h-отрезок = текущая цена против цены 24 часа назад.
+            # Свечи приходят уже отсортированными по возрастанию ts (см. rest_client.get_klines).
+            candles_15m, candles_1h = await asyncio.gather(
                 self._rest.get_klines(
-                    "BTCUSDT", interval="15", limit=4, category="linear",
+                    "BTCUSDT", interval="15", limit=8, category="linear",
                 ),
                 self._rest.get_klines(
-                    "BTCUSDT", interval="60", limit=20, category="linear",
-                ),
-                self._rest.get_klines(
-                    "BTCUSDT", interval="240", limit=4, category="linear",
-                ),
-                self._rest.get_klines(
-                    "BTCUSDT", interval="D", limit=4, category="linear",
+                    "BTCUSDT", interval="60", limit=30, category="linear",
                 ),
             )
 
-            self._btc_change_15m = self._calc_change(candles_15m)
-            self._btc_change_1h = self._calc_change(candles_1h)
-            self._btc_change_4h = self._calc_change(candles_4h)
-            self._btc_change_24h = self._calc_change(candles_24h)
+            # 15m: текущая цена vs 1 свеча (15 минут) назад
+            self._btc_change_15m = self._calc_change(candles_15m, periods_back=1)
+            # 1h / 4h / 24h — на часовых свечах, скользящие окна
+            self._btc_change_1h = self._calc_change(candles_1h, periods_back=1)
+            self._btc_change_4h = self._calc_change(candles_1h, periods_back=4)
+            self._btc_change_24h = self._calc_change(candles_1h, periods_back=24)
 
             # ADX и ATR на 1h свечах (14 периодов)
             if len(candles_1h) >= 16:
@@ -70,13 +70,18 @@ class MarketContext:
             logger.warning("BTC context refresh failed", error=str(e))
 
     @staticmethod
-    def _calc_change(candles: list) -> float:
-        """Calculate % change from two most recent completed candles."""
-        if len(candles) >= 3:
-            prev_close = float(candles[-3]["close"])
-            curr_close = float(candles[-2]["close"])
-            if prev_close > 0:
-                return (curr_close - prev_close) / prev_close * 100
+    def _calc_change(candles: list, periods_back: int = 1) -> float:
+        """Скользящее % изменение: текущая цена vs цена periods_back свечей назад.
+
+        candles отсортированы по возрастанию ts, candles[-1] — самая свежая.
+        Сравниваем close последней свечи (текущая цена) с close свечи periods_back назад.
+        """
+        if periods_back < 1 or len(candles) <= periods_back:
+            return 0.0
+        prev_close = float(candles[-1 - periods_back]["close"])
+        curr_close = float(candles[-1]["close"])
+        if prev_close > 0:
+            return (curr_close - prev_close) / prev_close * 100
         return 0.0
 
     @staticmethod
