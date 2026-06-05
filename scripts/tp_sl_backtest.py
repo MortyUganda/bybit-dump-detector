@@ -86,7 +86,17 @@ def main():
     ap.add_argument("--lev", type=float, default=10.0)
     args = ap.parse_args()
 
-    kl = pd.read_parquet(args.klines) if args.klines.endswith(".parquet") else pd.read_csv(args.klines)
+    # устойчивость: если указанный файл не найден, пробуем другое расширение
+    kpath = args.klines
+    if not os.path.exists(kpath):
+        base = kpath.rsplit(".", 1)[0]
+        for alt in (base + ".csv", base + ".parquet"):
+            if os.path.exists(alt):
+                print(f"(файл {kpath} не найден, использую {alt})")
+                kpath = alt; break
+        else:
+            print(f"ОШИБКА: не найден файл свечей ({args.klines}). Сначала запусти fetch_minute_klines.py"); sys.exit(1)
+    kl = pd.read_parquet(kpath) if kpath.endswith(".parquet") else pd.read_csv(kpath)
     sig = pd.read_csv(args.signals)
     print(f"свечей: {len(kl)}  сигналов с свечами: {kl['signal_id'].nunique()}")
 
