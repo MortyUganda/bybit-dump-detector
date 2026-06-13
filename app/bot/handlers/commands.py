@@ -84,6 +84,7 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(text="🤖 ML-shorts"),
+                KeyboardButton(text="💵 Real-shorts"),
             ],
             [
                 KeyboardButton(text="📊 Статистика"),

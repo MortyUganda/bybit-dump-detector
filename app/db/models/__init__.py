@@ -10,6 +10,7 @@ from app.db.models.auto_short import AutoShort  # ← новая таблица
 from app.db.models.canceled_signal import CanceledSignal
 from app.db.models.all_opened_signal import AllOpenedSignal
 from app.db.models.ml_short import MlShortSignal, MlShortPosition, MlShortCooldown
+from app.db.models.real_short import RealShortPosition, RealShortOrder
 
 
 __all__ = [
@@ -28,4 +29,6 @@ __all__ = [
     "MlShortSignal",
     "MlShortPosition",
     "MlShortCooldown",
+    "RealShortPosition",
+    "RealShortOrder",
 ]

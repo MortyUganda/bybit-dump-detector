@@ -8,6 +8,7 @@ from app.bot.handlers.nav import router as nav_router
 from app.bot.handlers.strategy import router as strategy_router
 from app.bot.handlers.auto_shorts import router as auto_shorts_router
 from app.bot.handlers.ml_short_handlers import router as ml_short_router
+from app.bot.handlers.real_short_handlers import router as real_short_router
 
 __all__ = [
     "commands_router",
@@ -20,4 +21,5 @@ __all__ = [
     "strategy_router",
     "auto_shorts_router",
     "ml_short_router",
+    "real_short_router",
 ]
