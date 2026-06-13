@@ -76,6 +76,7 @@ async def run_analyzer() -> None:
     from app.services.auto_short_service import AutoShortService
     from app.services.ingestion import IngestionService
     from app.services.ml_short_service import MlShortService
+    from app.services.real_short_service import RealShortService
     from app.services.monitor_service import MonitorService
     from app.services.symbol_stats_updater import SymbolStatsUpdater
 
@@ -100,10 +101,19 @@ async def run_analyzer() -> None:
     )
     await auto_short.restore_active_trades()
 
+    # Real-shorts: исполняет реальные ордера зеркально к ml_short (open-хук).
+    # Безопасно по умолчанию — внутри гейт real_enabled=False.
+    real_short = RealShortService(
+        redis=redis_client,
+        bot=bot,
+        rest_client=rest,
+    )
+
     ml_short = MlShortService(
         redis=redis_client,
         bot=bot,
         rest_client=rest,
+        real_short_service=real_short,
     )
 
     monitor = MonitorService(redis=redis_client, bot=bot)

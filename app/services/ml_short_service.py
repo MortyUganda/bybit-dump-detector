@@ -76,10 +76,13 @@ class MlShortService:
         redis: aioredis.Redis,
         bot=None,
         rest_client=None,
+        real_short_service=None,
     ) -> None:
         self._redis = redis
         self._bot = bot
         self._rest_client = rest_client
+        # Real-shorts: исполняет реальный шорт зеркально (опц., None = выключено)
+        self._real_short_service = real_short_service
         self._price_cache: dict[str, float] = {}
         # ML decision model — lazy с кэшем
         self._ml_model: Any = None
@@ -523,6 +526,19 @@ class MlShortService:
 
         # Уведомление в TG
         await self._notify_opened(symbol, entry_price, proba, risk_score.score, position_id)
+
+        # Real-shorts: зеркально открыть реальную позицию (исполнение, не решение).
+        # Не дублируем логику решения — Real-shorts только исполняет то, что решил ML.
+        if self._real_short_service is not None:
+            try:
+                await self._real_short_service.on_ml_open(
+                    ml_signal_id=signal_id,
+                    ml_position_id=position_id,
+                    symbol=symbol,
+                    entry_price=entry_price,
+                )
+            except Exception as exc:
+                logger.error("ML-short: real hook (open) ошибка", error=str(exc))
 
         # Кросс-ссылка: обновить auto_short_decision через 60с
         asyncio.create_task(self._update_auto_short_crossref(signal_id, symbol, now))

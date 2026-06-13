@@ -39,10 +39,15 @@ class Settings(BaseSettings):
     bybit_api_key: str = ""
     bybit_api_secret: str = ""
     bybit_network: str = "mainnet"  # mainnet | testnet
+    # Явный override testnet. None → режим берётся из bybit_network.
+    # Безопасный дефолт реальной торговли решается в runtime-настройке real_short.
+    bybit_testnet_override: Optional[bool] = Field(default=None, alias="bybit_testnet")
 
     @computed_field
     @property
     def bybit_testnet(self) -> bool:
+        if self.bybit_testnet_override is not None:
+            return self.bybit_testnet_override
         return self.bybit_network == "testnet"
 
     # ── PostgreSQL ────────────────────────────────────────────────

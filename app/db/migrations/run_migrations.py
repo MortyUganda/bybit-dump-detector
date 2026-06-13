@@ -30,6 +30,11 @@ async def create_tables_direct() -> None:
     await ml_short_migrate()
     print("ML-short tables migration applied.")
 
+    # Real-shorts таблицы (реальная торговля)
+    from app.db.migrations.create_real_short_tables import run_migration as real_short_migrate
+    await real_short_migrate()
+    print("Real-short tables migration applied.")
+
 
 if __name__ == "__main__":
     asyncio.run(create_tables_direct())

@@ -19,7 +19,9 @@ from aiogram.enums import ParseMode
 from app.bybit.rest_client import BybitRestClient
 from app.config import get_settings
 from app.db.migrations.create_ml_short_tables import run_migration
+from app.db.migrations.create_real_short_tables import run_migration as run_real_short_migration
 from app.services.ml_short_watcher import MlShortWatcher
+from app.services.real_short_service import RealShortService
 from app.utils.logging import get_logger, setup_logging
 
 settings = get_settings()
@@ -41,6 +43,7 @@ async def main() -> None:
     # Применить миграции
     try:
         await run_migration()
+        await run_real_short_migration()
         logger.info("ML-Short: миграции применены")
     except Exception as exc:
         logger.warning(
@@ -56,10 +59,18 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
+    # Real-shorts: закрывает реальные позиции зеркально к ml_short (close-хук).
+    real_short = RealShortService(
+        redis=redis_client,
+        bot=bot,
+        rest_client=rest,
+    )
+
     watcher = MlShortWatcher(
         redis=redis_client,
         bot=bot,
         rest_client=rest,
+        real_short_service=real_short,
     )
     await watcher.start()
 

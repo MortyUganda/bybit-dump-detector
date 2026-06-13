@@ -36,10 +36,13 @@ class MlShortWatcher:
         redis: aioredis.Redis,
         bot=None,
         rest_client=None,
+        real_short_service=None,
     ) -> None:
         self._redis = redis
         self._bot = bot
         self._rest_client = rest_client
+        # Real-shorts: закрывает реальную позицию зеркально (опц., None = выключено)
+        self._real_short_service = real_short_service
         self._running = False
         self._task: asyncio.Task | None = None
         self._price_cache: dict[str, float] = {}
@@ -229,6 +232,17 @@ class MlShortWatcher:
             # При убытке — обновить cooldown
             if pnl_pct < 0:
                 await self._update_cooldown(pos.symbol)
+
+            # Real-shorts: зеркально закрыть реальную позицию (reduce-only маркет).
+            if self._real_short_service is not None:
+                try:
+                    await self._real_short_service.on_ml_close(
+                        ml_position_id=pos.id,
+                        exit_price=exit_price,
+                        close_reason=close_reason,
+                    )
+                except Exception as exc:
+                    logger.error("ML-Short: real hook (close) ошибка", error=str(exc))
 
             # TG уведомление
             await self._notify_closed(pos, exit_price, pnl_pct, close_reason)
